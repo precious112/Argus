@@ -1,0 +1,16 @@
+# Development overrides - use with: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  argus:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./packages/agent/src:/app/src
+      - argus_data:/data
+    environment:
+      - ARGUS_DEBUG=true
+    ports:
+      - "7600:7600"
+
+  web:
+    profiles: []  # Enable web service in dev

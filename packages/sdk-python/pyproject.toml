@@ -1,0 +1,26 @@
+[project]
+name = "argus-python"
+version = "0.1.0"
+description = "Argus Python SDK - Instrumentation for AI-native observability"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+fastapi = ["fastapi"]
+django = ["django"]
+flask = ["flask"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/argus"]

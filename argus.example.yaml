@@ -1,0 +1,43 @@
+# Argus Configuration
+# Copy this file to argus.yaml and customize as needed.
+# Environment variables override these settings (prefix: ARGUS_).
+
+server:
+  host: "0.0.0.0"
+  port: 7600
+
+llm:
+  provider: "openai"          # openai, anthropic, gemini
+  model: "gpt-4o"
+  api_key: ""                 # Or set ARGUS_LLM__API_KEY env var
+  temperature: 0.1
+  max_tokens: 4096
+
+ai_budget:
+  daily_token_limit: 500000
+  hourly_token_limit: 100000
+  review_frequency: "6h"
+  digest_frequency: "24h"
+  priority_reserve: 0.3
+
+storage:
+  data_dir: "/data"
+
+collector:
+  metrics_interval: 15        # seconds
+  process_interval: 30        # seconds
+  log_paths:
+    - "/var/log/syslog"
+    - "/var/log/auth.log"
+
+security:
+  secret_key: "change-me-on-first-run"
+  session_expiry_hours: 24
+  max_login_attempts: 10
+  lockout_minutes: 15
+
+alerting:
+  webhook_urls: []
+  email_enabled: false
+
+debug: false

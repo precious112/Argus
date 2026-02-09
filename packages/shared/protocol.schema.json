@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Argus WebSocket Protocol",
+  "description": "Message schemas for the Argus WebSocket chat protocol",
+  "definitions": {
+    "ClientMessage": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["user_message", "action_response", "cancel", "ping"]
+        },
+        "id": { "type": "string" },
+        "data": { "type": "object" }
+      }
+    },
+    "ServerMessage": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "connected",
+            "system_status",
+            "thinking_start",
+            "thinking_end",
+            "tool_call",
+            "tool_result",
+            "assistant_message_start",
+            "assistant_message_delta",
+            "assistant_message_end",
+            "action_request",
+            "action_executing",
+            "action_complete",
+            "alert",
+            "error",
+            "pong"
+          ]
+        },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "data": { "type": "object" }
+      }
+    },
+    "IngestBatch": {
+      "type": "object",
+      "required": ["events"],
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["log", "metric", "trace", "exception", "event"]
+              },
+              "timestamp": { "type": "string", "format": "date-time" },
+              "service": { "type": "string" },
+              "data": { "type": "object" }
+            }
+          }
+        },
+        "sdk": { "type": "string" },
+        "service": { "type": "string" }
+      }
+    }
+  }
+}
