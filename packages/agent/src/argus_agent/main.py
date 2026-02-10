@@ -21,10 +21,62 @@ from argus_agent.storage.timeseries import close_timeseries, init_timeseries
 
 logger = logging.getLogger("argus")
 
+# Global references to background services for status queries
+_metrics_collector = None
+_process_monitor = None
+_log_watcher = None
+_scheduler = None
+_security_scanner = None
+_alert_engine = None
+_token_budget = None
+_baseline_tracker = None
+_anomaly_detector = None
+_investigator = None
+_action_engine = None
+
+
+def _get_collectors():
+    """Get collector instances (for status endpoint)."""
+    return _metrics_collector, _process_monitor, _log_watcher, _scheduler
+
+
+def _get_security_scanner():
+    """Get the security scanner instance."""
+    return _security_scanner
+
+
+def _get_alert_engine():
+    """Get the alert engine instance."""
+    return _alert_engine
+
+
+def _get_token_budget():
+    """Get the token budget instance."""
+    return _token_budget
+
+
+def _get_baseline_tracker():
+    """Get the baseline tracker instance."""
+    return _baseline_tracker
+
+
+def _get_investigator():
+    """Get the investigator instance."""
+    return _investigator
+
+
+def _get_action_engine():
+    """Get the action engine instance."""
+    return _action_engine
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
+    global _metrics_collector, _process_monitor, _log_watcher, _scheduler
+    global _security_scanner, _alert_engine, _token_budget
+    global _baseline_tracker, _anomaly_detector, _investigator, _action_engine
+
     settings = get_settings()
 
     # Ensure data directory exists
@@ -34,13 +86,165 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db(settings.storage.sqlite_path)
     init_timeseries(settings.storage.duckdb_path)
 
+    # Register all tools
+    _register_all_tools()
+
+    # --- Phase 3: Proactive Intelligence ---
+
+    # 1. Token budget
+    from argus_agent.scheduler.budget import TokenBudget
+
+    _token_budget = TokenBudget(settings.ai_budget)
+
+    # 2. Baseline tracker + anomaly detector
+    from argus_agent.baseline.anomaly import AnomalyDetector
+    from argus_agent.baseline.tracker import BaselineTracker
+
+    _baseline_tracker = BaselineTracker()
+    _anomaly_detector = AnomalyDetector(_baseline_tracker)
+
+    # 3. Investigator
+    from argus_agent.agent.investigator import Investigator
+    from argus_agent.api.ws import manager
+
+    _investigator = Investigator(
+        budget=_token_budget,
+        ws_manager=manager,
+    )
+
+    # 3b. Action engine
+    from argus_agent.actions.engine import ActionEngine
+
+    _action_engine = ActionEngine(ws_manager=manager)
+
+    # 4. Alert engine with channels
+    from argus_agent.alerting.channels import WebhookChannel, WebSocketChannel
+    from argus_agent.alerting.engine import AlertEngine
+    from argus_agent.events.bus import get_event_bus
+
+    _alert_engine = AlertEngine(
+        bus=get_event_bus(),
+        on_investigate=_investigator.investigate_event,
+    )
+    channels = [WebSocketChannel(manager)]
+    if settings.alerting.webhook_urls:
+        channels.append(WebhookChannel(settings.alerting.webhook_urls))
+    if settings.alerting.email_enabled:
+        from argus_agent.alerting.channels import EmailChannel
+
+        channels.append(EmailChannel(
+            smtp_host=settings.alerting.email_smtp_host,
+            smtp_port=settings.alerting.email_smtp_port,
+            from_addr=settings.alerting.email_from,
+            to_addrs=settings.alerting.email_to,
+        ))
+    _alert_engine.set_channels(channels)
+    await _alert_engine.start()
+
+    # Start collectors
+    from argus_agent.collectors.log_watcher import LogWatcher
+    from argus_agent.collectors.process_monitor import ProcessMonitor
+    from argus_agent.collectors.system_metrics import SystemMetricsCollector
+
+    _metrics_collector = SystemMetricsCollector()
+    _metrics_collector.anomaly_detector = _anomaly_detector
+    _process_monitor = ProcessMonitor()
+    _log_watcher = LogWatcher()
+
+    await _metrics_collector.start()
+    await _process_monitor.start()
+    await _log_watcher.start()
+
+    # 5. Security scanner
+    from argus_agent.collectors.security_scanner import SecurityScanner
+
+    _security_scanner = SecurityScanner()
+    await _security_scanner.start()
+
+    # Start scheduler with periodic tasks
+    from argus_agent.scheduler.scheduler import Scheduler
+    from argus_agent.scheduler.tasks import (
+        quick_health_check,
+        quick_security_check,
+        trend_analysis,
+    )
+
+    _scheduler = Scheduler()
+    _scheduler.register("health_check", quick_health_check, interval_seconds=300)  # 5 min
+    _scheduler.register("trend_analysis", trend_analysis, interval_seconds=1800)  # 30 min
+    _scheduler.register(
+        "baseline_update",
+        _make_baseline_update_task(_baseline_tracker),
+        interval_seconds=21600,  # 6h
+    )
+    _scheduler.register(
+        "security_check",
+        quick_security_check,
+        interval_seconds=300,  # 5 min
+    )
+    _scheduler.register(
+        "ai_periodic_review",
+        _investigator.periodic_review,
+        interval_seconds=21600,  # 6h
+    )
+    _scheduler.register(
+        "ai_daily_digest",
+        _investigator.daily_digest,
+        interval_seconds=86400,  # 24h
+    )
+    await _scheduler.start()
+
+    # Collect initial system snapshot for agent context
+    from argus_agent.collectors.system_metrics import update_system_snapshot
+
+    await update_system_snapshot()
+
     logger.info("Argus agent server started on %s:%d", settings.server.host, settings.server.port)
     yield
 
-    # Shutdown
+    # Shutdown in reverse order
+    if _scheduler:
+        await _scheduler.stop()
+    if _security_scanner:
+        await _security_scanner.stop()
+    if _log_watcher:
+        await _log_watcher.stop()
+    if _process_monitor:
+        await _process_monitor.stop()
+    if _metrics_collector:
+        await _metrics_collector.stop()
+
     await close_db()
     close_timeseries()
     logger.info("Argus agent server stopped")
+
+
+def _make_baseline_update_task(tracker):
+    """Create a baseline update coroutine for the scheduler."""
+    async def _update():
+        tracker.update_baselines()
+    return _update
+
+
+def _register_all_tools() -> None:
+    """Register all agent tools."""
+    from argus_agent.tools.base import get_all_tools
+    from argus_agent.tools.command import register_command_tools
+    from argus_agent.tools.log_search import register_log_tools
+    from argus_agent.tools.metrics import register_metrics_tools
+    from argus_agent.tools.network import register_network_tools
+    from argus_agent.tools.process import register_process_tools
+    from argus_agent.tools.sdk_events import register_sdk_tools
+    from argus_agent.tools.security import register_security_tools
+
+    if not get_all_tools():
+        register_log_tools()
+        register_metrics_tools()
+        register_process_tools()
+        register_network_tools()
+        register_security_tools()
+        register_command_tools()
+        register_sdk_tools()
 
 
 def create_app() -> FastAPI:
@@ -54,10 +258,15 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS for web UI dev server
+    # CORS for web UI
+    import os
+
+    cors_env = os.environ.get("ARGUS_CORS_ORIGINS", "")
+    origins = [o.strip() for o in cors_env.split(",") if o.strip()] if cors_env else []
+    origins += ["http://localhost:3000", "http://127.0.0.1:3000"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_origins=origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

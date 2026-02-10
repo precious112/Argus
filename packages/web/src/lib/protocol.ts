@@ -33,6 +33,10 @@ export type ServerMessageType =
   | "action_executing"
   | "action_complete"
   | "alert"
+  | "investigation_start"
+  | "investigation_update"
+  | "investigation_end"
+  | "budget_update"
   | "error"
   | "pong";
 
@@ -60,4 +64,35 @@ export interface ActionRequest {
   risk_level: "READ_ONLY" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   reversible: boolean;
   requires_password: boolean;
+}
+
+export interface AlertData {
+  id: string;
+  severity: string;
+  title: string;
+  summary: string;
+  source: string;
+  timestamp: string;
+  investigation_thread_id?: string;
+}
+
+export interface BudgetStatus {
+  hourly_used: number;
+  hourly_limit: number;
+  hourly_pct: number;
+  daily_used: number;
+  daily_limit: number;
+  daily_pct: number;
+  total_tokens: number;
+  total_requests: number;
+}
+
+export interface InvestigationData {
+  investigation_id: string;
+  trigger?: string;
+  severity?: string;
+  content?: string;
+  summary?: string;
+  tokens_used?: number;
+  type?: string;
 }

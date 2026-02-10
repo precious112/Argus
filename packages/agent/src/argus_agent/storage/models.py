@@ -87,6 +87,21 @@ class AlertHistory(Base):
     investigation_id: Mapped[str] = mapped_column(String(36), default="")
 
 
+class Investigation(Base):
+    """Record of an autonomous AI investigation."""
+
+    __tablename__ = "investigations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    trigger: Mapped[str] = mapped_column(Text, default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    tokens_used: Mapped[int] = mapped_column(Integer, default=0)
+    conversation_id: Mapped[str] = mapped_column(String(36), default="")
+    alert_id: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class AppConfig(Base):
     """Key-value configuration store."""
 

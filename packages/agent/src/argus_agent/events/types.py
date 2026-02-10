@@ -23,6 +23,46 @@ class EventSource(StrEnum):
     SCHEDULER = "scheduler"
 
 
+class EventType(StrEnum):
+    """Well-known event types emitted by collectors."""
+
+    # System metrics events
+    METRIC_COLLECTED = "metric_collected"
+    CPU_HIGH = "cpu_high"
+    MEMORY_HIGH = "memory_high"
+    DISK_HIGH = "disk_high"
+    LOAD_HIGH = "load_high"
+    RESOURCE_CRITICAL = "resource_critical"
+    RAPID_DEGRADATION = "rapid_degradation"
+
+    # Process events
+    PROCESS_SNAPSHOT = "process_snapshot"
+    PROCESS_CRASHED = "process_crashed"
+    PROCESS_OOM_KILLED = "process_oom_killed"
+    PROCESS_RESTART_LOOP = "process_restart_loop"
+    NEW_PROCESS = "new_process"
+
+    # Log events
+    LOG_LINE = "log_line"
+    ERROR_BURST = "error_burst"
+    NEW_ERROR_PATTERN = "new_error_pattern"
+
+    # Security events
+    BRUTE_FORCE = "brute_force"
+    NEW_OPEN_PORT = "new_open_port"
+    SUSPICIOUS_PROCESS = "suspicious_process"
+    NEW_EXECUTABLE = "new_executable"
+    PERMISSION_RISK = "permission_risk"
+    SUSPICIOUS_OUTBOUND = "suspicious_outbound"
+
+    # Anomaly events
+    ANOMALY_DETECTED = "anomaly_detected"
+
+    # Scheduler events
+    HEALTH_CHECK = "health_check"
+    TREND_ANALYSIS = "trend_analysis"
+
+
 @dataclass
 class Event:
     """A system event from any source."""

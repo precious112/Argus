@@ -3,14 +3,33 @@ services:
   argus:
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
     volumes:
       - ./packages/agent/src:/app/src
+      - /var/log:/host/var/log:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
       - argus_data:/data
     environment:
       - ARGUS_DEBUG=true
+    command: ["python", "-m", "uvicorn", "argus_agent.main:app",
+              "--host", "0.0.0.0", "--port", "7600", "--reload", "--reload-dir", "src"]
     ports:
       - "7600:7600"
 
   web:
-    profiles: []  # Enable web service in dev
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./packages/web:/app
+      - web_node_modules:/app/node_modules
+    environment:
+      - NEXT_PUBLIC_AGENT_WS_URL=ws://localhost:7600/api/v1/ws
+      - NEXT_PUBLIC_AGENT_API_URL=http://localhost:7600/api/v1
+
+volumes:
+  argus_data:
+  web_node_modules:

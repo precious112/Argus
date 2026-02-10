@@ -41,6 +41,10 @@ class ServerMessageType(StrEnum):
     ACTION_EXECUTING = "action_executing"
     ACTION_COMPLETE = "action_complete"
     ALERT = "alert"
+    INVESTIGATION_START = "investigation_start"
+    INVESTIGATION_UPDATE = "investigation_update"
+    INVESTIGATION_END = "investigation_end"
+    BUDGET_UPDATE = "budget_update"
     ERROR = "error"
     PONG = "pong"
 

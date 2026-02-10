@@ -2,7 +2,168 @@
 
 from __future__ import annotations
 
-# TODO: Phase 1 - Implement ReAct loop with tool calling and streaming
-# - Capped at 10 tool-call rounds per turn
-# - Streams progress to UI via WebSocket
-# - Powers all three modes: reactive, periodic, event-driven
+import json
+import logging
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
+from typing import Any
+
+from argus_agent.agent.memory import ConversationMemory
+from argus_agent.agent.prompt import build_system_prompt
+from argus_agent.llm.base import LLMProvider
+from argus_agent.tools.base import get_tool, get_tool_definitions
+
+logger = logging.getLogger("argus.agent.loop")
+
+MAX_TOOL_ROUNDS = 10
+
+# Type alias for event callbacks
+EventCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
+
+
+@dataclass
+class AgentResult:
+    """Result of a single agent turn."""
+
+    content: str = ""
+    tool_calls_made: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    rounds: int = 0
+
+
+class AgentLoop:
+    """ReAct reasoning loop that powers all three agent modes.
+
+    The loop:
+    1. Assembles context (system prompt + conversation history)
+    2. Calls the LLM (with streaming)
+    3. If LLM returns tool calls, executes them and loops back
+    4. If LLM returns text, streams it to the user and finishes
+    5. Capped at MAX_TOOL_ROUNDS to prevent runaway cost
+    """
+
+    def __init__(
+        self,
+        provider: LLMProvider,
+        memory: ConversationMemory,
+        on_event: EventCallback | None = None,
+        budget: Any | None = None,
+    ) -> None:
+        self.provider = provider
+        self.memory = memory
+        self._on_event = on_event
+        self._budget = budget  # Optional TokenBudget for background tasks
+
+    async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
+        """Emit an event to the callback (e.g., WebSocket handler)."""
+        if self._on_event:
+            await self._on_event(event_type, data)
+
+    async def run(self, user_message: str) -> AgentResult:
+        """Execute the full ReAct loop for a user message."""
+        # Add user message to memory
+        self.memory.add_user_message(user_message)
+
+        result = AgentResult()
+        system_prompt = build_system_prompt()
+        tool_defs = get_tool_definitions()
+
+        for round_num in range(MAX_TOOL_ROUNDS):
+            result.rounds = round_num + 1
+
+            # Build context
+            messages = self.memory.get_context_messages(system_prompt)
+
+            # Call LLM with streaming
+            await self._emit("thinking_start", {})
+
+            full_content = ""
+            all_tool_calls: list[dict[str, Any]] = []
+
+            async for delta in self.provider.stream(messages, tools=tool_defs or None):
+                # Stream text content to the user
+                if delta.content:
+                    full_content += delta.content
+                    await self._emit("assistant_message_delta", {"content": delta.content})
+
+                # Collect accumulated tool calls from final chunk
+                if delta.tool_calls:
+                    all_tool_calls = delta.tool_calls
+
+                result.prompt_tokens += delta.prompt_tokens
+                result.completion_tokens += delta.completion_tokens
+
+            await self._emit("thinking_end", {})
+
+            # Record token usage in budget if set
+            if self._budget and (result.prompt_tokens or result.completion_tokens):
+                self._budget.record_usage(
+                    result.prompt_tokens, result.completion_tokens, source="agent_loop"
+                )
+
+            # If the LLM wants to call tools
+            if all_tool_calls:
+                # Add assistant message with tool calls to memory
+                self.memory.add_assistant_message(content=full_content, tool_calls=all_tool_calls)
+                result.tool_calls_made += len(all_tool_calls)
+
+                # Execute each tool call
+                for tc in all_tool_calls:
+                    tool_name = tc["function"]["name"]
+                    tool_call_id = tc["id"]
+
+                    try:
+                        args = json.loads(tc["function"]["arguments"])
+                    except json.JSONDecodeError:
+                        args = {}
+
+                    await self._emit(
+                        "tool_call",
+                        {"id": tool_call_id, "name": tool_name, "arguments": args},
+                    )
+
+                    # Execute the tool
+                    tool = get_tool(tool_name)
+                    if tool is None:
+                        tool_result = {"error": f"Unknown tool: {tool_name}"}
+                    else:
+                        try:
+                            tool_result = await tool.execute(**args)
+                        except Exception as e:
+                            logger.exception("Tool execution error: %s", tool_name)
+                            tool_result = {"error": f"Tool execution failed: {e}"}
+
+                    await self._emit(
+                        "tool_result",
+                        {
+                            "id": tool_call_id,
+                            "name": tool_name,
+                            "result": tool_result,
+                            "display_type": tool_result.get("display_type", "json_tree"),
+                        },
+                    )
+
+                    # Add tool result to memory
+                    self.memory.add_tool_result(tool_call_id, tool_name, tool_result)
+
+                # Loop back for next LLM call with tool results
+                continue
+
+            # No tool calls - the LLM is done
+            if full_content:
+                self.memory.add_assistant_message(content=full_content)
+
+            result.content = full_content
+            return result
+
+        # Exhausted max rounds
+        exhaustion_msg = (
+            "I've reached the maximum number of tool calls for this turn. "
+            "Here's what I found so far based on the tools I've used."
+        )
+        if not result.content:
+            result.content = exhaustion_msg
+            await self._emit("assistant_message_delta", {"content": exhaustion_msg})
+        self.memory.add_assistant_message(content=result.content)
+        return result
