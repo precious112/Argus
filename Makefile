@@ -1,4 +1,4 @@
-.PHONY: help dev dev-docker stop install lint type-check test test-agent test-web clean build
+.PHONY: help dev dev-docker stop install lint type-check test test-agent test-web clean build deploy
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -54,6 +54,11 @@ build: ## Build production Docker image
 
 build-web: ## Build web UI
 	cd packages/web && npm run build
+
+# --- Cleanup ---
+
+deploy: ## Deploy with Docker Compose (production)
+	@bash scripts/deploy.sh
 
 # --- Cleanup ---
 

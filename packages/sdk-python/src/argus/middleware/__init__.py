@@ -1,3 +1,3 @@
-"""Framework middleware: FastAPI, Django, Flask."""
+"""Framework middleware: FastAPI, Flask."""
 
-# TODO: Phase 5
+from __future__ import annotations

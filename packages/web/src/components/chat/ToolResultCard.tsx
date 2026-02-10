@@ -1,3 +1,300 @@
-// TODO: Phase 2 - Rich display cards for tool results
-// Supports: log viewer, metrics chart, process table, JSON tree, code block, diff view
-export {};
+"use client";
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+interface ToolResultCardProps {
+  displayType: string;
+  data: any;
+}
+
+export function ToolResultCard({ displayType, data }: ToolResultCardProps) {
+  if (data?.error) {
+    return (
+      <div className="rounded border border-red-800 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+        {data.error}
+      </div>
+    );
+  }
+
+  switch (displayType) {
+    case "log_viewer":
+      return <LogViewer data={data} />;
+    case "metrics_chart":
+      return <MetricsDisplay data={data} />;
+    case "process_table":
+      return <ProcessTable data={data} />;
+    case "code_block":
+      return <CodeBlock data={data} />;
+    default:
+      return <JsonTree data={data} />;
+  }
+}
+
+function LogViewer({ data }: { data: any }) {
+  const lines = data.matches || data.lines || [];
+  const maxDisplay = 20;
+  const displayed = lines.slice(0, maxDisplay);
+
+  return (
+    <div className="rounded border border-[var(--border)] bg-[#0d1117] text-xs">
+      {data.file && (
+        <div className="border-b border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+          {data.file}
+          {data.total_matches != null && (
+            <span className="ml-2">
+              ({data.total_matches} match{data.total_matches !== 1 ? "es" : ""})
+            </span>
+          )}
+        </div>
+      )}
+      <div className="max-h-64 overflow-auto p-1 font-mono">
+        {displayed.map((item: any, i: number) => {
+          // matches have context, lines are direct
+          if (item.context) {
+            return (
+              <div key={i} className="mb-1 last:mb-0">
+                {item.context.map((ctx: any, j: number) => (
+                  <div
+                    key={j}
+                    className={`flex ${ctx.is_match ? "bg-yellow-900/30" : ""}`}
+                  >
+                    <span className="w-12 shrink-0 px-2 text-right text-[var(--muted)]">
+                      {ctx.line_number}
+                    </span>
+                    <span className="whitespace-pre-wrap break-all text-gray-300">
+                      {ctx.text}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            );
+          }
+          return (
+            <div key={i} className="flex">
+              <span className="w-12 shrink-0 px-2 text-right text-[var(--muted)]">
+                {item.line_number}
+              </span>
+              <span className="whitespace-pre-wrap break-all text-gray-300">
+                {item.text}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {lines.length > maxDisplay && (
+        <div className="border-t border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+          ... and {lines.length - maxDisplay} more
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MetricsDisplay({ data }: { data: any }) {
+  // Display current metrics or summary
+  const entries = Object.entries(data).filter(
+    ([k]) => !["display_type", "data_points", "time_range"].includes(k),
+  );
+
+  return (
+    <div className="rounded border border-[var(--border)] bg-[var(--card)] text-xs">
+      {data.time_range && (
+        <div className="border-b border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+          Time range: {data.time_range}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 p-3">
+        {entries.map(([key, value]) => {
+          if (typeof value === "object" && value !== null) {
+            // Nested object (like summary or metrics dict)
+            const obj = value as Record<string, any>;
+            return Object.entries(obj).map(([subKey, subVal]) => (
+              <div key={`${key}.${subKey}`} className="flex justify-between">
+                <span className="text-[var(--muted)]">
+                  {key}.{subKey}
+                </span>
+                <span className="font-mono text-[var(--foreground)]">
+                  {formatMetricValue(subKey, subVal)}
+                </span>
+              </div>
+            ));
+          }
+          return (
+            <div key={key} className="flex justify-between">
+              <span className="text-[var(--muted)]">{key}</span>
+              <span className="font-mono text-[var(--foreground)]">
+                {formatMetricValue(key, value)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {data.data_points?.length > 0 && (
+        <div className="border-t border-[var(--border)] px-3 py-1.5">
+          <Sparkline values={data.data_points.map((p: any) => p.value)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Sparkline({ values }: { values: number[] }) {
+  if (values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const width = 200;
+  const height = 30;
+
+  const points = values
+    .map((v, i) => {
+      const x = (i / (values.length - 1)) * width;
+      const y = height - ((v - min) / range) * height;
+      return `${x},${y}`;
+    })
+    .join(" ");
+
+  return (
+    <svg width={width} height={height} className="text-argus-400">
+      <polyline
+        points={points}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+function ProcessTable({ data }: { data: any }) {
+  const items = data.processes || data.connections || [];
+  const maxDisplay = 20;
+  const displayed = items.slice(0, maxDisplay);
+
+  if (data.connections) {
+    return (
+      <div className="rounded border border-[var(--border)] bg-[var(--card)] text-xs">
+        <div className="max-h-64 overflow-auto">
+          <table className="w-full">
+            <thead className="bg-[var(--background)] text-[var(--muted)]">
+              <tr>
+                <th className="px-2 py-1 text-left">Local</th>
+                <th className="px-2 py-1 text-left">Remote</th>
+                <th className="px-2 py-1 text-left">Status</th>
+                <th className="px-2 py-1 text-left">Process</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayed.map((conn: any, i: number) => (
+                <tr
+                  key={i}
+                  className="border-t border-[var(--border)] text-[var(--foreground)]"
+                >
+                  <td className="px-2 py-1 font-mono">
+                    {conn.local_addr}:{conn.local_port}
+                  </td>
+                  <td className="px-2 py-1 font-mono">
+                    {conn.remote_addr
+                      ? `${conn.remote_addr}:${conn.remote_port}`
+                      : "-"}
+                  </td>
+                  <td className="px-2 py-1">{conn.status}</td>
+                  <td className="px-2 py-1">{conn.process || conn.pid}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {items.length > maxDisplay && (
+          <div className="border-t border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+            Showing {maxDisplay} of {items.length}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded border border-[var(--border)] bg-[var(--card)] text-xs">
+      <div className="max-h-64 overflow-auto">
+        <table className="w-full">
+          <thead className="bg-[var(--background)] text-[var(--muted)]">
+            <tr>
+              <th className="px-2 py-1 text-left">PID</th>
+              <th className="px-2 py-1 text-left">Name</th>
+              <th className="px-2 py-1 text-right">CPU %</th>
+              <th className="px-2 py-1 text-right">MEM %</th>
+              <th className="px-2 py-1 text-left">User</th>
+            </tr>
+          </thead>
+          <tbody>
+            {displayed.map((proc: any, i: number) => (
+              <tr
+                key={i}
+                className="border-t border-[var(--border)] text-[var(--foreground)]"
+              >
+                <td className="px-2 py-1 font-mono">{proc.pid}</td>
+                <td className="px-2 py-1">{proc.name}</td>
+                <td className="px-2 py-1 text-right font-mono">
+                  {(proc.cpu_percent ?? 0).toFixed(1)}
+                </td>
+                <td className="px-2 py-1 text-right font-mono">
+                  {(proc.memory_percent ?? 0).toFixed(1)}
+                </td>
+                <td className="px-2 py-1">{proc.username}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {items.length > maxDisplay && (
+        <div className="border-t border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+          Showing {maxDisplay} of {items.length}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CodeBlock({ data }: { data: any }) {
+  return (
+    <div className="rounded border border-[var(--border)] bg-[#0d1117] text-xs">
+      {data.path && (
+        <div className="border-b border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+          {data.path}
+          {data.total_lines && (
+            <span className="ml-2">
+              (lines {data.start_line}-{data.end_line} of {data.total_lines})
+            </span>
+          )}
+        </div>
+      )}
+      <pre className="max-h-64 overflow-auto p-3 font-mono text-gray-300">
+        {data.content}
+      </pre>
+    </div>
+  );
+}
+
+function JsonTree({ data }: { data: any }) {
+  const text =
+    typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  return (
+    <pre className="max-h-48 overflow-auto rounded border border-[var(--border)] bg-[#0d1117] p-3 font-mono text-xs text-gray-300">
+      {text}
+    </pre>
+  );
+}
+
+function formatMetricValue(key: string, value: any): string {
+  if (typeof value !== "number") return String(value ?? "");
+  if (key.includes("percent")) return `${value.toFixed(1)}%`;
+  if (key.includes("_gb")) return `${value.toFixed(1)} GB`;
+  if (key.includes("bytes_per_sec")) {
+    if (value > 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB/s`;
+    if (value > 1024) return `${(value / 1024).toFixed(1)} KB/s`;
+    return `${value.toFixed(0)} B/s`;
+  }
+  if (key.includes("count")) return String(Math.round(value));
+  return value.toFixed(2);
+}

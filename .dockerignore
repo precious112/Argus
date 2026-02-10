@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+
+# Node
+node_modules
+.next
+.turbo
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# Misc
+*.md
+!packages/agent/README.md
+.env
+.env.*
+!.env.example
+scripts/

@@ -18,27 +18,22 @@ services:
     environment:
       - ARGUS_HOST_ROOT=/host
       - ARGUS_DEBUG=false
-      # LLM provider config (set these in .env or override)
       - ARGUS_LLM__PROVIDER=${ARGUS_LLM_PROVIDER:-openai}
       - ARGUS_LLM__API_KEY=${ARGUS_LLM_API_KEY:-}
       - ARGUS_LLM__MODEL=${ARGUS_LLM_MODEL:-gpt-4o}
+      - ARGUS_CORS_ORIGINS=http://${ARGUS_HOST:-localhost}:3000
     restart: unless-stopped
 
-  # Web UI dev server (development only)
   web:
-    image: node:22-alpine
-    working_dir: /app
-    command: sh -c "npm install && npm run dev"
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_AGENT_WS_URL: ws://${ARGUS_HOST:-localhost}:7600/api/v1/ws
+        NEXT_PUBLIC_AGENT_API_URL: http://${ARGUS_HOST:-localhost}:7600/api/v1
     ports:
       - "3000:3000"
-    volumes:
-      - ./packages/web:/app
-      - web_node_modules:/app/node_modules
-    environment:
-      - NEXT_PUBLIC_AGENT_URL=ws://localhost:7600
-    profiles:
-      - dev
+    restart: unless-stopped
 
 volumes:
   argus_data:
-  web_node_modules:
