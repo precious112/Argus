@@ -166,6 +166,8 @@ class GeminiProvider(LLMProvider):
                 text += part.text
             elif hasattr(part, "function_call"):
                 fc = part.function_call
+                if not fc.name:
+                    continue
                 tool_calls.append({
                     "id": f"gemini_{fc.name}",
                     "type": "function",
@@ -228,6 +230,8 @@ class GeminiProvider(LLMProvider):
                     yield LLMResponse(content=part.text)
                 elif hasattr(part, "function_call"):
                     fc = part.function_call
+                    if not fc.name:
+                        continue
                     tool_calls.append({
                         "id": f"gemini_{fc.name}",
                         "type": "function",

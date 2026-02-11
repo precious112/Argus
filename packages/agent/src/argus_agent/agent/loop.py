@@ -11,11 +11,27 @@ from typing import Any
 from argus_agent.agent.memory import ConversationMemory
 from argus_agent.agent.prompt import build_system_prompt
 from argus_agent.llm.base import LLMProvider
-from argus_agent.tools.base import get_tool, get_tool_definitions
+from argus_agent.tools.base import Tool, get_tool, get_tool_definitions
 
 logger = logging.getLogger("argus.agent.loop")
 
 MAX_TOOL_ROUNDS = 10
+
+
+def _coerce_args(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
+    """Coerce tool arguments to match declared schema types.
+
+    Some LLM providers (e.g. Gemini) may send integers as floats.
+    """
+    props = tool.parameters_schema.get("properties", {})
+    for key, value in args.items():
+        if key not in props:
+            continue
+        declared = props[key].get("type")
+        if declared == "integer" and isinstance(value, float):
+            args[key] = int(value)
+    return args
+
 
 # Type alias for event callbacks
 EventCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
@@ -129,6 +145,7 @@ class AgentLoop:
                         tool_result = {"error": f"Unknown tool: {tool_name}"}
                     else:
                         try:
+                            args = _coerce_args(tool, args)
                             tool_result = await tool.execute(**args)
                         except Exception as e:
                             logger.exception("Tool execution error: %s", tool_name)
