@@ -8,6 +8,7 @@ import type {
   ServerMessage,
 } from "@/lib/protocol";
 import type { Message } from "@/components/chat/MessageBubble";
+import { generateId } from "@/lib/utils";
 
 interface ToolCall {
   id: string;
@@ -78,7 +79,7 @@ export function useChat() {
           return [
             ...prev,
             {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: "assistant" as const,
               content: currentContent,
               timestamp: new Date(),
@@ -194,7 +195,7 @@ export function useChat() {
         setMessages((prev) => [
           ...prev,
           {
-            id: crypto.randomUUID(),
+            id: generateId(),
             role: "system" as const,
             content: summary,
             timestamp: new Date(),
@@ -236,7 +237,7 @@ export function useChat() {
         setMessages((prev) => [
           ...prev,
           {
-            id: crypto.randomUUID(),
+            id: generateId(),
             role: "assistant" as const,
             content:
               inv.summary || "Investigation completed with no summary.",
@@ -254,7 +255,7 @@ export function useChat() {
         setMessages((prev) => [
           ...prev,
           {
-            id: crypto.randomUUID(),
+            id: generateId(),
             role: "system" as const,
             content: `Error: ${msg.data.message || "Unknown error"}`,
             timestamp: new Date(),
@@ -272,7 +273,7 @@ export function useChat() {
     setMessages((prev) => [
       ...prev,
       {
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: "user" as const,
         content,
         timestamp: new Date(),

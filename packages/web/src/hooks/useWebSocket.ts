@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClientMessage, ServerMessage } from "@/lib/protocol";
+import { generateId } from "@/lib/utils";
 
 const RECONNECT_DELAY = 3000;
 const PING_INTERVAL = 30000;
@@ -70,7 +71,7 @@ export function useWebSocket({ url, onMessage }: UseWebSocketOptions) {
     (content: string) => {
       send({
         type: "user_message",
-        id: crypto.randomUUID(),
+        id: generateId(),
         data: { content },
       });
     },
