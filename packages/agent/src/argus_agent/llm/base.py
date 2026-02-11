@@ -17,6 +17,7 @@ class LLMMessage:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_call_id: str = ""
     name: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -28,6 +29,7 @@ class LLMResponse:
     finish_reason: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

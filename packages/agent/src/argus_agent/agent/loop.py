@@ -96,6 +96,7 @@ class AgentLoop:
 
             full_content = ""
             all_tool_calls: list[dict[str, Any]] = []
+            response_metadata: dict[str, Any] = {}
 
             async for delta in self.provider.stream(messages, tools=tool_defs or None):
                 # Stream text content to the user
@@ -106,6 +107,10 @@ class AgentLoop:
                 # Collect accumulated tool calls from final chunk
                 if delta.tool_calls:
                     all_tool_calls = delta.tool_calls
+
+                # Capture provider-specific metadata (e.g. Gemini thought_signatures)
+                if delta.metadata:
+                    response_metadata.update(delta.metadata)
 
                 result.prompt_tokens += delta.prompt_tokens
                 result.completion_tokens += delta.completion_tokens
@@ -121,7 +126,11 @@ class AgentLoop:
             # If the LLM wants to call tools
             if all_tool_calls:
                 # Add assistant message with tool calls to memory
-                self.memory.add_assistant_message(content=full_content, tool_calls=all_tool_calls)
+                self.memory.add_assistant_message(
+                    content=full_content,
+                    tool_calls=all_tool_calls,
+                    metadata=response_metadata,
+                )
                 result.tool_calls_made += len(all_tool_calls)
 
                 # Execute each tool call

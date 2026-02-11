@@ -20,13 +20,13 @@ _MODEL_CONTEXT: dict[str, int] = {
 }
 
 
-def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[dict[str, Any]]]:
+def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[Any]]:
     """Convert internal messages to Gemini format.
 
     Returns (system_instruction, contents).
     """
     system = ""
-    contents = []
+    contents: list[Any] = []
 
     for msg in messages:
         if msg.role == "system":
@@ -46,6 +46,13 @@ def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[dict[str,
             continue
 
         if msg.role == "assistant" and msg.tool_calls:
+            # Use raw Gemini content if available (preserves thought_signatures)
+            raw_content = msg.metadata.get("_gemini_content")
+            if raw_content is not None:
+                contents.append(raw_content)
+                continue
+
+            # Fallback: reconstruct from internal format
             parts: list[dict[str, Any]] = []
             if msg.content:
                 parts.append({"text": msg.content})
@@ -177,6 +184,14 @@ class GeminiProvider(LLMProvider):
                     },
                 })
 
+        # Capture raw content to preserve thought_signatures for conversation history
+        metadata: dict[str, Any] = {}
+        if tool_calls:
+            try:
+                metadata["_gemini_content"] = response.candidates[0].content
+            except (AttributeError, IndexError):
+                pass
+
         usage = getattr(response, "usage_metadata", None)
         prompt_tokens = getattr(usage, "prompt_token_count", 0) if usage else 0
         completion_tokens = getattr(usage, "candidates_token_count", 0) if usage else 0
@@ -187,6 +202,7 @@ class GeminiProvider(LLMProvider):
             finish_reason="stop",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            metadata=metadata,
         )
 
     async def stream(
@@ -224,8 +240,10 @@ class GeminiProvider(LLMProvider):
         )
 
         tool_calls = []
+        raw_parts = []
         async for chunk in response:
             for part in chunk.parts:
+                raw_parts.append(part)
                 if hasattr(part, "text") and part.text:
                     yield LLMResponse(content=part.text)
                 elif hasattr(part, "function_call"):
@@ -241,8 +259,21 @@ class GeminiProvider(LLMProvider):
                         },
                     })
 
+        # Build raw content to preserve thought_signatures for conversation history
+        metadata: dict[str, Any] = {}
+        if tool_calls and raw_parts:
+            try:
+                from google.generativeai import protos
+                metadata["_gemini_content"] = protos.Content(
+                    role="model",
+                    parts=[p._pb for p in raw_parts],
+                )
+            except Exception:
+                pass
+
         # Yield final with tool calls
         yield LLMResponse(
             tool_calls=tool_calls,
             finish_reason="stop",
+            metadata=metadata,
         )
