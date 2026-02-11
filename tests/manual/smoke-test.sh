@@ -20,8 +20,8 @@ RED='\033[0;31m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-pass() { ((PASS++)); printf "${GREEN}  PASS${NC} %s\n" "$1"; }
-fail() { ((FAIL++)); ERRORS+=("$1: $2"); printf "${RED}  FAIL${NC} %s — %s\n" "$1" "$2"; }
+pass() { PASS=$((PASS + 1)); printf "${GREEN}  PASS${NC} %s\n" "$1"; }
+fail() { FAIL=$((FAIL + 1)); ERRORS+=("$1: $2"); printf "${RED}  FAIL${NC} %s — %s\n" "$1" "$2"; }
 
 # test_endpoint NAME METHOD URL EXPECTED_STATUS [JQ_CHECK]
 test_endpoint() {

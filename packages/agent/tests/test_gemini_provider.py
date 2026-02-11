@@ -116,6 +116,42 @@ def test_tools_to_gemini():
     assert result[0]["function_declarations"][0]["name"] == "test"
 
 
+def test_tools_to_gemini_strips_unsupported_fields():
+    from argus_agent.llm.gemini import _tools_to_gemini
+
+    tools = [ToolDefinition(
+        name="test",
+        description="A tool",
+        parameters={
+            "type": "object",
+            "properties": {
+                "metric": {
+                    "type": "string",
+                    "description": "Which metric",
+                    "default": "all",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results",
+                    "default": 25,
+                    "title": "Limit",
+                },
+            },
+            "additionalProperties": False,
+        },
+    )]
+    result = _tools_to_gemini(tools)
+    params = result[0]["function_declarations"][0]["parameters"]
+    # unsupported fields removed
+    assert "additionalProperties" not in params
+    assert "default" not in params["properties"]["metric"]
+    assert "default" not in params["properties"]["limit"]
+    assert "title" not in params["properties"]["limit"]
+    # supported fields kept
+    assert params["properties"]["metric"]["type"] == "string"
+    assert params["properties"]["metric"]["description"] == "Which metric"
+
+
 # --- Provider ---
 
 

@@ -74,6 +74,20 @@ def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[dict[str,
     return system, contents
 
 
+def _strip_unsupported_schema_fields(schema: Any) -> Any:
+    """Recursively remove fields not supported by Gemini's Schema proto."""
+    unsupported = {"default", "examples", "title", "$schema", "additionalProperties"}
+    if isinstance(schema, dict):
+        return {
+            k: _strip_unsupported_schema_fields(v)
+            for k, v in schema.items()
+            if k not in unsupported
+        }
+    if isinstance(schema, list):
+        return [_strip_unsupported_schema_fields(item) for item in schema]
+    return schema
+
+
 def _tools_to_gemini(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
     """Convert tool definitions to Gemini function declarations."""
     declarations = []
@@ -81,7 +95,7 @@ def _tools_to_gemini(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
         declarations.append({
             "name": t.name,
             "description": t.description,
-            "parameters": t.parameters,
+            "parameters": _strip_unsupported_schema_fields(t.parameters),
         })
     return [{"function_declarations": declarations}]
 
