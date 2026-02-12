@@ -14,18 +14,18 @@ logger = logging.getLogger("argus.llm.gemini")
 
 
 def _content_to_dict(content: Any) -> dict[str, Any]:
-    """Convert a protobuf Content object to a JSON-serializable dict."""
+    """Convert a protobuf Content object to a JSON-serializable dict.
+
+    Uses preserving_proto_field_name=True so keys stay snake_case
+    (e.g. ``function_call`` not ``functionCall``), matching the format
+    the Gemini SDK expects when dicts are passed as contents.
+    """
     from google.protobuf.json_format import MessageToDict
 
-    return MessageToDict(content._pb if hasattr(content, "_pb") else content)
-
-
-def _dict_to_content(d: dict[str, Any]) -> Any:
-    """Reconstruct a protobuf Content object from a dict."""
-    from google.generativeai import protos
-    from google.protobuf.json_format import ParseDict
-
-    return ParseDict(d, protos.Content._meta.pb())
+    return MessageToDict(
+        content._pb if hasattr(content, "_pb") else content,
+        preserving_proto_field_name=True,
+    )
 
 _MODEL_CONTEXT: dict[str, int] = {
     "gemini-1.5-pro": 1_000_000,
@@ -73,9 +73,9 @@ def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[Any]]:
             # Use raw Gemini content if available (preserves thought_signatures)
             raw_content = msg.metadata.get("_gemini_content")
             if raw_content is not None:
-                # Reconstruct protobuf Content from serializable dict
+                # Pass dict directly — the Gemini SDK accepts dicts in contents
                 if isinstance(raw_content, dict):
-                    contents.append(_dict_to_content(raw_content))
+                    contents.append(raw_content)
                 else:
                     contents.append(raw_content)
                 continue
