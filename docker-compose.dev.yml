@@ -13,11 +13,7 @@ services:
     environment:
       - ARGUS_DEBUG=true
     pid: "host"
-    cap_add:
-      - SYS_PTRACE
-      - KILL
-    security_opt:
-      - seccomp:unconfined
+    privileged: true
     command: ["python", "-m", "uvicorn", "argus_agent.main:app",
               "--host", "0.0.0.0", "--port", "7600", "--reload", "--reload-dir", "src"]
     ports:
