@@ -143,6 +143,11 @@ class ConversationMemory:
             dropped = result.pop(0)
             total_tokens -= _estimate_tokens(dropped)
 
+        # Drop orphaned tool results whose assistant message was truncated above.
+        # Gemini requires function_response to immediately follow a function_call.
+        while result and result[0].role == "tool":
+            result.pop(0)
+
         return result
 
 
