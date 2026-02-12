@@ -34,15 +34,24 @@ def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[Any]]:
             continue
 
         if msg.role == "tool":
-            contents.append({
-                "role": "user",
-                "parts": [{
-                    "function_response": {
-                        "name": msg.name or "unknown",
-                        "response": {"result": msg.content},
-                    }
-                }],
-            })
+            part = {
+                "function_response": {
+                    "name": msg.name or "unknown",
+                    "response": {"result": msg.content},
+                }
+            }
+            # Merge consecutive function responses into a single user turn
+            # (Gemini requires all responses for a batch of function_calls in one turn)
+            if (
+                contents
+                and isinstance(contents[-1], dict)
+                and contents[-1].get("role") == "user"
+                and contents[-1].get("parts")
+                and "function_response" in contents[-1]["parts"][0]
+            ):
+                contents[-1]["parts"].append(part)
+            else:
+                contents.append({"role": "user", "parts": [part]})
             continue
 
         if msg.role == "assistant" and msg.tool_calls:

@@ -84,6 +84,24 @@ def test_messages_to_gemini_tool_result():
     assert part["function_response"]["name"] == "my_tool"
 
 
+def test_messages_to_gemini_merges_consecutive_tool_results():
+    from argus_agent.llm.gemini import _messages_to_gemini
+
+    msgs = [
+        LLMMessage(role="tool", content='{"cpu": 50}', name="system_metrics"),
+        LLMMessage(role="tool", content='{"procs": []}', name="process_list"),
+        LLMMessage(role="tool", content='{"conns": []}', name="network_connections"),
+    ]
+    _, contents = _messages_to_gemini(msgs)
+    # All three tool results should be merged into a single user turn
+    assert len(contents) == 1
+    assert contents[0]["role"] == "user"
+    assert len(contents[0]["parts"]) == 3
+    assert contents[0]["parts"][0]["function_response"]["name"] == "system_metrics"
+    assert contents[0]["parts"][1]["function_response"]["name"] == "process_list"
+    assert contents[0]["parts"][2]["function_response"]["name"] == "network_connections"
+
+
 def test_messages_to_gemini_tool_calls():
     from argus_agent.llm.gemini import _messages_to_gemini
 
