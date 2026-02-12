@@ -15,6 +15,9 @@ services:
       # Persistent data
       - argus_data:/data
     pid: "host"
+    cap_add:
+      - SYS_PTRACE
+      - KILL
     environment:
       - ARGUS_HOST_ROOT=/host
       - ARGUS_DEBUG=false
