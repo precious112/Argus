@@ -205,6 +205,15 @@ async def _handle_user_message(
             )
 
         elif event_type == "tool_call":
+            if not message_started:
+                await manager.send(
+                    websocket,
+                    ServerMessage(
+                        type=ServerMessageType.ASSISTANT_MESSAGE_START,
+                        data={"conversation_id": memory.conversation_id},
+                    ),
+                )
+                message_started = True
             await manager.send(
                 websocket,
                 ServerMessage(type=ServerMessageType.TOOL_CALL, data=data),

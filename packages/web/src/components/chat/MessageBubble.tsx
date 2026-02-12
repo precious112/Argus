@@ -1,5 +1,14 @@
 import type { ActionRequest } from "@/lib/protocol";
 import { ToolResultCard } from "./ToolResultCard";
+import { MarkdownContent } from "./MarkdownContent";
+
+export type ResponseSegment =
+  | { type: "text"; content: string }
+  | {
+      type: "tool";
+      toolCall: { id: string; name: string; arguments: Record<string, unknown> };
+      toolResult?: { displayType: string; data: unknown };
+    };
 
 export interface Message {
   id: string;
@@ -8,6 +17,7 @@ export interface Message {
   timestamp: Date;
   isStreaming?: boolean;
   metadata?: Record<string, unknown>;
+  segments?: ResponseSegment[];
   toolCall?: {
     id: string;
     name: string;
@@ -46,7 +56,7 @@ export function MessageBubble({ message, onApproveAction, onRejectAction }: Mess
     );
   }
 
-  // Tool call messages get special rendering
+  // Tool call messages get special rendering (legacy separate bubbles)
   if (isSystem && message.toolCall) {
     return (
       <div className="flex justify-start">
@@ -97,7 +107,37 @@ export function MessageBubble({ message, onApproveAction, onRejectAction }: Mess
             )}
           </div>
         )}
-        <div className="whitespace-pre-wrap">{message.content}</div>
+        {!isUser && message.segments && message.segments.length > 0 ? (
+          <div className="space-y-3">
+            {message.segments.map((seg, i) =>
+              seg.type === "text" ? (
+                <MarkdownContent key={i} content={seg.content} />
+              ) : (
+                <div
+                  key={i}
+                  className="rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2"
+                >
+                  <div className="mb-1 flex items-center gap-2 text-xs text-[var(--muted)]">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-argus-400" />
+                    <span>Tool: {seg.toolCall.name}</span>
+                  </div>
+                  {seg.toolResult ? (
+                    <ToolResultCard
+                      displayType={seg.toolResult.displayType}
+                      data={seg.toolResult.data}
+                    />
+                  ) : (
+                    <div className="text-[var(--muted)]">Executing...</div>
+                  )}
+                </div>
+              ),
+            )}
+          </div>
+        ) : !isUser ? (
+          <MarkdownContent content={message.content} />
+        ) : (
+          <div className="whitespace-pre-wrap">{message.content}</div>
+        )}
         <div
           className={`mt-1 text-xs ${isUser ? "text-argus-200" : "text-[var(--muted)]"}`}
         >
