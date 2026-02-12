@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -219,7 +220,7 @@ class GeminiProvider(LLMProvider):
                 if not fc.name:
                     continue
                 tool_calls.append({
-                    "id": f"gemini_{fc.name}_{len(tool_calls)}",
+                    "id": f"gemini_{uuid.uuid4().hex[:12]}",
                     "type": "function",
                     "function": {
                         "name": fc.name,
@@ -298,7 +299,7 @@ class GeminiProvider(LLMProvider):
                     if not fc.name:
                         continue
                     tool_calls.append({
-                        "id": f"gemini_{fc.name}_{len(tool_calls)}",
+                        "id": f"gemini_{uuid.uuid4().hex[:12]}",
                         "type": "function",
                         "function": {
                             "name": fc.name,

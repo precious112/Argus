@@ -364,15 +364,19 @@ export function useChat() {
 
           if (currentResponseIdRef.current) {
             // Update existing executing segment or add new one
-            const existing = segmentsRef.current.find(
+            const existingIdx = segmentsRef.current.findIndex(
               (s) =>
                 s.type === "action" &&
                 s.actionId === actionId &&
                 s.status === "executing",
             );
-            if (existing && existing.type === "action") {
-              existing.status = status;
-              existing.content = summary;
+            if (existingIdx !== -1) {
+              segmentsRef.current[existingIdx] = {
+                type: "action",
+                actionId,
+                status,
+                content: summary,
+              };
             } else {
               finalizeTextSegment();
               segmentsRef.current.push({
