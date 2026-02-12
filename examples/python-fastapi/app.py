@@ -12,6 +12,7 @@ from argus.middleware.fastapi import ArgusMiddleware
 
 import logging
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 # Initialize Argus SDK
 argus.init(
@@ -59,7 +60,7 @@ async def trigger_error():
         result = 1 / 0
     except ZeroDivisionError as e:
         argus.capture_exception(e)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/slow")

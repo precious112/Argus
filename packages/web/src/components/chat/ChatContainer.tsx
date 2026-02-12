@@ -6,6 +6,7 @@ import { AlertBanner } from "@/components/system/AlertBanner";
 import { StatusBar } from "@/components/system/StatusBar";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useChat } from "@/hooks/useChat";
+import { useActions } from "@/hooks/useActions";
 
 const WS_URL =
   process.env.NEXT_PUBLIC_AGENT_WS_URL || "ws://localhost:7600/api/v1/ws";
@@ -25,10 +26,12 @@ export function ChatContainer() {
     addUserMessage,
   } = useChat();
 
-  const { isConnected, sendUserMessage } = useWebSocket({
+  const { isConnected, send, sendUserMessage } = useWebSocket({
     url: WS_URL,
     onMessage: handleServerMessage,
   });
+
+  const { approveAction, rejectAction } = useActions(send);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -70,7 +73,12 @@ export function ChatContainer() {
           )}
 
           {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
+            <MessageBubble
+              key={msg.id}
+              message={msg}
+              onApproveAction={approveAction}
+              onRejectAction={rejectAction}
+            />
           ))}
 
           {isThinking && (

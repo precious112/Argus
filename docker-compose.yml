@@ -15,6 +15,7 @@ services:
       # Persistent data
       - argus_data:/data
     pid: "host"
+    privileged: true
     environment:
       - ARGUS_HOST_ROOT=/host
       - ARGUS_DEBUG=false

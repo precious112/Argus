@@ -1,0 +1,33 @@
+# Docker Compose overlay for example apps alongside Argus
+# Usage: docker compose -f docker-compose.yml -f tests/manual/docker-compose.test.yml up -d
+#
+# This starts the example apps with networking configured to reach the
+# Argus agent via the Docker service name (http://argus:7600).
+
+services:
+  example-python:
+    build:
+      context: .
+      dockerfile: examples/python-fastapi/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ARGUS_URL=http://argus:7600
+      - ARGUS_API_KEY=
+    depends_on:
+      - argus
+    restart: unless-stopped
+
+  example-node:
+    build:
+      context: .
+      dockerfile: examples/node-express/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - ARGUS_URL=http://argus:7600
+      - ARGUS_API_KEY=
+      - PORT=8001
+    depends_on:
+      - argus
+    restart: unless-stopped

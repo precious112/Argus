@@ -54,7 +54,8 @@ export type ToolResultDisplayType =
   | "code_block"
   | "diff_view"
   | "table"
-  | "text";
+  | "text"
+  | "chart";
 
 export interface ActionRequest {
   id: string;

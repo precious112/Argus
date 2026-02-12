@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from fnmatch import fnmatch
@@ -11,6 +12,16 @@ from fnmatch import fnmatch
 from argus_agent.tools.base import ToolRisk
 
 logger = logging.getLogger("argus.actions.sandbox")
+
+# When running inside a container with host PID namespace, use nsenter to
+# execute commands in the host's namespaces.  ARGUS_HOST_ROOT is set in
+# docker-compose when host volumes are mounted.
+_HOST_ROOT = os.environ.get("ARGUS_HOST_ROOT", "")
+_NSENTER_PREFIX: list[str] = (
+    ["nsenter", "--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--"]
+    if _HOST_ROOT
+    else []
+)
 
 
 @dataclass
@@ -115,6 +126,8 @@ class CommandSandbox:
         """Execute a validated command via asyncio subprocess.
 
         Always uses exec (never shell=True). Enforces timeout.
+        When running inside a container, commands are wrapped with nsenter
+        to execute in the host's namespaces.
         """
         allowed, _risk = self.validate_command(cmd)
         if not allowed:
@@ -125,10 +138,12 @@ class CommandSandbox:
                 duration_ms=0,
             )
 
+        exec_cmd = _NSENTER_PREFIX + cmd if _NSENTER_PREFIX else cmd
+
         start = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *exec_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,

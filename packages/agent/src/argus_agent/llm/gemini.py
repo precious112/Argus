@@ -4,13 +4,28 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 from argus_agent.config import LLMConfig
-from argus_agent.llm.base import LLMMessage, LLMProvider, LLMResponse, ToolDefinition
+from argus_agent.llm.base import LLMError, LLMMessage, LLMProvider, LLMResponse, ToolDefinition
 
 logger = logging.getLogger("argus.llm.gemini")
+
+
+def _deep_convert(obj: Any) -> Any:
+    """Recursively convert protobuf MapComposite/RepeatedComposite to plain Python types.
+
+    ``dict(fc.args)`` preserves RepeatedComposite for list values, which
+    breaks ``json.dumps``.  This helper deep-converts the whole tree.
+    """
+    if hasattr(obj, "items"):  # MapComposite or dict-like
+        return {k: _deep_convert(v) for k, v in obj.items()}
+    if hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes)):
+        return [_deep_convert(v) for v in obj]
+    return obj
+
 
 _MODEL_CONTEXT: dict[str, int] = {
     "gemini-1.5-pro": 1_000_000,
@@ -20,13 +35,13 @@ _MODEL_CONTEXT: dict[str, int] = {
 }
 
 
-def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[dict[str, Any]]]:
+def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[Any]]:
     """Convert internal messages to Gemini format.
 
     Returns (system_instruction, contents).
     """
     system = ""
-    contents = []
+    contents: list[Any] = []
 
     for msg in messages:
         if msg.role == "system":
@@ -34,18 +49,34 @@ def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[dict[str,
             continue
 
         if msg.role == "tool":
-            contents.append({
-                "role": "user",
-                "parts": [{
-                    "function_response": {
-                        "name": msg.name or "unknown",
-                        "response": {"result": msg.content},
-                    }
-                }],
-            })
+            part = {
+                "function_response": {
+                    "name": msg.name or "unknown",
+                    "response": {"result": msg.content},
+                }
+            }
+            # Merge consecutive function responses into a single user turn
+            # (Gemini requires all responses for a batch of function_calls in one turn)
+            if (
+                contents
+                and isinstance(contents[-1], dict)
+                and contents[-1].get("role") == "user"
+                and contents[-1].get("parts")
+                and "function_response" in contents[-1]["parts"][0]
+            ):
+                contents[-1]["parts"].append(part)
+            else:
+                contents.append({"role": "user", "parts": [part]})
             continue
 
         if msg.role == "assistant" and msg.tool_calls:
+            # Use raw Gemini content if available (preserves thought_signatures)
+            raw_content = msg.metadata.get("_gemini_content")
+            if raw_content is not None:
+                contents.append(raw_content)
+                continue
+
+            # Fallback: reconstruct from internal format
             parts: list[dict[str, Any]] = []
             if msg.content:
                 parts.append({"text": msg.content})
@@ -74,6 +105,20 @@ def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[dict[str,
     return system, contents
 
 
+def _strip_unsupported_schema_fields(schema: Any) -> Any:
+    """Recursively remove fields not supported by Gemini's Schema proto."""
+    unsupported = {"default", "examples", "title", "$schema", "additionalProperties"}
+    if isinstance(schema, dict):
+        return {
+            k: _strip_unsupported_schema_fields(v)
+            for k, v in schema.items()
+            if k not in unsupported
+        }
+    if isinstance(schema, list):
+        return [_strip_unsupported_schema_fields(item) for item in schema]
+    return schema
+
+
 def _tools_to_gemini(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
     """Convert tool definitions to Gemini function declarations."""
     declarations = []
@@ -81,9 +126,18 @@ def _tools_to_gemini(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
         declarations.append({
             "name": t.name,
             "description": t.description,
-            "parameters": t.parameters,
+            "parameters": _strip_unsupported_schema_fields(t.parameters),
         })
     return [{"function_declarations": declarations}]
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Check if a Gemini exception is retryable."""
+    try:
+        from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+        return isinstance(exc, (ResourceExhausted, ServiceUnavailable))
+    except ImportError:
+        return False
 
 
 class GeminiProvider(LLMProvider):
@@ -138,28 +192,49 @@ class GeminiProvider(LLMProvider):
         if tools:
             tool_config = _tools_to_gemini(tools)
 
-        response = await model.generate_content_async(
-            contents,
-            generation_config=gen_config,
-            tools=tool_config,
-        )
+        try:
+            response = await model.generate_content_async(
+                contents,
+                generation_config=gen_config,
+                tools=tool_config,
+            )
+        except Exception as exc:
+            logger.error("Gemini API error: %s", exc)
+            raise LLMError(str(exc), provider="gemini", retryable=_is_retryable(exc)) from exc
 
         text = ""
         tool_calls = []
 
-        for part in response.parts:
+        # G1: response.parts raises ValueError if response is blocked/empty
+        try:
+            parts = response.parts
+        except (ValueError, IndexError):
+            logger.warning("Gemini returned no content (possibly blocked)")
+            parts = []
+
+        for part in parts:
             if hasattr(part, "text") and part.text:
                 text += part.text
             elif hasattr(part, "function_call"):
                 fc = part.function_call
+                if not fc.name:
+                    continue
                 tool_calls.append({
-                    "id": f"gemini_{fc.name}",
+                    "id": f"gemini_{uuid.uuid4().hex[:12]}",
                     "type": "function",
                     "function": {
                         "name": fc.name,
-                        "arguments": json.dumps(dict(fc.args)) if fc.args else "{}",
+                        "arguments": json.dumps(_deep_convert(fc.args)) if fc.args else "{}",
                     },
                 })
+
+        # Capture raw content to preserve thought_signatures for conversation history
+        metadata: dict[str, Any] = {}
+        if tool_calls:
+            try:
+                metadata["_gemini_content"] = response.candidates[0].content
+            except (AttributeError, IndexError):
+                logger.debug("Could not capture Gemini raw content for thought_signatures")
 
         usage = getattr(response, "usage_metadata", None)
         prompt_tokens = getattr(usage, "prompt_token_count", 0) if usage else 0
@@ -171,6 +246,7 @@ class GeminiProvider(LLMProvider):
             finish_reason="stop",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            metadata=metadata,
         )
 
     async def stream(
@@ -200,31 +276,68 @@ class GeminiProvider(LLMProvider):
         if tools:
             tool_config = _tools_to_gemini(tools)
 
-        response = await model.generate_content_async(
-            contents,
-            generation_config=gen_config,
-            tools=tool_config,
-            stream=True,
-        )
+        try:
+            response = await model.generate_content_async(
+                contents,
+                generation_config=gen_config,
+                tools=tool_config,
+                stream=True,
+            )
+        except Exception as exc:
+            logger.error("Gemini API error (stream): %s", exc)
+            raise LLMError(str(exc), provider="gemini", retryable=_is_retryable(exc)) from exc
 
         tool_calls = []
+        raw_parts = []
         async for chunk in response:
             for part in chunk.parts:
+                raw_parts.append(part)
                 if hasattr(part, "text") and part.text:
                     yield LLMResponse(content=part.text)
                 elif hasattr(part, "function_call"):
                     fc = part.function_call
+                    if not fc.name:
+                        continue
                     tool_calls.append({
-                        "id": f"gemini_{fc.name}",
+                        "id": f"gemini_{uuid.uuid4().hex[:12]}",
                         "type": "function",
                         "function": {
                             "name": fc.name,
-                            "arguments": json.dumps(dict(fc.args)) if fc.args else "{}",
+                            "arguments": json.dumps(_deep_convert(fc.args)) if fc.args else "{}",
                         },
                     })
 
-        # Yield final with tool calls
+        # G2: Capture streaming token usage
+        prompt_tokens = 0
+        completion_tokens = 0
+        try:
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                prompt_tokens = getattr(usage, "prompt_token_count", 0)
+                completion_tokens = getattr(usage, "candidates_token_count", 0)
+        except Exception:
+            logger.debug("Could not capture Gemini streaming usage metadata")
+
+        # Build raw content to preserve thought_signatures for conversation history
+        metadata: dict[str, Any] = {}
+        if tool_calls and raw_parts:
+            try:
+                from google.generativeai import protos
+                metadata["_gemini_content"] = protos.Content(
+                    role="model",
+                    parts=[p._pb for p in raw_parts],
+                )
+            except Exception:
+                logger.debug(
+                    "Could not build Gemini raw content for thought_signatures",
+                    exc_info=True,
+                )
+
+        # Yield final with tool calls and usage
         yield LLMResponse(
             tool_calls=tool_calls,
             finish_reason="stop",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            metadata=metadata,
         )

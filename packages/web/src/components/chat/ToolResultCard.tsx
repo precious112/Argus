@@ -2,6 +2,8 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { ChartRenderer } from "./ChartRenderer";
+
 interface ToolResultCardProps {
   displayType: string;
   data: any;
@@ -23,6 +25,12 @@ export function ToolResultCard({ displayType, data }: ToolResultCardProps) {
       return <MetricsDisplay data={data} />;
     case "process_table":
       return <ProcessTable data={data} />;
+    case "table":
+      return <EventTable data={data} />;
+    case "chart":
+      return <ChartRenderer data={data} />;
+    case "command_output":
+      return <CommandOutput data={data} />;
     case "code_block":
       return <CodeBlock data={data} />;
     default:
@@ -129,40 +137,21 @@ function MetricsDisplay({ data }: { data: any }) {
           );
         })}
       </div>
-      {data.data_points?.length > 0 && (
+      {data.data_points?.length >= 2 && (
         <div className="border-t border-[var(--border)] px-3 py-1.5">
-          <Sparkline values={data.data_points.map((p: any) => p.value)} />
+          <ChartRenderer
+            data={{
+              chart_type: "line",
+              title: "",
+              x_key: "timestamp",
+              y_keys: ["value"],
+              unit: data.metric?.includes("percent") ? "%" : "",
+              data: data.data_points,
+            }}
+          />
         </div>
       )}
     </div>
-  );
-}
-
-function Sparkline({ values }: { values: number[] }) {
-  if (values.length < 2) return null;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const width = 200;
-  const height = 30;
-
-  const points = values
-    .map((v, i) => {
-      const x = (i / (values.length - 1)) * width;
-      const y = height - ((v - min) / range) * height;
-      return `${x},${y}`;
-    })
-    .join(" ");
-
-  return (
-    <svg width={width} height={height} className="text-argus-400">
-      <polyline
-        points={points}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      />
-    </svg>
   );
 }
 
@@ -251,6 +240,117 @@ function ProcessTable({ data }: { data: any }) {
         <div className="border-t border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
           Showing {maxDisplay} of {items.length}
         </div>
+      )}
+    </div>
+  );
+}
+
+function EventTable({ data }: { data: any }) {
+  const events = data.events || [];
+  const maxDisplay = 30;
+  const displayed = events.slice(0, maxDisplay);
+
+  if (displayed.length === 0) {
+    return (
+      <div className="rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-xs text-[var(--muted)]">
+        No events found
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded border border-[var(--border)] bg-[var(--card)] text-xs">
+      {data.count != null && (
+        <div className="border-b border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+          {data.count} event{data.count !== 1 ? "s" : ""}
+          {data.since_minutes ? ` in last ${data.since_minutes}m` : ""}
+        </div>
+      )}
+      <div className="max-h-72 overflow-auto">
+        <table className="w-full">
+          <thead className="sticky top-0 bg-[var(--background)] text-[var(--muted)]">
+            <tr>
+              <th className="px-2 py-1 text-left">Time</th>
+              <th className="px-2 py-1 text-left">Service</th>
+              <th className="px-2 py-1 text-left">Type</th>
+              <th className="px-2 py-1 text-left">Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {displayed.map((evt: any, i: number) => {
+              const d = evt.data || {};
+              const detail =
+                d.message ||
+                (d.type ? `${d.type}: ${d.message || ""}` : "") ||
+                JSON.stringify(d).slice(0, 120);
+              const levelColor =
+                d.level === "ERROR"
+                  ? "text-red-400"
+                  : d.level === "WARNING"
+                    ? "text-yellow-400"
+                    : "text-[var(--foreground)]";
+              const ts = evt.timestamp
+                ? new Date(evt.timestamp).toLocaleTimeString()
+                : "";
+
+              return (
+                <tr
+                  key={i}
+                  className="border-t border-[var(--border)]"
+                >
+                  <td className="whitespace-nowrap px-2 py-1 font-mono text-[var(--muted)]">
+                    {ts}
+                  </td>
+                  <td className="px-2 py-1 text-[var(--foreground)]">
+                    {evt.service}
+                  </td>
+                  <td className="px-2 py-1 text-[var(--muted)]">
+                    {evt.type}
+                  </td>
+                  <td className={`px-2 py-1 ${levelColor}`}>
+                    {detail}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {events.length > maxDisplay && (
+        <div className="border-t border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+          Showing {maxDisplay} of {events.length}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CommandOutput({ data }: { data: any }) {
+  const exitCode = data.exit_code ?? 0;
+  const isError = exitCode !== 0;
+
+  return (
+    <div className="rounded border border-[var(--border)] bg-[#0d1117] text-xs">
+      <div className="flex items-center gap-3 border-b border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+        <span className={isError ? "text-red-400" : "text-green-400"}>
+          exit {exitCode}
+        </span>
+        {data.duration_ms != null && (
+          <span>{data.duration_ms}ms</span>
+        )}
+      </div>
+      {data.stdout && (
+        <pre className="max-h-64 overflow-auto p-3 font-mono text-gray-300 whitespace-pre-wrap">
+          {data.stdout}
+        </pre>
+      )}
+      {data.stderr && (
+        <pre className="max-h-32 overflow-auto border-t border-[var(--border)] p-3 font-mono text-red-400 whitespace-pre-wrap">
+          {data.stderr}
+        </pre>
+      )}
+      {!data.stdout && !data.stderr && (
+        <div className="px-3 py-2 text-[var(--muted)]">No output</div>
       )}
     </div>
   );

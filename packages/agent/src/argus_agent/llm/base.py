@@ -8,6 +8,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class LLMError(Exception):
+    """Raised when an LLM API call fails."""
+
+    def __init__(self, message: str, provider: str, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.retryable = retryable
+
+
 @dataclass
 class LLMMessage:
     """A message in the LLM conversation."""
@@ -17,6 +26,7 @@ class LLMMessage:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_call_id: str = ""
     name: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -28,6 +38,7 @@ class LLMResponse:
     finish_reason: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

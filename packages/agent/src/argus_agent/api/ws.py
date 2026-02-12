@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -89,6 +90,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     # Per-connection conversation memory
     memory = ConversationMemory()
+    agent_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
     try:
         while True:
@@ -116,7 +118,21 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 if not content:
                     continue
 
-                await _handle_user_message(websocket, memory, content)
+                if agent_task and not agent_task.done():
+                    await manager.send(
+                        websocket,
+                        ServerMessage(
+                            type=ServerMessageType.ERROR,
+                            data={"message": "Agent is busy, please wait."},
+                        ),
+                    )
+                    continue
+
+                # Run in background so the WebSocket loop stays free to
+                # receive action_response messages (approval/rejection).
+                agent_task = asyncio.create_task(
+                    _handle_user_message(websocket, memory, content)
+                )
 
             elif msg.type == ClientMessageType.ACTION_RESPONSE:
                 logger.info("Action response received: %s", msg.data)
@@ -132,8 +148,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             elif msg.type == ClientMessageType.CANCEL:
                 logger.info("Cancel requested")
+                if agent_task and not agent_task.done():
+                    agent_task.cancel()
 
     except WebSocketDisconnect:
+        if agent_task and not agent_task.done():
+            agent_task.cancel()
         manager.disconnect(websocket)
         logger.info("Client disconnected")
 
@@ -205,6 +225,15 @@ async def _handle_user_message(
             )
 
         elif event_type == "tool_call":
+            if not message_started:
+                await manager.send(
+                    websocket,
+                    ServerMessage(
+                        type=ServerMessageType.ASSISTANT_MESSAGE_START,
+                        data={"conversation_id": memory.conversation_id},
+                    ),
+                )
+                message_started = True
             await manager.send(
                 websocket,
                 ServerMessage(type=ServerMessageType.TOOL_CALL, data=data),

@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from argus_agent.config import LLMConfig
-from argus_agent.llm.base import LLMMessage, LLMProvider, LLMResponse, ToolDefinition
+from argus_agent.llm.base import LLMError, LLMMessage, LLMProvider, LLMResponse, ToolDefinition
 
 logger = logging.getLogger("argus.llm.openai")
 
@@ -72,6 +72,15 @@ def _parse_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _is_retryable(exc: Exception) -> bool:
+    """Check if an OpenAI exception is retryable."""
+    try:
+        import openai
+        return isinstance(exc, (openai.RateLimitError, openai.APIConnectionError))
+    except ImportError:
+        return False
+
+
 class OpenAIProvider(LLMProvider):
     """OpenAI API provider (GPT-4o, GPT-4, etc.)."""
 
@@ -115,7 +124,16 @@ class OpenAIProvider(LLMProvider):
         if tools:
             params["tools"] = _tools_to_openai(tools)
 
-        response = await self._client.chat.completions.create(**params)
+        try:
+            response = await self._client.chat.completions.create(**params)
+        except Exception as exc:
+            logger.error("OpenAI API error: %s", exc)
+            raise LLMError(str(exc), provider="openai", retryable=_is_retryable(exc)) from exc
+
+        if not response.choices:
+            logger.warning("OpenAI returned no choices")
+            return LLMResponse(finish_reason="error")
+
         choice = response.choices[0]
         message = choice.message
 
@@ -145,7 +163,11 @@ class OpenAIProvider(LLMProvider):
         if tools:
             params["tools"] = _tools_to_openai(tools)
 
-        stream = await self._client.chat.completions.create(**params)
+        try:
+            stream = await self._client.chat.completions.create(**params)
+        except Exception as exc:
+            logger.error("OpenAI API error (stream): %s", exc)
+            raise LLMError(str(exc), provider="openai", retryable=_is_retryable(exc)) from exc
 
         # Accumulate tool calls across chunks
         tool_call_accum: dict[int, dict[str, Any]] = {}
@@ -189,16 +211,15 @@ class OpenAIProvider(LLMProvider):
                                 tc_delta.function.arguments
                             )
 
-        # Yield final response with accumulated tool calls and usage
-        if tool_call_accum or finish_reason:
-            yield LLMResponse(
-                tool_calls=[tool_call_accum[i] for i in sorted(tool_call_accum)]
-                if tool_call_accum
-                else [],
-                finish_reason=finish_reason,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
+        # Always yield final response with usage metrics
+        yield LLMResponse(
+            tool_calls=[tool_call_accum[i] for i in sorted(tool_call_accum)]
+            if tool_call_accum
+            else [],
+            finish_reason=finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
 
     def count_tokens(self, text: str) -> int:
         """Estimate token count. Uses ~4 chars/token heuristic."""

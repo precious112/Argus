@@ -12,6 +12,8 @@ services:
       - argus_data:/data
     environment:
       - ARGUS_DEBUG=true
+    pid: "host"
+    privileged: true
     command: ["python", "-m", "uvicorn", "argus_agent.main:app",
               "--host", "0.0.0.0", "--port", "7600", "--reload", "--reload-dir", "src"]
     ports:

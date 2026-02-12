@@ -3,7 +3,7 @@ FROM python:3.12-slim
 
 # System dependencies for monitoring
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    procps iproute2 curl && rm -rf /var/lib/apt/lists/*
+    procps iproute2 curl util-linux && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast dependency management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv

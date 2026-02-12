@@ -69,11 +69,19 @@ class ConversationMemory:
         self.messages.append(LLMMessage(role="user", content=content))
 
     def add_assistant_message(
-        self, content: str = "", tool_calls: list[dict] | None = None
+        self,
+        content: str = "",
+        tool_calls: list[dict] | None = None,
+        metadata: dict | None = None,
     ) -> None:
         """Add an assistant message (possibly with tool calls)."""
         self.messages.append(
-            LLMMessage(role="assistant", content=content, tool_calls=tool_calls or [])
+            LLMMessage(
+                role="assistant",
+                content=content,
+                tool_calls=tool_calls or [],
+                metadata=metadata or {},
+            )
         )
 
     def add_tool_result(self, tool_call_id: str, name: str, result: dict) -> None:
@@ -134,6 +142,11 @@ class ConversationMemory:
         while total_tokens > MAX_HISTORY_TOKENS and len(result) > 2:
             dropped = result.pop(0)
             total_tokens -= _estimate_tokens(dropped)
+
+        # Drop orphaned tool results whose assistant message was truncated above.
+        # Gemini requires function_response to immediately follow a function_call.
+        while result and result[0].role == "tool":
+            result.pop(0)
 
         return result
 

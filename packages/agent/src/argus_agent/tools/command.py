@@ -82,7 +82,7 @@ class RunCommandTool(Tool):
             "stdout": result.command_result.stdout,
             "stderr": result.command_result.stderr,
             "duration_ms": result.command_result.duration_ms,
-            "display_type": "code_block",
+            "display_type": "command_output",
         }
 
 
