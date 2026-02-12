@@ -1,4 +1,5 @@
 import type { ActionRequest } from "@/lib/protocol";
+import { ActionApproval } from "./ActionApproval";
 import { ToolResultCard } from "./ToolResultCard";
 import { MarkdownContent } from "./MarkdownContent";
 
@@ -48,7 +49,6 @@ export function MessageBubble({ message, onApproveAction, onRejectAction }: Mess
 
   // Action approval messages
   if (isSystem && message.actionRequest) {
-    const { ActionApproval } = require("./ActionApproval");
     return (
       <div className="flex justify-start">
         <div className="max-w-[90%]">
