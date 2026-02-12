@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from argus_agent.config import LLMConfig
-from argus_agent.llm.base import LLMMessage, LLMProvider, LLMResponse, ToolDefinition
+from argus_agent.llm.base import LLMError, LLMMessage, LLMProvider, LLMResponse, ToolDefinition
 
 logger = logging.getLogger("argus.llm.gemini")
 
@@ -130,6 +130,15 @@ def _tools_to_gemini(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
     return [{"function_declarations": declarations}]
 
 
+def _is_retryable(exc: Exception) -> bool:
+    """Check if a Gemini exception is retryable."""
+    try:
+        from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+        return isinstance(exc, (ResourceExhausted, ServiceUnavailable))
+    except ImportError:
+        return False
+
+
 class GeminiProvider(LLMProvider):
     """Google Gemini API provider."""
 
@@ -182,16 +191,27 @@ class GeminiProvider(LLMProvider):
         if tools:
             tool_config = _tools_to_gemini(tools)
 
-        response = await model.generate_content_async(
-            contents,
-            generation_config=gen_config,
-            tools=tool_config,
-        )
+        try:
+            response = await model.generate_content_async(
+                contents,
+                generation_config=gen_config,
+                tools=tool_config,
+            )
+        except Exception as exc:
+            logger.error("Gemini API error: %s", exc)
+            raise LLMError(str(exc), provider="gemini", retryable=_is_retryable(exc)) from exc
 
         text = ""
         tool_calls = []
 
-        for part in response.parts:
+        # G1: response.parts raises ValueError if response is blocked/empty
+        try:
+            parts = response.parts
+        except (ValueError, IndexError):
+            logger.warning("Gemini returned no content (possibly blocked)")
+            parts = []
+
+        for part in parts:
             if hasattr(part, "text") and part.text:
                 text += part.text
             elif hasattr(part, "function_call"):
@@ -199,7 +219,7 @@ class GeminiProvider(LLMProvider):
                 if not fc.name:
                     continue
                 tool_calls.append({
-                    "id": f"gemini_{fc.name}",
+                    "id": f"gemini_{fc.name}_{len(tool_calls)}",
                     "type": "function",
                     "function": {
                         "name": fc.name,
@@ -213,7 +233,7 @@ class GeminiProvider(LLMProvider):
             try:
                 metadata["_gemini_content"] = response.candidates[0].content
             except (AttributeError, IndexError):
-                pass
+                logger.debug("Could not capture Gemini raw content for thought_signatures")
 
         usage = getattr(response, "usage_metadata", None)
         prompt_tokens = getattr(usage, "prompt_token_count", 0) if usage else 0
@@ -255,12 +275,16 @@ class GeminiProvider(LLMProvider):
         if tools:
             tool_config = _tools_to_gemini(tools)
 
-        response = await model.generate_content_async(
-            contents,
-            generation_config=gen_config,
-            tools=tool_config,
-            stream=True,
-        )
+        try:
+            response = await model.generate_content_async(
+                contents,
+                generation_config=gen_config,
+                tools=tool_config,
+                stream=True,
+            )
+        except Exception as exc:
+            logger.error("Gemini API error (stream): %s", exc)
+            raise LLMError(str(exc), provider="gemini", retryable=_is_retryable(exc)) from exc
 
         tool_calls = []
         raw_parts = []
@@ -274,13 +298,24 @@ class GeminiProvider(LLMProvider):
                     if not fc.name:
                         continue
                     tool_calls.append({
-                        "id": f"gemini_{fc.name}",
+                        "id": f"gemini_{fc.name}_{len(tool_calls)}",
                         "type": "function",
                         "function": {
                             "name": fc.name,
                             "arguments": json.dumps(_deep_convert(fc.args)) if fc.args else "{}",
                         },
                     })
+
+        # G2: Capture streaming token usage
+        prompt_tokens = 0
+        completion_tokens = 0
+        try:
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                prompt_tokens = getattr(usage, "prompt_token_count", 0)
+                completion_tokens = getattr(usage, "candidates_token_count", 0)
+        except Exception:
+            logger.debug("Could not capture Gemini streaming usage metadata")
 
         # Build raw content to preserve thought_signatures for conversation history
         metadata: dict[str, Any] = {}
@@ -292,11 +327,16 @@ class GeminiProvider(LLMProvider):
                     parts=[p._pb for p in raw_parts],
                 )
             except Exception:
-                pass
+                logger.debug(
+                    "Could not build Gemini raw content for thought_signatures",
+                    exc_info=True,
+                )
 
-        # Yield final with tool calls
+        # Yield final with tool calls and usage
         yield LLMResponse(
             tool_calls=tool_calls,
             finish_reason="stop",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             metadata=metadata,
         )

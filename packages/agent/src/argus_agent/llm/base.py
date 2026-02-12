@@ -8,6 +8,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class LLMError(Exception):
+    """Raised when an LLM API call fails."""
+
+    def __init__(self, message: str, provider: str, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.retryable = retryable
+
+
 @dataclass
 class LLMMessage:
     """A message in the LLM conversation."""

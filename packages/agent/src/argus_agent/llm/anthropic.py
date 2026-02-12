@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from argus_agent.config import LLMConfig
-from argus_agent.llm.base import LLMMessage, LLMProvider, LLMResponse, ToolDefinition
+from argus_agent.llm.base import LLMError, LLMMessage, LLMProvider, LLMResponse, ToolDefinition
 
 logger = logging.getLogger("argus.llm.anthropic")
 
@@ -60,6 +60,10 @@ def _messages_to_anthropic(
                     try:
                         args = json.loads(args)
                     except json.JSONDecodeError:
+                        logger.warning(
+                            "Malformed JSON in tool call arguments for %s, using empty args",
+                            tc["function"]["name"],
+                        )
                         args = {}
                 content.append({
                     "type": "tool_use",
@@ -104,6 +108,15 @@ def _parse_tool_calls(content_blocks: list[Any]) -> list[dict[str, Any]]:
                 },
             })
     return result
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Check if an Anthropic exception is retryable."""
+    try:
+        import anthropic
+        return isinstance(exc, (anthropic.RateLimitError, anthropic.APIConnectionError))
+    except ImportError:
+        return False
 
 
 class AnthropicProvider(LLMProvider):
@@ -152,7 +165,11 @@ class AnthropicProvider(LLMProvider):
         if tools:
             params["tools"] = _tools_to_anthropic(tools)
 
-        response = await self._client.messages.create(**params)
+        try:
+            response = await self._client.messages.create(**params)
+        except Exception as exc:
+            logger.error("Anthropic API error: %s", exc)
+            raise LLMError(str(exc), provider="anthropic", retryable=_is_retryable(exc)) from exc
 
         text = ""
         tool_calls = []
@@ -202,7 +219,13 @@ class AnthropicProvider(LLMProvider):
         completion_tokens = 0
         finish_reason = ""
 
-        async with self._client.messages.stream(**params) as stream:
+        try:
+            stream_ctx = self._client.messages.stream(**params)
+        except Exception as exc:
+            logger.error("Anthropic API error (stream): %s", exc)
+            raise LLMError(str(exc), provider="anthropic", retryable=_is_retryable(exc)) from exc
+
+        async with stream_ctx as stream:
             async for event in stream:
                 event_type = getattr(event, "type", "")
 
