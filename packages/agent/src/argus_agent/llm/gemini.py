@@ -12,6 +12,21 @@ from argus_agent.llm.base import LLMMessage, LLMProvider, LLMResponse, ToolDefin
 
 logger = logging.getLogger("argus.llm.gemini")
 
+
+def _content_to_dict(content: Any) -> dict[str, Any]:
+    """Convert a protobuf Content object to a JSON-serializable dict."""
+    from google.protobuf.json_format import MessageToDict
+
+    return MessageToDict(content._pb if hasattr(content, "_pb") else content)
+
+
+def _dict_to_content(d: dict[str, Any]) -> Any:
+    """Reconstruct a protobuf Content object from a dict."""
+    from google.generativeai import protos
+    from google.protobuf.json_format import ParseDict
+
+    return ParseDict(d, protos.Content._meta.pb())
+
 _MODEL_CONTEXT: dict[str, int] = {
     "gemini-1.5-pro": 1_000_000,
     "gemini-1.5-flash": 1_000_000,
@@ -58,7 +73,11 @@ def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[Any]]:
             # Use raw Gemini content if available (preserves thought_signatures)
             raw_content = msg.metadata.get("_gemini_content")
             if raw_content is not None:
-                contents.append(raw_content)
+                # Reconstruct protobuf Content from serializable dict
+                if isinstance(raw_content, dict):
+                    contents.append(_dict_to_content(raw_content))
+                else:
+                    contents.append(raw_content)
                 continue
 
             # Fallback: reconstruct from internal format
@@ -194,10 +213,13 @@ class GeminiProvider(LLMProvider):
                 })
 
         # Capture raw content to preserve thought_signatures for conversation history
+        # Store as JSON-serializable dict (not raw protobuf) to avoid serialization errors
         metadata: dict[str, Any] = {}
         if tool_calls:
             try:
-                metadata["_gemini_content"] = response.candidates[0].content
+                metadata["_gemini_content"] = _content_to_dict(
+                    response.candidates[0].content
+                )
             except (AttributeError, IndexError):
                 pass
 
@@ -269,14 +291,16 @@ class GeminiProvider(LLMProvider):
                     })
 
         # Build raw content to preserve thought_signatures for conversation history
+        # Store as JSON-serializable dict (not raw protobuf) to avoid serialization errors
         metadata: dict[str, Any] = {}
         if tool_calls and raw_parts:
             try:
                 from google.generativeai import protos
-                metadata["_gemini_content"] = protos.Content(
+                content = protos.Content(
                     role="model",
                     parts=[p._pb for p in raw_parts],
                 )
+                metadata["_gemini_content"] = _content_to_dict(content)
             except Exception:
                 pass
 
