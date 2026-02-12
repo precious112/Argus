@@ -15,6 +15,11 @@ export type ResponseSegment =
       actionId: string;
       status: "executing" | "success" | "error";
       content: string;
+    }
+  | {
+      type: "action_request";
+      actionRequest: ActionRequest;
+      resolved?: boolean;
     };
 
 export interface Message {
@@ -46,21 +51,6 @@ interface MessageBubbleProps {
 export function MessageBubble({ message, onApproveAction, onRejectAction }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
-
-  // Action approval messages
-  if (isSystem && message.actionRequest) {
-    return (
-      <div className="flex justify-start">
-        <div className="max-w-[90%]">
-          <ActionApproval
-            action={message.actionRequest}
-            onApprove={onApproveAction || (() => {})}
-            onReject={onRejectAction || (() => {})}
-          />
-        </div>
-      </div>
-    );
-  }
 
   // Tool call messages get special rendering (legacy separate bubbles)
   if (isSystem && message.toolCall) {
@@ -145,6 +135,17 @@ export function MessageBubble({ message, onApproveAction, onRejectAction }: Mess
                   <div key={i} className={`rounded-lg border px-3 py-2 text-xs ${colorClass}`}>
                     {seg.content}
                   </div>
+                );
+              }
+              if (seg.type === "action_request") {
+                return (
+                  <ActionApproval
+                    key={i}
+                    action={seg.actionRequest}
+                    onApprove={onApproveAction || (() => {})}
+                    onReject={onRejectAction || (() => {})}
+                    resolved={seg.resolved}
+                  />
                 );
               }
               return (

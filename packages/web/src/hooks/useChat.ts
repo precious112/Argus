@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import type {
+  ActionRequest,
   AlertData,
   BudgetStatus,
   InvestigationData,
@@ -287,18 +288,49 @@ export function useChat() {
         }
 
         case "action_request": {
-          const actionReq =
-            msg.data as unknown as import("@/lib/protocol").ActionRequest;
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `action-${actionReq.id}`,
-              role: "system" as const,
-              content: `Action proposed: ${actionReq.description}`,
-              timestamp: new Date(),
+          const actionReq = msg.data as unknown as ActionRequest;
+
+          if (currentResponseIdRef.current) {
+            // Active streaming message — push segment inline
+            finalizeTextSegment();
+            segmentsRef.current.push({
+              type: "action_request",
               actionRequest: actionReq,
-            },
-          ]);
+            });
+            lastEventTypeRef.current = "action_request";
+            updateGroupedMessage();
+          } else {
+            // Message already finalized — append to most recent assistant message
+            setMessages((prev) => {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].role === "assistant" && prev[i].segments) {
+                  const updated = [...prev];
+                  updated[i] = {
+                    ...prev[i],
+                    segments: [
+                      ...(prev[i].segments || []),
+                      {
+                        type: "action_request" as const,
+                        actionRequest: actionReq,
+                      },
+                    ],
+                  };
+                  return updated;
+                }
+              }
+              // No assistant message — fall back to system message
+              return [
+                ...prev,
+                {
+                  id: `action-${actionReq.id}`,
+                  role: "system" as const,
+                  content: `Action proposed: ${actionReq.description}`,
+                  timestamp: new Date(),
+                  actionRequest: actionReq,
+                },
+              ];
+            });
+          }
           break;
         }
 
@@ -363,6 +395,16 @@ export function useChat() {
           const status = isSuccess ? "success" : "error";
 
           if (currentResponseIdRef.current) {
+            // Mark matching action_request segment as resolved
+            for (const seg of segmentsRef.current) {
+              if (
+                seg.type === "action_request" &&
+                seg.actionRequest.id === actionId
+              ) {
+                seg.resolved = true;
+              }
+            }
+
             // Update existing executing segment or add new one
             const existingIdx = segmentsRef.current.findIndex(
               (s) =>
@@ -395,6 +437,18 @@ export function useChat() {
                 const m = prev[i];
                 if (m.role === "assistant" && m.segments) {
                   const newSegs = [...m.segments];
+
+                  // Mark matching action_request segment as resolved
+                  for (let j = 0; j < newSegs.length; j++) {
+                    const s = newSegs[j];
+                    if (
+                      s.type === "action_request" &&
+                      s.actionRequest.id === actionId
+                    ) {
+                      newSegs[j] = { ...s, resolved: true };
+                    }
+                  }
+
                   const execIdx = newSegs.findIndex(
                     (s) =>
                       s.type === "action" &&

@@ -66,6 +66,18 @@ COMMAND_ALLOWLIST: dict[str, ToolRisk] = {
     "rm -r *": ToolRisk.CRITICAL,
     "reboot": ToolRisk.CRITICAL,
     "shutdown *": ToolRisk.CRITICAL,
+    # SUDO variants (elevated risk — one level higher than non-sudo)
+    "sudo systemctl restart *": ToolRisk.HIGH,
+    "sudo systemctl reload *": ToolRisk.HIGH,
+    "sudo docker restart *": ToolRisk.HIGH,
+    "sudo docker stop *": ToolRisk.HIGH,
+    "sudo docker start *": ToolRisk.HIGH,
+    "sudo service * restart": ToolRisk.HIGH,
+    "sudo service * reload": ToolRisk.HIGH,
+    "sudo kill *": ToolRisk.CRITICAL,
+    "sudo kill -9 *": ToolRisk.CRITICAL,
+    "sudo kill -15 *": ToolRisk.CRITICAL,
+    "sudo pkill *": ToolRisk.CRITICAL,
 }
 
 # Commands that are NEVER allowed regardless of allowlist
