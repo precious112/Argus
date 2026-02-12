@@ -43,9 +43,9 @@ class GenerateChartTool(Tool):
                     "enum": ["line", "bar", "pie"],
                     "description": "Chart type: line, bar, or pie",
                 },
-                "title": {
+                "chart_title": {
                     "type": "string",
-                    "description": "Chart title",
+                    "description": "Chart title displayed above the chart",
                 },
                 "data": {
                     "type": "array",
@@ -77,12 +77,12 @@ class GenerateChartTool(Tool):
                     "description": "Unit suffix for values (e.g. '%', 'GB', 'ms')",
                 },
             },
-            "required": ["chart_type", "title", "data"],
+            "required": ["chart_type", "chart_title", "data"],
         }
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         chart_type = kwargs.get("chart_type")
-        title = kwargs.get("title", "")
+        title = kwargs.get("chart_title", "")
         data = kwargs.get("data")
 
         if not isinstance(data, list) or len(data) == 0:
