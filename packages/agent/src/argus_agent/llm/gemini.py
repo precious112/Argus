@@ -13,19 +13,18 @@ from argus_agent.llm.base import LLMMessage, LLMProvider, LLMResponse, ToolDefin
 logger = logging.getLogger("argus.llm.gemini")
 
 
-def _content_to_dict(content: Any) -> dict[str, Any]:
-    """Convert a protobuf Content object to a JSON-serializable dict.
+def _deep_convert(obj: Any) -> Any:
+    """Recursively convert protobuf MapComposite/RepeatedComposite to plain Python types.
 
-    Uses preserving_proto_field_name=True so keys stay snake_case
-    (e.g. ``function_call`` not ``functionCall``), matching the format
-    the Gemini SDK expects when dicts are passed as contents.
+    ``dict(fc.args)`` preserves RepeatedComposite for list values, which
+    breaks ``json.dumps``.  This helper deep-converts the whole tree.
     """
-    from google.protobuf.json_format import MessageToDict
+    if hasattr(obj, "items"):  # MapComposite or dict-like
+        return {k: _deep_convert(v) for k, v in obj.items()}
+    if hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes)):
+        return [_deep_convert(v) for v in obj]
+    return obj
 
-    return MessageToDict(
-        content._pb if hasattr(content, "_pb") else content,
-        preserving_proto_field_name=True,
-    )
 
 _MODEL_CONTEXT: dict[str, int] = {
     "gemini-1.5-pro": 1_000_000,
@@ -73,11 +72,7 @@ def _messages_to_gemini(messages: list[LLMMessage]) -> tuple[str, list[Any]]:
             # Use raw Gemini content if available (preserves thought_signatures)
             raw_content = msg.metadata.get("_gemini_content")
             if raw_content is not None:
-                # Pass dict directly — the Gemini SDK accepts dicts in contents
-                if isinstance(raw_content, dict):
-                    contents.append(raw_content)
-                else:
-                    contents.append(raw_content)
+                contents.append(raw_content)
                 continue
 
             # Fallback: reconstruct from internal format
@@ -208,18 +203,15 @@ class GeminiProvider(LLMProvider):
                     "type": "function",
                     "function": {
                         "name": fc.name,
-                        "arguments": json.dumps(dict(fc.args)) if fc.args else "{}",
+                        "arguments": json.dumps(_deep_convert(fc.args)) if fc.args else "{}",
                     },
                 })
 
         # Capture raw content to preserve thought_signatures for conversation history
-        # Store as JSON-serializable dict (not raw protobuf) to avoid serialization errors
         metadata: dict[str, Any] = {}
         if tool_calls:
             try:
-                metadata["_gemini_content"] = _content_to_dict(
-                    response.candidates[0].content
-                )
+                metadata["_gemini_content"] = response.candidates[0].content
             except (AttributeError, IndexError):
                 pass
 
@@ -286,21 +278,19 @@ class GeminiProvider(LLMProvider):
                         "type": "function",
                         "function": {
                             "name": fc.name,
-                            "arguments": json.dumps(dict(fc.args)) if fc.args else "{}",
+                            "arguments": json.dumps(_deep_convert(fc.args)) if fc.args else "{}",
                         },
                     })
 
         # Build raw content to preserve thought_signatures for conversation history
-        # Store as JSON-serializable dict (not raw protobuf) to avoid serialization errors
         metadata: dict[str, Any] = {}
         if tool_calls and raw_parts:
             try:
                 from google.generativeai import protos
-                content = protos.Content(
+                metadata["_gemini_content"] = protos.Content(
                     role="model",
                     parts=[p._pb for p in raw_parts],
                 )
-                metadata["_gemini_content"] = _content_to_dict(content)
             except Exception:
                 pass
 
