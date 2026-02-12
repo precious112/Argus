@@ -2,6 +2,8 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { ChartRenderer } from "./ChartRenderer";
+
 interface ToolResultCardProps {
   displayType: string;
   data: any;
@@ -25,6 +27,8 @@ export function ToolResultCard({ displayType, data }: ToolResultCardProps) {
       return <ProcessTable data={data} />;
     case "table":
       return <EventTable data={data} />;
+    case "chart":
+      return <ChartRenderer data={data} />;
     case "command_output":
       return <CommandOutput data={data} />;
     case "code_block":
@@ -133,40 +137,21 @@ function MetricsDisplay({ data }: { data: any }) {
           );
         })}
       </div>
-      {data.data_points?.length > 0 && (
+      {data.data_points?.length >= 2 && (
         <div className="border-t border-[var(--border)] px-3 py-1.5">
-          <Sparkline values={data.data_points.map((p: any) => p.value)} />
+          <ChartRenderer
+            data={{
+              chart_type: "line",
+              title: "",
+              x_key: "timestamp",
+              y_keys: ["value"],
+              unit: data.metric?.includes("percent") ? "%" : "",
+              data: data.data_points,
+            }}
+          />
         </div>
       )}
     </div>
-  );
-}
-
-function Sparkline({ values }: { values: number[] }) {
-  if (values.length < 2) return null;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const width = 200;
-  const height = 30;
-
-  const points = values
-    .map((v, i) => {
-      const x = (i / (values.length - 1)) * width;
-      const y = height - ((v - min) / range) * height;
-      return `${x},${y}`;
-    })
-    .join(" ");
-
-  return (
-    <svg width={width} height={height} className="text-argus-400">
-      <polyline
-        points={points}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      />
-    </svg>
   );
 }
 

@@ -229,6 +229,7 @@ def _make_baseline_update_task(tracker):
 def _register_all_tools() -> None:
     """Register all agent tools."""
     from argus_agent.tools.base import get_all_tools
+    from argus_agent.tools.chart import register_chart_tools
     from argus_agent.tools.command import register_command_tools
     from argus_agent.tools.log_search import register_log_tools
     from argus_agent.tools.metrics import register_metrics_tools
@@ -245,6 +246,7 @@ def _register_all_tools() -> None:
         register_security_tools()
         register_command_tools()
         register_sdk_tools()
+        register_chart_tools()
 
 
 def create_app() -> FastAPI:

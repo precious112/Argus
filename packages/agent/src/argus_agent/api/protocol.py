@@ -60,6 +60,7 @@ class ToolResultDisplayType(StrEnum):
     DIFF_VIEW = "diff_view"
     TABLE = "table"
     TEXT = "text"
+    CHART = "chart"
 
 
 class ServerMessage(BaseModel):
