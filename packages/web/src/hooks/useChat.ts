@@ -221,14 +221,20 @@ export function useChat() {
 
           // If we have a grouped message, update the matching tool segment
           if (currentResponseIdRef.current) {
-            for (const seg of segmentsRef.current) {
-              if (seg.type === "tool" && seg.toolCall.id === resultId) {
-                seg.toolResult = {
-                  displayType:
-                    (msg.data.display_type as string) || "json_tree",
-                  data: msg.data.result,
+            const idx = segmentsRef.current.findIndex(
+              (s) => s.type === "tool" && s.toolCall.id === resultId,
+            );
+            if (idx !== -1) {
+              const seg = segmentsRef.current[idx];
+              if (seg.type === "tool") {
+                segmentsRef.current[idx] = {
+                  ...seg,
+                  toolResult: {
+                    displayType:
+                      (msg.data.display_type as string) || "json_tree",
+                    data: msg.data.result,
+                  },
                 };
-                break;
               }
             }
 

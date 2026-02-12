@@ -25,6 +25,8 @@ export function ToolResultCard({ displayType, data }: ToolResultCardProps) {
       return <ProcessTable data={data} />;
     case "table":
       return <EventTable data={data} />;
+    case "command_output":
+      return <CommandOutput data={data} />;
     case "code_block":
       return <CodeBlock data={data} />;
     default:
@@ -333,6 +335,37 @@ function EventTable({ data }: { data: any }) {
         <div className="border-t border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
           Showing {maxDisplay} of {events.length}
         </div>
+      )}
+    </div>
+  );
+}
+
+function CommandOutput({ data }: { data: any }) {
+  const exitCode = data.exit_code ?? 0;
+  const isError = exitCode !== 0;
+
+  return (
+    <div className="rounded border border-[var(--border)] bg-[#0d1117] text-xs">
+      <div className="flex items-center gap-3 border-b border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+        <span className={isError ? "text-red-400" : "text-green-400"}>
+          exit {exitCode}
+        </span>
+        {data.duration_ms != null && (
+          <span>{data.duration_ms}ms</span>
+        )}
+      </div>
+      {data.stdout && (
+        <pre className="max-h-64 overflow-auto p-3 font-mono text-gray-300 whitespace-pre-wrap">
+          {data.stdout}
+        </pre>
+      )}
+      {data.stderr && (
+        <pre className="max-h-32 overflow-auto border-t border-[var(--border)] p-3 font-mono text-red-400 whitespace-pre-wrap">
+          {data.stderr}
+        </pre>
+      )}
+      {!data.stdout && !data.stderr && (
+        <div className="px-3 py-2 text-[var(--muted)]">No output</div>
       )}
     </div>
   );
