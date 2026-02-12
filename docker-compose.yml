@@ -18,6 +18,8 @@ services:
     cap_add:
       - SYS_PTRACE
       - KILL
+    security_opt:
+      - seccomp:unconfined
     environment:
       - ARGUS_HOST_ROOT=/host
       - ARGUS_DEBUG=false
