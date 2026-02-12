@@ -8,6 +8,12 @@ export type ResponseSegment =
       type: "tool";
       toolCall: { id: string; name: string; arguments: Record<string, unknown> };
       toolResult?: { displayType: string; data: unknown };
+    }
+  | {
+      type: "action";
+      actionId: string;
+      status: "executing" | "success" | "error";
+      content: string;
     };
 
 export interface Message {
@@ -79,11 +85,26 @@ export function MessageBubble({ message, onApproveAction, onRejectAction }: Mess
     );
   }
 
-  // System error messages
+  // System messages (errors, status updates, etc.)
   if (isSystem) {
+    const status = message.metadata?.status as string | undefined;
+    const isSuccess = status === "success";
+    const isExecuting = status === "executing";
+
+    const bgClass = isSuccess
+      ? "bg-green-900/20"
+      : isExecuting
+        ? "bg-[var(--card)]"
+        : "bg-red-900/20";
+    const textClass = isSuccess
+      ? "text-green-400"
+      : isExecuting
+        ? "text-[var(--muted)]"
+        : "text-red-400";
+
     return (
       <div className="flex justify-center">
-        <div className="rounded-lg bg-red-900/20 px-4 py-2 text-sm text-red-400">
+        <div className={`rounded-lg ${bgClass} px-4 py-2 text-sm ${textClass}`}>
           {message.content}
         </div>
       </div>
@@ -109,10 +130,24 @@ export function MessageBubble({ message, onApproveAction, onRejectAction }: Mess
         )}
         {!isUser && message.segments && message.segments.length > 0 ? (
           <div className="space-y-3">
-            {message.segments.map((seg, i) =>
-              seg.type === "text" ? (
-                <MarkdownContent key={i} content={seg.content} />
-              ) : (
+            {message.segments.map((seg, i) => {
+              if (seg.type === "text") {
+                return <MarkdownContent key={i} content={seg.content} />;
+              }
+              if (seg.type === "action") {
+                const colorClass =
+                  seg.status === "success"
+                    ? "border-green-800 bg-green-950/30 text-green-300"
+                    : seg.status === "error"
+                      ? "border-red-800 bg-red-950/30 text-red-300"
+                      : "border-[var(--border)] bg-[var(--background)] text-[var(--muted)]";
+                return (
+                  <div key={i} className={`rounded-lg border px-3 py-2 text-xs ${colorClass}`}>
+                    {seg.content}
+                  </div>
+                );
+              }
+              return (
                 <div
                   key={i}
                   className="rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2"
@@ -130,8 +165,8 @@ export function MessageBubble({ message, onApproveAction, onRejectAction }: Mess
                     <div className="text-[var(--muted)]">Executing...</div>
                   )}
                 </div>
-              ),
-            )}
+              );
+            })}
           </div>
         ) : !isUser ? (
           <MarkdownContent content={message.content} />

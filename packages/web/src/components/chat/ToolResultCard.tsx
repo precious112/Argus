@@ -23,6 +23,8 @@ export function ToolResultCard({ displayType, data }: ToolResultCardProps) {
       return <MetricsDisplay data={data} />;
     case "process_table":
       return <ProcessTable data={data} />;
+    case "table":
+      return <EventTable data={data} />;
     case "code_block":
       return <CodeBlock data={data} />;
     default:
@@ -250,6 +252,86 @@ function ProcessTable({ data }: { data: any }) {
       {items.length > maxDisplay && (
         <div className="border-t border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
           Showing {maxDisplay} of {items.length}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EventTable({ data }: { data: any }) {
+  const events = data.events || [];
+  const maxDisplay = 30;
+  const displayed = events.slice(0, maxDisplay);
+
+  if (displayed.length === 0) {
+    return (
+      <div className="rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-xs text-[var(--muted)]">
+        No events found
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded border border-[var(--border)] bg-[var(--card)] text-xs">
+      {data.count != null && (
+        <div className="border-b border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+          {data.count} event{data.count !== 1 ? "s" : ""}
+          {data.since_minutes ? ` in last ${data.since_minutes}m` : ""}
+        </div>
+      )}
+      <div className="max-h-72 overflow-auto">
+        <table className="w-full">
+          <thead className="sticky top-0 bg-[var(--background)] text-[var(--muted)]">
+            <tr>
+              <th className="px-2 py-1 text-left">Time</th>
+              <th className="px-2 py-1 text-left">Service</th>
+              <th className="px-2 py-1 text-left">Type</th>
+              <th className="px-2 py-1 text-left">Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {displayed.map((evt: any, i: number) => {
+              const d = evt.data || {};
+              const detail =
+                d.message ||
+                (d.type ? `${d.type}: ${d.message || ""}` : "") ||
+                JSON.stringify(d).slice(0, 120);
+              const levelColor =
+                d.level === "ERROR"
+                  ? "text-red-400"
+                  : d.level === "WARNING"
+                    ? "text-yellow-400"
+                    : "text-[var(--foreground)]";
+              const ts = evt.timestamp
+                ? new Date(evt.timestamp).toLocaleTimeString()
+                : "";
+
+              return (
+                <tr
+                  key={i}
+                  className="border-t border-[var(--border)]"
+                >
+                  <td className="whitespace-nowrap px-2 py-1 font-mono text-[var(--muted)]">
+                    {ts}
+                  </td>
+                  <td className="px-2 py-1 text-[var(--foreground)]">
+                    {evt.service}
+                  </td>
+                  <td className="px-2 py-1 text-[var(--muted)]">
+                    {evt.type}
+                  </td>
+                  <td className={`px-2 py-1 ${levelColor}`}>
+                    {detail}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {events.length > maxDisplay && (
+        <div className="border-t border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
+          Showing {maxDisplay} of {events.length}
         </div>
       )}
     </div>

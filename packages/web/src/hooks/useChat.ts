@@ -235,9 +235,35 @@ export function useChat() {
             lastEventTypeRef.current = "tool_result";
             updateGroupedMessage();
           } else {
-            // Fallback: update separate system message (legacy behavior)
-            setMessages((prev) =>
-              prev.map((m) =>
+            // Message already finalized — find matching tool segment in recent messages
+            setMessages((prev) => {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                const m = prev[i];
+                if (m.role === "assistant" && m.segments) {
+                  const segIdx = m.segments.findIndex(
+                    (s) => s.type === "tool" && s.toolCall.id === resultId,
+                  );
+                  if (segIdx !== -1) {
+                    const newSegs = [...m.segments];
+                    const seg = newSegs[segIdx];
+                    if (seg.type === "tool") {
+                      newSegs[segIdx] = {
+                        ...seg,
+                        toolResult: {
+                          displayType:
+                            (msg.data.display_type as string) || "json_tree",
+                          data: msg.data.result,
+                        },
+                      };
+                    }
+                    const updated = [...prev];
+                    updated[i] = { ...m, segments: newSegs };
+                    return updated;
+                  }
+                }
+              }
+              // Legacy: separate system message with toolCall
+              return prev.map((m) =>
                 m.toolCall?.id === resultId
                   ? {
                       ...m,
@@ -248,8 +274,8 @@ export function useChat() {
                       },
                     }
                   : m,
-              ),
-            );
+              );
+            });
           }
           break;
         }
@@ -272,15 +298,50 @@ export function useChat() {
 
         case "action_executing": {
           const execId = msg.data.id as string;
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `exec-${execId}`,
-              role: "system" as const,
-              content: `Executing action...`,
-              timestamp: new Date(),
-            },
-          ]);
+          if (currentResponseIdRef.current) {
+            finalizeTextSegment();
+            segmentsRef.current.push({
+              type: "action",
+              actionId: execId,
+              status: "executing",
+              content: "Executing action...",
+            });
+            lastEventTypeRef.current = "action_executing";
+            updateGroupedMessage();
+          } else {
+            // Append to most recent assistant message
+            setMessages((prev) => {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].role === "assistant" && prev[i].segments) {
+                  const updated = [...prev];
+                  updated[i] = {
+                    ...prev[i],
+                    segments: [
+                      ...(prev[i].segments || []),
+                      {
+                        type: "action" as const,
+                        actionId: execId,
+                        status: "executing" as const,
+                        content: "Executing action...",
+                      },
+                    ],
+                  };
+                  return updated;
+                }
+              }
+              // No assistant message — fall back to system message
+              return [
+                ...prev,
+                {
+                  id: `exec-${execId}`,
+                  role: "system" as const,
+                  content: "Executing action...",
+                  timestamp: new Date(),
+                  metadata: { status: "executing" },
+                },
+              ];
+            });
+          }
           break;
         }
 
@@ -288,19 +349,81 @@ export function useChat() {
           const completeData = msg.data;
           const exitCode = completeData.exit_code as number;
           const stdout = (completeData.stdout as string) || "";
-          const summary =
-            exitCode === 0
-              ? `Action completed successfully${stdout ? `: ${stdout.slice(0, 200)}` : ""}`
-              : `Action failed (exit code ${exitCode})`;
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: generateId(),
-              role: "system" as const,
-              content: summary,
-              timestamp: new Date(),
-            },
-          ]);
+          const actionId = (completeData.id as string) || "";
+          const isSuccess = exitCode === 0;
+          const summary = isSuccess
+            ? `Action completed successfully${stdout ? `: ${stdout.slice(0, 200)}` : ""}`
+            : `Action failed (exit code ${exitCode})`;
+          const status = isSuccess ? "success" : "error";
+
+          if (currentResponseIdRef.current) {
+            // Update existing executing segment or add new one
+            const existing = segmentsRef.current.find(
+              (s) =>
+                s.type === "action" &&
+                s.actionId === actionId &&
+                s.status === "executing",
+            );
+            if (existing && existing.type === "action") {
+              existing.status = status;
+              existing.content = summary;
+            } else {
+              finalizeTextSegment();
+              segmentsRef.current.push({
+                type: "action",
+                actionId: actionId || generateId(),
+                status,
+                content: summary,
+              });
+            }
+            lastEventTypeRef.current = "action_complete";
+            updateGroupedMessage();
+          } else {
+            // Update executing segment in most recent assistant message, or append
+            setMessages((prev) => {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                const m = prev[i];
+                if (m.role === "assistant" && m.segments) {
+                  const newSegs = [...m.segments];
+                  const execIdx = newSegs.findIndex(
+                    (s) =>
+                      s.type === "action" &&
+                      s.actionId === actionId &&
+                      s.status === "executing",
+                  );
+                  if (execIdx !== -1) {
+                    newSegs[execIdx] = {
+                      type: "action",
+                      actionId,
+                      status,
+                      content: summary,
+                    };
+                  } else {
+                    newSegs.push({
+                      type: "action",
+                      actionId: actionId || generateId(),
+                      status,
+                      content: summary,
+                    });
+                  }
+                  const updated = [...prev];
+                  updated[i] = { ...m, segments: newSegs };
+                  return updated;
+                }
+              }
+              // No assistant message — fall back to system message
+              return [
+                ...prev,
+                {
+                  id: generateId(),
+                  role: "system" as const,
+                  content: summary,
+                  timestamp: new Date(),
+                  metadata: { status },
+                },
+              ];
+            });
+          }
           break;
         }
 
