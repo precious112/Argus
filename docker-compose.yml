@@ -17,6 +17,7 @@ services:
     pid: "host"
     privileged: true
     environment:
+      - ARGUS_MODE=${ARGUS_MODE:-full}
       - ARGUS_HOST_ROOT=/host
       - ARGUS_DEBUG=false
       - ARGUS_LLM__PROVIDER=${ARGUS_LLM_PROVIDER:-openai}

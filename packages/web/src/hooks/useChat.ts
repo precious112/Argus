@@ -35,6 +35,7 @@ export function useChat() {
   const [isThinking, setIsThinking] = useState(false);
   const [activeToolCalls, setActiveToolCalls] = useState<ToolCall[]>([]);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [agentMode, setAgentMode] = useState<string>("full");
   const [alerts, setAlerts] = useState<AlertData[]>([]);
   const [budgetStatus, setBudgetStatus] = useState<BudgetStatus | null>(null);
   const streamingContentRef = useRef("");
@@ -93,6 +94,9 @@ export function useChat() {
           break;
 
         case "system_status":
+          if (msg.data.mode) {
+            setAgentMode(msg.data.mode as string);
+          }
           setSystemStatus(msg.data as SystemStatus);
           break;
 
@@ -575,6 +579,7 @@ export function useChat() {
     isThinking,
     activeToolCalls,
     systemStatus,
+    agentMode,
     alerts,
     budgetStatus,
     dismissAlert,

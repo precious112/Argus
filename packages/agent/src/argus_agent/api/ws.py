@@ -78,16 +78,19 @@ async def websocket_endpoint(websocket: WebSocket, client: str = "web") -> None:
         ),
     )
 
-    # Send initial system status
+    # Send initial system status (always, so frontend knows the mode)
+    from argus_agent.config import get_settings
+
+    settings = get_settings()
     snapshot = get_system_snapshot()
-    if snapshot:
-        await manager.send(
-            websocket,
-            ServerMessage(
-                type=ServerMessageType.SYSTEM_STATUS,
-                data=snapshot,
-            ),
-        )
+    status_data: dict[str, Any] = {**snapshot, "mode": settings.mode}
+    await manager.send(
+        websocket,
+        ServerMessage(
+            type=ServerMessageType.SYSTEM_STATUS,
+            data=status_data,
+        ),
+    )
 
     # Per-connection conversation memory
     memory = ConversationMemory()

@@ -19,6 +19,7 @@ export function ChatContainer() {
     messages,
     isThinking,
     systemStatus,
+    agentMode,
     alerts,
     budgetStatus,
     dismissAlert,
@@ -53,6 +54,7 @@ export function ChatContainer() {
         status={systemStatus}
         isConnected={isConnected}
         budgetStatus={budgetStatus}
+        mode={agentMode}
       />
 
       {/* Alert banner */}
