@@ -26,21 +26,28 @@ async def health_check() -> dict[str, Any]:
 async def system_status() -> dict[str, Any]:
     """Get current system status summary."""
     from argus_agent.collectors.system_metrics import get_system_snapshot
+    from argus_agent.config import get_settings
     from argus_agent.main import _get_collectors
+
+    settings = get_settings()
+    is_sdk_only = settings.mode == "sdk_only"
 
     metrics_col, process_mon, log_watch, scheduler = _get_collectors()
 
-    collector_status = {
-        "system_metrics": "running" if metrics_col and metrics_col.is_running else "stopped",
-        "process_monitor": "running" if process_mon and process_mon.is_running else "stopped",
-        "log_watcher": "running" if log_watch and log_watch.is_running else "stopped",
-    }
+    collector_status: dict[str, str] = {}
+    if not is_sdk_only:
+        collector_status = {
+            "system_metrics": "running" if metrics_col and metrics_col.is_running else "stopped",
+            "process_monitor": "running" if process_mon and process_mon.is_running else "stopped",
+            "log_watcher": "running" if log_watch and log_watch.is_running else "stopped",
+        }
 
-    snapshot = get_system_snapshot()
+    snapshot = get_system_snapshot() if not is_sdk_only else {}
 
     result: dict[str, Any] = {
         "status": "ok",
         "version": __version__,
+        "mode": settings.mode,
         "collectors": collector_status,
         "system": snapshot if snapshot else {},
         "agent": {
@@ -52,7 +59,7 @@ async def system_status() -> dict[str, Any]:
     if scheduler and scheduler.is_running:
         result["scheduler"] = scheduler.get_status()
 
-    if log_watch:
+    if log_watch and not is_sdk_only:
         result["watched_files"] = log_watch.watched_files
 
     return result
@@ -179,11 +186,16 @@ async def get_logs(
 
 
 @router.post("/ask")
-async def ask_question(body: dict[str, Any]) -> dict[str, Any]:
+async def ask_question(
+    body: dict[str, Any],
+    client: str = "web",
+) -> dict[str, Any]:
     """One-off question to the agent (non-streaming)."""
     question = body.get("question", "")
     if not question:
         raise HTTPException(status_code=400, detail="No question provided")
+
+    client_type = client if client in ("cli", "web") else "web"
 
     try:
         from argus_agent.agent.loop import AgentLoop
@@ -195,7 +207,10 @@ async def ask_question(body: dict[str, Any]) -> dict[str, Any]:
             return {"answer": "LLM provider not configured.", "error": "no_provider"}
 
         memory = ConversationMemory()
-        agent = AgentLoop(provider=provider, memory=memory)
+        agent = AgentLoop(
+            provider=provider, memory=memory,
+            client_type=client_type,
+        )
         result = await agent.run(question)
         return {
             "answer": result.content,
@@ -206,6 +221,53 @@ async def ask_question(body: dict[str, Any]) -> dict[str, Any]:
         }
     except Exception as e:
         return {"answer": "", "error": str(e)}
+
+
+@router.get("/services")
+async def list_services() -> dict[str, Any]:
+    """List all services sending SDK telemetry with health summary."""
+    try:
+        from argus_agent.storage.timeseries import query_service_summary
+
+        summaries = query_service_summary(since_minutes=1440)
+        return {"services": summaries, "count": len(summaries)}
+    except RuntimeError:
+        return {"services": [], "count": 0, "error": "Storage not initialized"}
+
+
+@router.get("/services/{service}/metrics")
+async def service_metrics(
+    service: str,
+    since_minutes: int = 60,
+    interval_minutes: int = 5,
+) -> dict[str, Any]:
+    """Get aggregated metrics for a specific service."""
+    try:
+        from argus_agent.storage.timeseries import (
+            query_error_groups,
+            query_function_metrics,
+        )
+
+        buckets = query_function_metrics(
+            service=service,
+            since_minutes=since_minutes,
+            interval_minutes=interval_minutes,
+        )
+        errors = query_error_groups(service=service, since_minutes=since_minutes)
+
+        return {
+            "service": service,
+            "metrics": buckets,
+            "error_groups": errors,
+            "since_minutes": since_minutes,
+        }
+    except RuntimeError:
+        return {
+            "service": service,
+            "metrics": [],
+            "error_groups": [],
+            "error": "Storage not initialized",
+        }
 
 
 @router.get("/settings")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -232,6 +232,190 @@ def query_latest_metrics() -> dict[str, float]:
         )
     """).fetchall()
     return {row[0]: row[1] for row in result}
+
+
+def query_function_metrics(
+    service: str = "",
+    function_name: str = "",
+    since_minutes: int = 60,
+    interval_minutes: int = 5,
+) -> list[dict[str, Any]]:
+    """Aggregate invocation events into per-bucket function metrics.
+
+    Returns buckets with: invocation_count, error_count, error_rate,
+    p50/p95/p99 duration, cold_start_count, cold_start_pct.
+    """
+    conn = get_connection()
+    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+
+    conditions = ["timestamp >= ?", "event_type IN ('invocation_start', 'invocation_end')"]
+    params: list[Any] = [since]
+
+    if service:
+        conditions.append("service = ?")
+        params.append(service)
+
+    where = " AND ".join(conditions)
+
+    # Query invocation_end events for duration aggregation
+    query = f"""
+        SELECT
+            time_bucket(INTERVAL '{interval_minutes} minutes', timestamp) AS bucket,
+            COUNT(*) FILTER (WHERE event_type = 'invocation_end') AS invocation_count,
+            COUNT(*) FILTER (WHERE event_type = 'invocation_end'
+                AND json_extract_string(data, '$.status') != 'ok') AS error_count,
+            COALESCE(AVG(CAST(json_extract_string(data, '$.duration_ms') AS DOUBLE))
+                FILTER (WHERE event_type = 'invocation_end'), 0) AS avg_duration,
+            COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP
+                (ORDER BY CAST(json_extract_string(data, '$.duration_ms') AS DOUBLE))
+                FILTER (WHERE event_type = 'invocation_end'), 0) AS p50_duration,
+            COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP
+                (ORDER BY CAST(json_extract_string(data, '$.duration_ms') AS DOUBLE))
+                FILTER (WHERE event_type = 'invocation_end'), 0) AS p95_duration,
+            COALESCE(PERCENTILE_CONT(0.99) WITHIN GROUP
+                (ORDER BY CAST(json_extract_string(data, '$.duration_ms') AS DOUBLE))
+                FILTER (WHERE event_type = 'invocation_end'), 0) AS p99_duration,
+            COUNT(*) FILTER (WHERE event_type = 'invocation_start'
+                AND json_extract_string(data, '$.is_cold_start') = 'true') AS cold_start_count,
+            COUNT(*) FILTER (WHERE event_type = 'invocation_start') AS start_count
+        FROM sdk_events
+        WHERE {where}
+        GROUP BY bucket
+        ORDER BY bucket
+    """  # noqa: S608
+
+    try:
+        result = conn.execute(query, params).fetchall()
+    except Exception:
+        logger.exception("Failed to query function metrics")
+        return []
+
+    buckets = []
+    for row in result:
+        inv_count = row[1] or 0
+        error_count = row[2] or 0
+        start_count = row[8] or 0
+        cold_starts = row[7] or 0
+
+        buckets.append({
+            "bucket": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]),
+            "invocation_count": inv_count,
+            "error_count": error_count,
+            "error_rate": round(error_count / inv_count * 100, 1) if inv_count > 0 else 0,
+            "avg_duration_ms": round(row[3], 2),
+            "p50_duration_ms": round(row[4], 2),
+            "p95_duration_ms": round(row[5], 2),
+            "p99_duration_ms": round(row[6], 2),
+            "cold_start_count": cold_starts,
+            "cold_start_pct": round(cold_starts / start_count * 100, 1) if start_count > 0 else 0,
+        })
+
+    return buckets
+
+
+def query_error_groups(
+    service: str = "",
+    since_minutes: int = 1440,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Group exception events by type/message pattern with counts."""
+    conn = get_connection()
+    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+
+    conditions = ["timestamp >= ?", "event_type = 'exception'"]
+    params: list[Any] = [since]
+
+    if service:
+        conditions.append("service = ?")
+        params.append(service)
+
+    where = " AND ".join(conditions)
+    params.append(limit)
+
+    query = f"""
+        SELECT
+            json_extract_string(data, '$.type') AS error_type,
+            json_extract_string(data, '$.message') AS error_message,
+            COUNT(*) AS count,
+            MIN(timestamp) AS first_seen,
+            MAX(timestamp) AS last_seen,
+            service
+        FROM sdk_events
+        WHERE {where}
+        GROUP BY error_type, error_message, service
+        ORDER BY count DESC
+        LIMIT ?
+    """  # noqa: S608
+
+    try:
+        result = conn.execute(query, params).fetchall()
+    except Exception:
+        logger.exception("Failed to query error groups")
+        return []
+
+    return [
+        {
+            "error_type": row[0] or "Unknown",
+            "error_message": (row[1] or "")[:200],
+            "count": row[2],
+            "first_seen": row[3].isoformat() if hasattr(row[3], "isoformat") else str(row[3]),
+            "last_seen": row[4].isoformat() if hasattr(row[4], "isoformat") else str(row[4]),
+            "service": row[5],
+        }
+        for row in result
+    ]
+
+
+def query_service_summary(
+    service: str = "",
+    since_minutes: int = 1440,
+) -> list[dict[str, Any]]:
+    """High-level summary per service over the given time window."""
+    conn = get_connection()
+    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+
+    conditions = ["timestamp >= ?"]
+    params: list[Any] = [since]
+
+    if service:
+        conditions.append("service = ?")
+        params.append(service)
+
+    where = " AND ".join(conditions)
+
+    query = f"""
+        SELECT
+            service,
+            COUNT(*) AS event_count,
+            COUNT(DISTINCT event_type) AS event_type_count,
+            COUNT(*) FILTER (WHERE event_type = 'exception') AS error_count,
+            COUNT(*) FILTER (WHERE event_type = 'invocation_end') AS invocation_count,
+            MIN(timestamp) AS first_seen,
+            MAX(timestamp) AS last_seen
+        FROM sdk_events
+        WHERE {where}
+        GROUP BY service
+        ORDER BY event_count DESC
+    """  # noqa: S608
+
+    try:
+        result = conn.execute(query, params).fetchall()
+    except Exception:
+        logger.exception("Failed to query service summary")
+        return []
+
+    return [
+        {
+            "service": row[0],
+            "event_count": row[1],
+            "event_type_count": row[2],
+            "error_count": row[3],
+            "invocation_count": row[4],
+            "first_seen": row[5].isoformat() if hasattr(row[5], "isoformat") else str(row[5]),
+            "last_seen": row[6].isoformat() if hasattr(row[6], "isoformat") else str(row[6]),
+        }
+        for row in result
+    ]
 
 
 def query_log_entries(

@@ -7,13 +7,20 @@ import logging
 import queue
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from argus.serverless import ServerlessContext
 
 logger = logging.getLogger("argus.sdk")
 
 _DEFAULT_FLUSH_INTERVAL = 5.0
 _DEFAULT_BATCH_SIZE = 100
 _MAX_RETRIES = 3
+
+# Serverless-tuned defaults
+_SERVERLESS_FLUSH_INTERVAL = 1.0
+_SERVERLESS_BATCH_SIZE = 10
 
 
 class ArgusClient:
@@ -32,6 +39,7 @@ class ArgusClient:
         self._service_name = service_name
         self._flush_interval = flush_interval
         self._batch_size = batch_size
+        self._serverless_context: ServerlessContext | None = None
 
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10_000)
         self._running = True
@@ -41,18 +49,51 @@ class ArgusClient:
         self._thread.start()
         atexit.register(self.close)
 
+    def set_serverless_context(self, ctx: ServerlessContext) -> None:
+        """Set the serverless context for event enrichment."""
+        self._serverless_context = ctx
+
     def send_event(self, event_type: str, data: dict[str, Any] | None = None) -> None:
         """Queue a telemetry event (non-blocking)."""
         if not self._running:
             return
+
+        event_data = dict(data) if data else {}
+
+        # Enrich with serverless context
+        if self._serverless_context:
+            ctx_data = self._serverless_context.to_dict()
+            # Don't overwrite existing keys
+            for k, v in ctx_data.items():
+                if k not in event_data:
+                    event_data[k] = v
+
+        # Enrich with active invocation ID
+        try:
+            from argus.serverless import get_active_invocation_id
+
+            inv_id = get_active_invocation_id()
+            if inv_id and "invocation_id" not in event_data:
+                event_data["invocation_id"] = inv_id
+        except ImportError:
+            pass
+
         try:
             self._queue.put_nowait({
                 "type": event_type,
                 "service": self._service_name,
-                "data": data or {},
+                "data": event_data,
             })
         except queue.Full:
             logger.warning("Argus SDK event queue full, dropping event")
+
+    def flush_sync(self) -> None:
+        """Flush all queued events synchronously.
+
+        Use this in serverless environments where the process may be
+        frozen/terminated shortly after the handler returns.
+        """
+        self._flush()
 
     def _flush_loop(self) -> None:
         """Background thread: flush events periodically."""

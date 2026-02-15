@@ -14,6 +14,9 @@ the user understand and manage their production systems.
 - View active network connections and listening ports
 - Detect anomalies, error patterns, and resource trends
 - Query SDK telemetry events (logs, exceptions, traces) from instrumented applications
+- Analyze serverless function performance: invocation count, error rates, \
+p50/p95/p99 latency, cold start percentage over time
+- Group and analyze errors/exceptions from instrumented apps
 - Generate charts and graphs: use generate_chart after querying data to display \
 line charts (time-series), bar charts (comparisons), or pie charts (distributions)
 
@@ -47,7 +50,8 @@ paths exist inside the monitored application's container, not yours.
 - When reporting issues, prioritize: what happened, when, impact, and suggested fix.
 - Use markdown formatting for readability (code blocks, bold, lists).
 - Think step by step, showing your reasoning between tool calls.
-- Example flow: "Let me check the system metrics..." → [tool call] → "CPU is at 5%. Let me check the processes..." → [tool call] → "Here's what I found..."
+- Example flow: "Let me check the system metrics..." → [tool call] → \
+"CPU is at 5%. Let me check the processes..." → [tool call] → "Here's what I found..."
 """
 
 
@@ -55,6 +59,7 @@ def build_system_prompt(
     system_state: str = "",
     active_alerts: str = "",
     baseline: str = "",
+    client_type: str = "web",
 ) -> str:
     """Build the full system prompt with dynamic context layers."""
     parts = [SYSTEM_PROMPT]
@@ -81,7 +86,49 @@ def build_system_prompt(
     if baseline:
         parts.append(f"\n## System Baseline (Normal Behavior)\n{baseline}")
 
+    # Inject SDK services context
+    sdk_context = _get_sdk_services_text()
+    if sdk_context:
+        parts.append(f"\n## Active SDK Services\n{sdk_context}")
+
+    # Client-specific formatting instructions
+    if client_type == "cli":
+        parts.append("""
+## Client: Terminal (CLI)
+The user is connected via a terminal CLI. Format your output for terminal rendering:
+- Use plain markdown: headers, bold, bullet points, code blocks
+- For data tables, use markdown tables (they render well in terminals)
+- Do NOT reference charts or visual components -- they won't render
+- Keep line lengths reasonable (under 100 chars when possible)
+- Use code blocks for log output, configs, and command examples""")
+    else:
+        parts.append("""
+## Client: Web UI
+The user is connected via the web dashboard. You can use rich formatting:
+- Markdown with full formatting (headers, bold, lists, code blocks, tables)
+- Tool results will render as interactive components (charts, tables, log viewers)
+- Use generate_chart when visualizations would help""")
+
     return "\n".join(parts)
+
+
+def _get_sdk_services_text() -> str:
+    """Get active SDK services for the prompt."""
+    try:
+        from argus_agent.storage.timeseries import query_service_summary
+
+        summaries = query_service_summary()
+        if not summaries:
+            return ""
+        lines = []
+        for s in summaries:
+            lines.append(
+                f"- {s['service']}: {s['event_count']} events, "
+                f"last seen {s.get('last_seen', 'N/A')}"
+            )
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 def _get_baseline_text() -> str:

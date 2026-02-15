@@ -65,11 +65,13 @@ class AgentLoop:
         memory: ConversationMemory,
         on_event: EventCallback | None = None,
         budget: Any | None = None,
+        client_type: str = "web",
     ) -> None:
         self.provider = provider
         self.memory = memory
         self._on_event = on_event
         self._budget = budget  # Optional TokenBudget for background tasks
+        self._client_type = client_type
 
     async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit an event to the callback (e.g., WebSocket handler)."""
@@ -82,7 +84,7 @@ class AgentLoop:
         self.memory.add_user_message(user_message)
 
         result = AgentResult()
-        system_prompt = build_system_prompt()
+        system_prompt = build_system_prompt(client_type=self._client_type)
         tool_defs = get_tool_definitions()
 
         for round_num in range(MAX_TOOL_ROUNDS):

@@ -212,14 +212,19 @@ async def update_system_snapshot() -> dict[str, Any]:
     # Top 5 processes by CPU
     try:
         procs = []
-        for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
+        for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent", "username"]):
             info = p.info
             if info and info.get("cpu_percent", 0):
                 procs.append(info)
         procs.sort(key=lambda x: x.get("cpu_percent", 0), reverse=True)
         snapshot["top_processes"] = [
-            f"{p['name']} (PID {p['pid']}): CPU {p.get('cpu_percent', 0):.1f}%, "
-            f"MEM {p.get('memory_percent', 0):.1f}%"
+            {
+                "pid": p.get("pid", 0),
+                "name": p.get("name", ""),
+                "cpu_percent": p.get("cpu_percent", 0),
+                "memory_percent": p.get("memory_percent", 0),
+                "username": p.get("username", ""),
+            }
             for p in procs[:5]
         ]
     except Exception:
@@ -252,6 +257,13 @@ def format_snapshot_for_prompt(snapshot: dict[str, Any] | None = None) -> str:
     if "top_processes" in s:
         lines.append("- Top processes:")
         for p in s["top_processes"]:
-            lines.append(f"  - {p}")
+            if isinstance(p, dict):
+                lines.append(
+                    f"  - {p.get('name', '?')} (PID {p.get('pid', '?')}): "
+                    f"CPU {p.get('cpu_percent', 0):.1f}%, "
+                    f"MEM {p.get('memory_percent', 0):.1f}%"
+                )
+            else:
+                lines.append(f"  - {p}")
 
     return "\n".join(lines)

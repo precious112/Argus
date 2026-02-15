@@ -43,6 +43,15 @@ class ArgusAPI:
     def ask(self, question: str) -> dict[str, Any]:
         return self._client.post("/ask", json={"question": question}).json()
 
+    def services(self) -> dict[str, Any]:
+        return self._client.get("/services").json()
+
+    def service_metrics(self, service: str, since_minutes: int = 60) -> dict[str, Any]:
+        return self._client.get(
+            f"/services/{service}/metrics",
+            params={"since_minutes": since_minutes},
+        ).json()
+
     def settings(self) -> dict[str, Any]:
         return self._client.get("/settings").json()
 

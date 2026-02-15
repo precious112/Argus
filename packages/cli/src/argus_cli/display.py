@@ -130,6 +130,33 @@ def print_metrics(data: dict[str, float]) -> None:
     console.print(table)
 
 
+def print_services(services: list[dict[str, Any]]) -> None:
+    """Print SDK services as a table."""
+    if not services:
+        console.print("[dim]No SDK services found.[/dim]")
+        return
+
+    table = Table(title="SDK Services", show_header=True, header_style="bold green")
+    table.add_column("Service", style="bold")
+    table.add_column("Events", justify="right")
+    table.add_column("Errors", justify="right")
+    table.add_column("Invocations", justify="right")
+    table.add_column("Last Seen")
+
+    for s in services:
+        error_count = s.get("error_count", 0)
+        error_style = "red" if error_count > 0 else "green"
+        table.add_row(
+            s.get("service", ""),
+            str(s.get("event_count", 0)),
+            f"[{error_style}]{error_count}[/{error_style}]",
+            str(s.get("invocation_count", 0)),
+            s.get("last_seen", "")[:19],
+        )
+
+    console.print(table)
+
+
 def print_answer(text: str) -> None:
     """Print an agent response."""
     console.print(Panel(text, title="Argus", border_style="cyan"))

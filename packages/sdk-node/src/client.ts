@@ -2,6 +2,8 @@
  * HTTP client for pushing telemetry to Argus agent.
  */
 
+import type { ServerlessContext } from "./serverless";
+
 export interface ArgusClientConfig {
   serverUrl: string;
   apiKey?: string;
@@ -24,6 +26,7 @@ export class ArgusClient {
   private buffer: TelemetryEvent[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
+  private serverlessContext: ServerlessContext | null = null;
 
   constructor(config: ArgusClientConfig) {
     this.serverUrl = config.serverUrl.replace(/\/$/, "");
@@ -35,12 +38,41 @@ export class ArgusClient {
     this.timer = setInterval(() => this.flush(), interval);
   }
 
+  setServerlessContext(ctx: ServerlessContext): void {
+    this.serverlessContext = ctx;
+  }
+
   sendEvent(type: string, data: Record<string, unknown> = {}): void {
     if (this.closed) return;
+
+    const enrichedData = { ...data };
+
+    // Enrich with serverless context
+    if (this.serverlessContext) {
+      const { contextToData } = require("./serverless");
+      const ctxData = contextToData(this.serverlessContext);
+      for (const [k, v] of Object.entries(ctxData)) {
+        if (!(k in enrichedData)) {
+          enrichedData[k] = v;
+        }
+      }
+    }
+
+    // Enrich with active invocation ID
+    try {
+      const { getActiveInvocationId } = require("./serverless");
+      const invId = getActiveInvocationId();
+      if (invId && !("invocation_id" in enrichedData)) {
+        enrichedData.invocation_id = invId;
+      }
+    } catch {
+      // serverless module not available
+    }
+
     this.buffer.push({
       type,
       service: this.serviceName,
-      data,
+      data: enrichedData,
     });
     if (this.buffer.length >= this.batchSize) {
       this.flush();
@@ -80,6 +112,11 @@ export class ArgusClient {
         }
       }
     }
+  }
+
+  flushSync(): void {
+    // In Node.js we can't truly block, but we trigger the flush
+    this.flush();
   }
 
   async close(): Promise<void> {

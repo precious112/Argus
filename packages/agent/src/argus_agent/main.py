@@ -33,6 +33,7 @@ _baseline_tracker = None
 _anomaly_detector = None
 _investigator = None
 _action_engine = None
+_sdk_telemetry_collector = None
 
 
 def _get_collectors():
@@ -76,6 +77,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _metrics_collector, _process_monitor, _log_watcher, _scheduler
     global _security_scanner, _alert_engine, _token_budget
     global _baseline_tracker, _anomaly_detector, _investigator, _action_engine
+    global _sdk_telemetry_collector
 
     settings = get_settings()
 
@@ -141,25 +143,34 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _alert_engine.set_channels(channels)
     await _alert_engine.start()
 
-    # Start collectors
-    from argus_agent.collectors.log_watcher import LogWatcher
-    from argus_agent.collectors.process_monitor import ProcessMonitor
-    from argus_agent.collectors.system_metrics import SystemMetricsCollector
+    is_sdk_only = settings.mode == "sdk_only"
 
-    _metrics_collector = SystemMetricsCollector()
-    _metrics_collector.anomaly_detector = _anomaly_detector
-    _process_monitor = ProcessMonitor()
-    _log_watcher = LogWatcher()
+    # Start host-level collectors only in full mode
+    if not is_sdk_only:
+        from argus_agent.collectors.log_watcher import LogWatcher
+        from argus_agent.collectors.process_monitor import ProcessMonitor
+        from argus_agent.collectors.system_metrics import SystemMetricsCollector
 
-    await _metrics_collector.start()
-    await _process_monitor.start()
-    await _log_watcher.start()
+        _metrics_collector = SystemMetricsCollector()
+        _metrics_collector.anomaly_detector = _anomaly_detector
+        _process_monitor = ProcessMonitor()
+        _log_watcher = LogWatcher()
 
-    # 5. Security scanner
-    from argus_agent.collectors.security_scanner import SecurityScanner
+        await _metrics_collector.start()
+        await _process_monitor.start()
+        await _log_watcher.start()
 
-    _security_scanner = SecurityScanner()
-    await _security_scanner.start()
+        # Security scanner
+        from argus_agent.collectors.security_scanner import SecurityScanner
+
+        _security_scanner = SecurityScanner()
+        await _security_scanner.start()
+
+    # Start SDK telemetry virtual collector (both modes)
+    from argus_agent.collectors.sdk_telemetry import SDKTelemetryCollector
+
+    _sdk_telemetry_collector = SDKTelemetryCollector()
+    await _sdk_telemetry_collector.start()
 
     # Start scheduler with periodic tasks
     from argus_agent.scheduler.scheduler import Scheduler
@@ -170,18 +181,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     _scheduler = Scheduler()
-    _scheduler.register("health_check", quick_health_check, interval_seconds=300)  # 5 min
-    _scheduler.register("trend_analysis", trend_analysis, interval_seconds=1800)  # 30 min
-    _scheduler.register(
-        "baseline_update",
-        _make_baseline_update_task(_baseline_tracker),
-        interval_seconds=21600,  # 6h
-    )
-    _scheduler.register(
-        "security_check",
-        quick_security_check,
-        interval_seconds=300,  # 5 min
-    )
+
+    if not is_sdk_only:
+        _scheduler.register("health_check", quick_health_check, interval_seconds=300)
+        _scheduler.register("trend_analysis", trend_analysis, interval_seconds=1800)
+        _scheduler.register(
+            "baseline_update",
+            _make_baseline_update_task(_baseline_tracker),
+            interval_seconds=21600,
+        )
+        _scheduler.register(
+            "security_check",
+            quick_security_check,
+            interval_seconds=300,
+        )
+
     _scheduler.register(
         "ai_periodic_review",
         _investigator.periodic_review,
@@ -194,17 +208,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     await _scheduler.start()
 
-    # Collect initial system snapshot for agent context
-    from argus_agent.collectors.system_metrics import update_system_snapshot
+    # Collect initial system snapshot for agent context (full mode only)
+    if not is_sdk_only:
+        from argus_agent.collectors.system_metrics import update_system_snapshot
 
-    await update_system_snapshot()
+        await update_system_snapshot()
 
-    logger.info("Argus agent server started on %s:%d", settings.server.host, settings.server.port)
+    mode_str = "sdk_only" if is_sdk_only else "full"
+    logger.info(
+        "Argus agent server started on %s:%d (mode=%s)",
+        settings.server.host, settings.server.port, mode_str,
+    )
     yield
 
     # Shutdown in reverse order
     if _scheduler:
         await _scheduler.stop()
+    if _sdk_telemetry_collector:
+        await _sdk_telemetry_collector.stop()
     if _security_scanner:
         await _security_scanner.stop()
     if _log_watcher:
@@ -231,6 +252,8 @@ def _register_all_tools() -> None:
     from argus_agent.tools.base import get_all_tools
     from argus_agent.tools.chart import register_chart_tools
     from argus_agent.tools.command import register_command_tools
+    from argus_agent.tools.error_analysis import register_error_analysis_tools
+    from argus_agent.tools.function_metrics import register_function_metrics_tools
     from argus_agent.tools.log_search import register_log_tools
     from argus_agent.tools.metrics import register_metrics_tools
     from argus_agent.tools.network import register_network_tools
@@ -247,6 +270,8 @@ def _register_all_tools() -> None:
         register_command_tools()
         register_sdk_tools()
         register_chart_tools()
+        register_function_metrics_tools()
+        register_error_analysis_tools()
 
 
 def create_app() -> FastAPI:

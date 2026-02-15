@@ -58,6 +58,12 @@ class EventType(StrEnum):
     # Anomaly events
     ANOMALY_DETECTED = "anomaly_detected"
 
+    # SDK telemetry events
+    SDK_ERROR_SPIKE = "sdk_error_spike"
+    SDK_LATENCY_DEGRADATION = "sdk_latency_degradation"
+    SDK_COLD_START_SPIKE = "sdk_cold_start_spike"
+    SDK_SERVICE_SILENT = "sdk_service_silent"
+
     # Scheduler events
     HEALTH_CHECK = "health_check"
     TREND_ANALYSIS = "trend_analysis"

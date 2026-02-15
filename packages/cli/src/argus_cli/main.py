@@ -10,10 +10,33 @@ import typer
 app = typer.Typer(
     name="argus",
     help="Argus - AI-Native Observability Platform CLI",
-    no_args_is_help=True,
+    no_args_is_help=False,
+    invoke_without_command=True,
 )
 
 _DEFAULT_SERVER = os.environ.get("ARGUS_URL", "http://localhost:7600")
+
+
+@app.callback()
+def callback(
+    ctx: typer.Context,
+    server: str = typer.Option(_DEFAULT_SERVER, help="Argus server URL"),
+    no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive mode"),
+) -> None:
+    """Argus - AI-Native Observability Platform CLI.
+
+    Running `argus` with no subcommand starts an interactive chat session.
+    """
+    ctx.ensure_object(dict)
+    ctx.obj["server"] = server
+    # If no subcommand was invoked, start interactive chat
+    if ctx.invoked_subcommand is None:
+        if no_interactive:
+            typer.echo(ctx.get_help())
+            raise typer.Exit(0)
+        from argus_cli.chat import start_chat
+
+        asyncio.run(start_chat(server))
 
 
 @app.command()
@@ -114,18 +137,41 @@ def metrics_cmd(
 ) -> None:
     """Show latest metrics."""
     from argus_cli.api import ArgusAPI
-    from argus_cli.display import print_metrics
+    from argus_cli.display import print_metrics, print_status
 
     api = ArgusAPI(server)
     try:
+        # Show system metrics from status endpoint
+        status_data = api.status()
+        print_status(status_data)
+
+        # Show token budget metrics
         data = api.metrics()
-        # Budget endpoint returns token usage, show it as metrics
         print_metrics({
             "hourly_used": data.get("hourly_used", 0),
             "hourly_limit": data.get("hourly_limit", 0),
             "daily_used": data.get("daily_used", 0),
             "daily_limit": data.get("daily_limit", 0),
         })
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        api.close()
+
+
+@app.command()
+def services(
+    server: str = typer.Option(_DEFAULT_SERVER, help="Argus server URL"),
+) -> None:
+    """List SDK-instrumented services."""
+    from argus_cli.api import ArgusAPI
+    from argus_cli.display import print_services
+
+    api = ArgusAPI(server)
+    try:
+        data = api.services()
+        print_services(data.get("services", []))
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)

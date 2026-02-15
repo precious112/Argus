@@ -99,6 +99,34 @@ DEFAULT_RULES: list[AlertRule] = [
         min_severity=EventSeverity.NOTABLE,
         cooldown_seconds=600,
     ),
+    AlertRule(
+        id="sdk_error_spike",
+        name="SDK Error Rate Spike",
+        event_types=[EventType.SDK_ERROR_SPIKE],
+        min_severity=EventSeverity.URGENT,
+        auto_investigate=True,
+    ),
+    AlertRule(
+        id="sdk_latency",
+        name="SDK Latency Degradation",
+        event_types=[EventType.SDK_LATENCY_DEGRADATION],
+        min_severity=EventSeverity.NOTABLE,
+        cooldown_seconds=600,
+    ),
+    AlertRule(
+        id="sdk_cold_start",
+        name="SDK Cold Start Spike",
+        event_types=[EventType.SDK_COLD_START_SPIKE],
+        min_severity=EventSeverity.NOTABLE,
+        cooldown_seconds=600,
+    ),
+    AlertRule(
+        id="sdk_service_silent",
+        name="SDK Service Silent",
+        event_types=[EventType.SDK_SERVICE_SILENT],
+        min_severity=EventSeverity.NOTABLE,
+        cooldown_seconds=1800,
+    ),
 ]
 
 

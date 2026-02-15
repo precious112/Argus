@@ -1,4 +1,4 @@
-"""Example FastAPI application instrumented with Argus SDK."""
+"""Test FastAPI app instrumented with Argus SDK — deployed on Railway."""
 
 import asyncio
 import os
@@ -9,7 +9,6 @@ from argus.decorators import trace
 from argus.exceptions import install as install_exception_hook
 from argus.logger import ArgusHandler
 from argus.middleware.fastapi import ArgusMiddleware
-from argus.serverless import detect_runtime
 
 import logging
 from fastapi import FastAPI
@@ -19,7 +18,7 @@ from fastapi.responses import JSONResponse
 argus.init(
     server_url=os.getenv("ARGUS_URL", "http://localhost:7600"),
     api_key=os.getenv("ARGUS_API_KEY", ""),
-    service_name="example-fastapi",
+    service_name="railway-fastapi-test",
 )
 install_exception_hook()
 
@@ -27,30 +26,22 @@ install_exception_hook()
 handler = ArgusHandler()
 logging.getLogger().addHandler(handler)
 
-# Argus auto-detects serverless runtimes (Lambda, Vercel, etc.)
-# In serverless, it uses faster flush intervals and enriches events
-# with runtime context. For traditional servers, this is a no-op.
-runtime = detect_runtime()
-if runtime:
-    logger_setup = logging.getLogger("example")
-    logger_setup.info("Running in serverless runtime: %s", runtime)
-
-app = FastAPI(title="Argus Example App")
+app = FastAPI(title="Argus Railway Test App")
 app.add_middleware(ArgusMiddleware)
 
-logger = logging.getLogger("example")
+logger = logging.getLogger("railway-test")
 
 
 @app.get("/")
 async def root():
     """Health check endpoint."""
-    return {"status": "ok", "service": "example-fastapi"}
+    return {"status": "ok", "service": "railway-fastapi-test"}
 
 
 @app.get("/users")
 @trace("get_users")
 async def get_users():
-    """Return a list of mock users."""
+    """Return mock users — tests normal request tracing."""
     await asyncio.sleep(random.uniform(0.01, 0.1))
     argus.event("users_fetched", {"count": 3})
     return {
@@ -75,7 +66,7 @@ async def trigger_error():
 @app.get("/slow")
 @trace("slow_endpoint")
 async def slow_endpoint():
-    """Artificially slow endpoint."""
+    """Artificially slow endpoint — tests latency tracking."""
     delay = random.uniform(1, 3)
     await asyncio.sleep(delay)
     return {"message": "done", "delay_seconds": round(delay, 2)}
@@ -89,4 +80,4 @@ async def shutdown():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

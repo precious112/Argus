@@ -17,6 +17,8 @@ interface StatusBarProps {
   status: SystemStatus | null;
   isConnected: boolean;
   budgetStatus?: BudgetStatus | null;
+  mode?: string;
+  servicesCount?: number;
 }
 
 function MetricBadge({
@@ -44,10 +46,11 @@ function MetricBadge({
   );
 }
 
-export function StatusBar({ status, isConnected, budgetStatus }: StatusBarProps) {
+export function StatusBar({ status, isConnected, budgetStatus, mode, servicesCount }: StatusBarProps) {
   const cpu = status?.cpu_percent;
   const mem = status?.memory_percent;
   const disk = status?.disk_percent;
+  const isSdkOnly = mode === "sdk_only";
 
   return (
     <div className="flex items-center gap-4 border-b border-[var(--border)] bg-[var(--card)] px-4 py-1.5 text-xs text-[var(--muted)]">
@@ -59,7 +62,14 @@ export function StatusBar({ status, isConnected, budgetStatus }: StatusBarProps)
         />
         <span>Agent: {isConnected ? "Online" : "Connecting"}</span>
       </div>
-      {status ? (
+      {isSdkOnly ? (
+        <>
+          <MetricBadge label="Mode" value="SDK-only" />
+          {servicesCount != null && servicesCount > 0 && (
+            <MetricBadge label="Services" value={String(servicesCount)} />
+          )}
+        </>
+      ) : status ? (
         <>
           <MetricBadge
             label="CPU"
@@ -89,6 +99,9 @@ export function StatusBar({ status, isConnected, budgetStatus }: StatusBarProps)
           />
           {status.load_avg && (
             <MetricBadge label="Load" value={status.load_avg} />
+          )}
+          {servicesCount != null && servicesCount > 0 && (
+            <MetricBadge label="Services" value={String(servicesCount)} />
           )}
         </>
       ) : (

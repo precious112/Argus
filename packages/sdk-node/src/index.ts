@@ -3,17 +3,57 @@
  */
 
 import { ArgusClient, type ArgusClientConfig } from "./client";
+import {
+  buildContext,
+  detectRuntime,
+  endInvocation,
+  startInvocation,
+} from "./serverless";
 
 export { ArgusClient, type ArgusClientConfig } from "./client";
 export { ArgusLogger } from "./logger";
 export { argusMiddleware } from "./middleware/index";
+export {
+  detectRuntime,
+  startInvocation,
+  endInvocation,
+  getActiveInvocationId,
+  type ServerlessContext,
+  type ServerlessRuntime,
+} from "./serverless";
 
 export const VERSION = "0.1.0";
+
+// Serverless-tuned defaults
+const SERVERLESS_FLUSH_INTERVAL = 1000;
+const SERVERLESS_BATCH_SIZE = 10;
 
 let _client: ArgusClient | null = null;
 
 export function init(config: ArgusClientConfig): void {
-  _client = new ArgusClient(config);
+  const runtime = detectRuntime();
+
+  // Auto-tune for serverless
+  const effectiveConfig = { ...config };
+  if (runtime) {
+    if (!effectiveConfig.flushInterval) {
+      effectiveConfig.flushInterval = SERVERLESS_FLUSH_INTERVAL;
+    }
+    if (!effectiveConfig.batchSize) {
+      effectiveConfig.batchSize = SERVERLESS_BATCH_SIZE;
+    }
+  }
+
+  _client = new ArgusClient(effectiveConfig);
+
+  // Set serverless context if detected
+  if (runtime) {
+    const ctx = buildContext(runtime);
+    if (config.serviceName) {
+      ctx.functionName = ctx.functionName || config.serviceName;
+    }
+    _client.setServerlessContext(ctx);
+  }
 }
 
 export function getClient(): ArgusClient | null {
@@ -81,6 +121,10 @@ export function trace(name?: string) {
     Object.defineProperty(wrapped, "name", { value: traceName });
     return wrapped;
   };
+}
+
+export function flushSync(): void {
+  _client?.flushSync();
 }
 
 export async function shutdown(): Promise<void> {
