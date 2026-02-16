@@ -42,7 +42,7 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", service: "example-express" });
 });
 
-app.get("/users", (req, res) => {
+app.get("/users", Argus.trace("get_users")((req, res) => {
   Argus.event("users_fetched", { count: 3 });
   res.json({
     users: [
@@ -51,7 +51,7 @@ app.get("/users", (req, res) => {
       { id: 3, name: "Charlie" },
     ],
   });
-});
+}));
 
 app.post("/error", (req, res) => {
   try {
@@ -62,11 +62,11 @@ app.post("/error", (req, res) => {
   }
 });
 
-app.get("/slow", async (req, res) => {
+app.get("/slow", Argus.trace("slow_endpoint")(async (req, res) => {
   const delay = Math.random() * 2 + 1;
   await new Promise((r) => setTimeout(r, delay * 1000));
   res.json({ message: "done", delay_seconds: Math.round(delay * 100) / 100 });
-});
+}));
 
 // --- Phase 1 endpoints ---
 
@@ -114,9 +114,64 @@ app.get("/external", async (req, res) => {
   }
 });
 
+app.post("/multi-error", (req, res) => {
+  const errorTypes = [
+    { Cls: TypeError, msg: "Cannot read property 'id' of undefined" },
+    { Cls: RangeError, msg: "Maximum call stack size exceeded" },
+    { Cls: URIError, msg: "URI malformed: invalid redirect URL" },
+    { Cls: SyntaxError, msg: "Unexpected token in JSON at position 0" },
+    { Cls: Error, msg: "Worker process crashed unexpectedly" },
+  ];
+  const { Cls, msg } = errorTypes[Math.floor(Math.random() * errorTypes.length)];
+  Argus.addBreadcrumb("multi-error", `Selected error type: ${Cls.name}`);
+  Argus.addBreadcrumb("multi-error", "Simulating failure scenario");
+
+  try {
+    throw new Cls(msg);
+  } catch (err) {
+    Argus.captureException(err);
+    res.status(500).json({ error: err.message, type: err.constructor.name });
+  }
+});
+
+// --- Background traffic simulator ---
+
+function startTrafficSimulator() {
+  const endpoints = [
+    { method: "GET", path: "/", weight: 10 },
+    { method: "GET", path: "/users", weight: 8 },
+    { method: "GET", path: "/chain", weight: 4 },
+    { method: "GET", path: "/external", weight: 3 },
+    { method: "GET", path: "/slow", weight: 2 },
+    { method: "POST", path: "/checkout", weight: 2 },
+    { method: "POST", path: "/multi-error", weight: 2 },
+    { method: "POST", path: "/error", weight: 1 },
+  ];
+  const weighted = [];
+  for (const { method, path, weight } of endpoints) {
+    for (let i = 0; i < weight; i++) weighted.push({ method, path });
+  }
+
+  const port = process.env.PORT || 8001;
+  const base = `http://localhost:${port}`;
+
+  function tick() {
+    const { method, path } = weighted[Math.floor(Math.random() * weighted.length)];
+    fetch(`${base}${path}`, { method }).catch(() => {});
+
+    const delay = Math.random() * 35000 + 10000; // 10-45s
+    setTimeout(tick, delay);
+  }
+
+  // Start after 5s warmup
+  setTimeout(tick, 5000);
+  console.log("Traffic simulator scheduled (starts in 5s)");
+}
+
 const PORT = process.env.PORT || 8001;
 app.listen(PORT, () => {
   console.log(`Example Express app listening on port ${PORT}`);
+  startTrafficSimulator();
 });
 
 process.on("SIGTERM", async () => {

@@ -88,8 +88,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db(settings.storage.sqlite_path)
     init_timeseries(settings.storage.duckdb_path)
 
-    # Register all tools
-    _register_all_tools()
+    # Register all tools (skip host tools in SDK-only mode)
+    _register_all_tools(is_sdk_only=settings.mode == "sdk_only")
 
     # --- Phase 3: Proactive Intelligence ---
 
@@ -262,37 +262,46 @@ def _make_sdk_baseline_update_task(tracker):
     return _update
 
 
-def _register_all_tools() -> None:
-    """Register all agent tools."""
+def _register_all_tools(*, is_sdk_only: bool = False) -> None:
+    """Register all agent tools.
+
+    When *is_sdk_only* is True, host-level tools (metrics, process, network,
+    security, command, log search) are skipped — they report data from the
+    agent's own server which is irrelevant in SDK mode.
+    """
     from argus_agent.tools.base import get_all_tools
     from argus_agent.tools.behavior import register_behavior_tools
     from argus_agent.tools.chart import register_chart_tools
-    from argus_agent.tools.command import register_command_tools
     from argus_agent.tools.dependencies import register_dependency_tools
     from argus_agent.tools.deploys import register_deploy_tools
     from argus_agent.tools.error_analysis import register_error_analysis_tools
     from argus_agent.tools.function_metrics import register_function_metrics_tools
-    from argus_agent.tools.log_search import register_log_tools
-    from argus_agent.tools.metrics import register_metrics_tools
-    from argus_agent.tools.network import register_network_tools
-    from argus_agent.tools.process import register_process_tools
     from argus_agent.tools.runtime_metrics import register_runtime_metrics_tools
     from argus_agent.tools.sdk_events import register_sdk_tools
-    from argus_agent.tools.security import register_security_tools
     from argus_agent.tools.traces import register_trace_tools
 
     if not get_all_tools():
-        register_log_tools()
-        register_metrics_tools()
-        register_process_tools()
-        register_network_tools()
-        register_security_tools()
-        register_command_tools()
+        # Host-level tools — only in full mode
+        if not is_sdk_only:
+            from argus_agent.tools.command import register_command_tools
+            from argus_agent.tools.log_search import register_log_tools
+            from argus_agent.tools.metrics import register_metrics_tools
+            from argus_agent.tools.network import register_network_tools
+            from argus_agent.tools.process import register_process_tools
+            from argus_agent.tools.security import register_security_tools
+
+            register_log_tools()
+            register_metrics_tools()
+            register_process_tools()
+            register_network_tools()
+            register_security_tools()
+            register_command_tools()
+
+        # SDK / analysis tools — always registered
         register_sdk_tools()
         register_chart_tools()
         register_function_metrics_tools()
         register_error_analysis_tools()
-        # Phase 1 tools
         register_trace_tools()
         register_runtime_metrics_tools()
         register_dependency_tools()

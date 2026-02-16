@@ -84,7 +84,12 @@ class AgentLoop:
         self.memory.add_user_message(user_message)
 
         result = AgentResult()
-        system_prompt = build_system_prompt(client_type=self._client_type)
+        from argus_agent.config import get_settings
+
+        system_prompt = build_system_prompt(
+            client_type=self._client_type,
+            mode=get_settings().mode,
+        )
         tool_defs = get_tool_definitions()
 
         for round_num in range(MAX_TOOL_ROUNDS):
