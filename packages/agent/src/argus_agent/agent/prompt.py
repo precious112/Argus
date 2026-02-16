@@ -22,8 +22,8 @@ line charts (time-series), bar charts (comparisons), or pie charts (distribution
 
 ## Behavior Rules
 1. Use the available tools to gather real data before answering. Call ONE tool at a time.
-2. Before each tool call, briefly explain what you are about to check (1 short sentence).
-3. After receiving a tool result, comment on what you found before calling the next tool.
+2. In the SAME response, briefly explain what you are about to check and then call the tool.
+3. After receiving a tool result, summarize findings and call the next tool in ONE response.
 4. Do NOT batch multiple tool calls in a single response.
 5. Be specific and factual. Cite log lines, file paths, and timestamps.
 6. If you cannot find the information, say so. Never fabricate data.
@@ -85,8 +85,8 @@ can only analyze telemetry from instrumented applications
 
 ## Behavior Rules
 1. Use the available tools to gather real data before answering. Call ONE tool at a time.
-2. Before each tool call, briefly explain what you are about to check (1 short sentence).
-3. After receiving a tool result, comment on what you found before calling the next tool.
+2. In the SAME response, briefly explain what you are about to check and then call the tool.
+3. After receiving a tool result, summarize findings and call the next tool in ONE response.
 4. Do NOT batch multiple tool calls in a single response.
 5. Be specific and factual. Cite service names, trace IDs, and timestamps.
 6. If you cannot find the information, say so. Never fabricate data.

@@ -245,24 +245,69 @@ function ProcessTable({ data }: { data: any }) {
   );
 }
 
+function snakeToTitle(s: string): string {
+  return s
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function formatCellValue(value: any): string {
+  if (value == null) return "—";
+  if (typeof value === "number") {
+    if (Number.isInteger(value)) return value.toLocaleString();
+    return value.toFixed(2);
+  }
+  if (typeof value === "object") {
+    const json = JSON.stringify(value);
+    return json.length > 80 ? json.slice(0, 77) + "…" : json;
+  }
+  const s = String(value);
+  // Detect ISO timestamps
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    try {
+      return new Date(s).toLocaleString();
+    } catch {
+      return s;
+    }
+  }
+  return s.length > 100 ? s.slice(0, 97) + "…" : s;
+}
+
 function EventTable({ data }: { data: any }) {
-  const events = data.events || [];
+  // Auto-detect the data array — check well-known keys first, then find any array
+  const rows: any[] =
+    data.events ||
+    data.dependencies ||
+    data.error_groups ||
+    data.deploys ||
+    data.slowest_spans ||
+    Object.values(data).find((v) => Array.isArray(v)) ||
+    [];
+
   const maxDisplay = 30;
-  const displayed = events.slice(0, maxDisplay);
+  const displayed = rows.slice(0, maxDisplay);
 
   if (displayed.length === 0) {
     return (
       <div className="rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-xs text-[var(--muted)]">
-        No events found
+        No data found
       </div>
     );
   }
 
+  // Auto-detect columns from the first row, cap at 6 for readability
+  const allKeys = Object.keys(displayed[0]);
+  const columns = allKeys.slice(0, 6);
+
+  // Find a count-like summary field from the data object
+  const countValue =
+    data.count ?? data.total ?? data.total_count ?? null;
+
   return (
     <div className="rounded border border-[var(--border)] bg-[var(--card)] text-xs">
-      {data.count != null && (
+      {countValue != null && (
         <div className="border-b border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
-          {data.count} event{data.count !== 1 ? "s" : ""}
+          {countValue} result{countValue !== 1 ? "s" : ""}
           {data.since_minutes ? ` in last ${data.since_minutes}m` : ""}
         </div>
       )}
@@ -270,55 +315,35 @@ function EventTable({ data }: { data: any }) {
         <table className="w-full">
           <thead className="sticky top-0 bg-[var(--background)] text-[var(--muted)]">
             <tr>
-              <th className="px-2 py-1 text-left">Time</th>
-              <th className="px-2 py-1 text-left">Service</th>
-              <th className="px-2 py-1 text-left">Type</th>
-              <th className="px-2 py-1 text-left">Details</th>
+              {columns.map((col) => (
+                <th key={col} className="px-2 py-1 text-left">
+                  {snakeToTitle(col)}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {displayed.map((evt: any, i: number) => {
-              const d = evt.data || {};
-              const detail =
-                d.message ||
-                (d.type ? `${d.type}: ${d.message || ""}` : "") ||
-                JSON.stringify(d).slice(0, 120);
-              const levelColor =
-                d.level === "ERROR"
-                  ? "text-red-400"
-                  : d.level === "WARNING"
-                    ? "text-yellow-400"
-                    : "text-[var(--foreground)]";
-              const ts = evt.timestamp
-                ? new Date(evt.timestamp).toLocaleTimeString()
-                : "";
-
-              return (
-                <tr
-                  key={i}
-                  className="border-t border-[var(--border)]"
-                >
-                  <td className="whitespace-nowrap px-2 py-1 font-mono text-[var(--muted)]">
-                    {ts}
+            {displayed.map((row: any, i: number) => (
+              <tr
+                key={i}
+                className="border-t border-[var(--border)] text-[var(--foreground)]"
+              >
+                {columns.map((col) => (
+                  <td
+                    key={col}
+                    className="max-w-[200px] truncate px-2 py-1 font-mono"
+                  >
+                    {formatCellValue(row[col])}
                   </td>
-                  <td className="px-2 py-1 text-[var(--foreground)]">
-                    {evt.service}
-                  </td>
-                  <td className="px-2 py-1 text-[var(--muted)]">
-                    {evt.type}
-                  </td>
-                  <td className={`px-2 py-1 ${levelColor}`}>
-                    {detail}
-                  </td>
-                </tr>
-              );
-            })}
+                ))}
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
-      {events.length > maxDisplay && (
+      {rows.length > maxDisplay && (
         <div className="border-t border-[var(--border)] px-3 py-1.5 text-[var(--muted)]">
-          Showing {maxDisplay} of {events.length}
+          Showing {maxDisplay} of {rows.length}
         </div>
       )}
     </div>
