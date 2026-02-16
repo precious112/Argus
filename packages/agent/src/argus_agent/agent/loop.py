@@ -92,7 +92,8 @@ class AgentLoop:
         )
         tool_defs = get_tool_definitions()
 
-        _text_only_continuation = False
+        _max_text_only_continuations = 2
+        _consecutive_text_only = 0
 
         for round_num in range(MAX_TOOL_ROUNDS):
             result.rounds = round_num + 1
@@ -134,6 +135,8 @@ class AgentLoop:
 
             # If the LLM wants to call tools
             if all_tool_calls:
+                _consecutive_text_only = 0  # Reset on tool calls
+
                 # Add assistant message with tool calls to memory
                 self.memory.add_assistant_message(
                     content=full_content,
@@ -189,11 +192,11 @@ class AgentLoop:
             if full_content:
                 self.memory.add_assistant_message(content=full_content)
 
-            # If we previously made tool calls this turn and haven't already
-            # given the LLM an extra chance, continue once more — the LLM may
-            # have split "explanation + tool call" across two messages.
-            if result.tool_calls_made > 0 and not _text_only_continuation:
-                _text_only_continuation = True
+            # If we previously made tool calls this turn, allow a few
+            # consecutive text-only rounds — the LLM may need to comment
+            # before issuing the next tool call (e.g. query → explain → chart).
+            if result.tool_calls_made > 0 and _consecutive_text_only < _max_text_only_continuations:
+                _consecutive_text_only += 1
                 continue
 
             result.content = full_content

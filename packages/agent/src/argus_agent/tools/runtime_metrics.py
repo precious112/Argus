@@ -74,7 +74,7 @@ class RuntimeMetricsTool(Tool):
         return {
             "metrics": metrics,
             "count": len(metrics),
-            "display_type": "chart",
+            "display_type": "table",
         }
 
 

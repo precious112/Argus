@@ -206,7 +206,7 @@ class RequestMetricsTool(Tool):
         return {
             "buckets": buckets,
             "count": len(buckets),
-            "display_type": "chart",
+            "display_type": "table",
         }
 
 
