@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from argus_agent.events.bus import get_event_bus
 from argus_agent.events.types import Event, EventSeverity, EventSource, EventType
+
+if TYPE_CHECKING:
+    from argus_agent.baseline.anomaly import AnomalyDetector
 
 logger = logging.getLogger("argus.collectors.sdk_telemetry")
 
@@ -19,6 +23,7 @@ class SDKTelemetryCollector:
     - Latency degradation
     - Cold start regression
     - Services going silent
+    - SDK runtime metric anomalies (when anomaly detector is set)
     """
 
     def __init__(self, interval: int = 60) -> None:
@@ -30,6 +35,15 @@ class SDKTelemetryCollector:
         self._prev_p95_latency: dict[str, float] = {}
         self._prev_cold_start_pct: dict[str, float] = {}
         self._known_services: set[str] = set()
+        self._anomaly_detector: AnomalyDetector | None = None
+
+    @property
+    def anomaly_detector(self) -> AnomalyDetector | None:
+        return self._anomaly_detector
+
+    @anomaly_detector.setter
+    def anomaly_detector(self, detector: AnomalyDetector) -> None:
+        self._anomaly_detector = detector
 
     async def start(self) -> None:
         if self._running:
@@ -161,3 +175,44 @@ class SDKTelemetryCollector:
                           "previous_cold_start_pct": prev_cold},
                 ))
             self._prev_cold_start_pct[svc] = cold_start_pct
+
+        # Check SDK runtime metrics against baselines
+        await self._check_sdk_metric_anomalies(bus)
+
+    async def _check_sdk_metric_anomalies(self, bus: object) -> None:
+        """Check recent SDK runtime metrics against baselines."""
+        if self._anomaly_detector is None:
+            return
+
+        try:
+            from argus_agent.storage.timeseries import query_sdk_metrics
+        except RuntimeError:
+            return
+
+        # Get the latest SDK metrics (last 2 minutes)
+        try:
+            recent = query_sdk_metrics(since_minutes=2, limit=200)
+        except Exception:
+            return
+
+        for entry in recent:
+            svc = entry["service"]
+            metric_name = entry["metric_name"]
+            value = entry["value"]
+
+            # Check against baseline using sdk.{service}.{metric_name} naming
+            baseline_key = f"sdk.{svc}.{metric_name}"
+            anomaly = self._anomaly_detector.check_metric(baseline_key, value)
+            if anomaly:
+                await bus.publish(Event(
+                    source=EventSource.SDK_TELEMETRY,
+                    type=EventType.SDK_METRIC_ANOMALY,
+                    severity=anomaly.severity,
+                    message=anomaly.message,
+                    data={
+                        "service": svc,
+                        "metric_name": metric_name,
+                        "value": value,
+                        "z_score": anomaly.z_score,
+                    },
+                ))

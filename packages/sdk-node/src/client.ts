@@ -69,6 +69,18 @@ export class ArgusClient {
       // serverless module not available
     }
 
+    // Auto-attach trace context if not already present
+    try {
+      const { getCurrentContext } = require("./context");
+      const ctx = getCurrentContext();
+      if (ctx) {
+        if (!("trace_id" in enrichedData)) enrichedData.trace_id = ctx.traceId;
+        if (!("span_id" in enrichedData)) enrichedData.span_id = ctx.spanId;
+      }
+    } catch {
+      // context module not available
+    }
+
     this.buffer.push({
       type,
       service: this.serviceName,

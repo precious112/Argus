@@ -55,10 +55,16 @@ async def ingest_telemetry(
         conn = get_connection()
         for ev in batch.events:
             ev_service = ev.service or service
+
+            # Store in sdk_events for backward compatibility
             conn.execute(
                 "INSERT INTO sdk_events VALUES (?, ?, ?, ?)",
                 [ev.timestamp, ev_service, ev.type, json.dumps(ev.data)],
             )
+
+            # Route to specialised Phase 1 tables
+            _route_event(conn, ev, ev_service)
+
             stored += 1
     except RuntimeError:
         # DuckDB not initialized (testing or startup race)
@@ -87,8 +93,117 @@ async def ingest_telemetry(
     except Exception:
         logger.debug("Event bus not available for SDK event classification")
 
+    # Detect deploy version changes
+    try:
+        _check_deploys(batch.events, service)
+    except Exception:
+        logger.debug("Deploy check failed")
+
     logger.debug("Ingested %d events from %s (%s)", stored, batch.sdk, service)
     return {
         "accepted": stored,
         "timestamp": datetime.now(UTC).isoformat(),
     }
+
+
+def _route_event(
+    conn: Any,
+    ev: TelemetryEvent,
+    service: str,
+) -> None:
+    """Route an event to the appropriate Phase 1 specialised table."""
+    d = ev.data
+
+    if ev.type == "span":
+        conn.execute(
+            "INSERT INTO spans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ev.timestamp,
+                d.get("trace_id", ""),
+                d.get("span_id", ""),
+                d.get("parent_span_id"),
+                service,
+                d.get("name", ""),
+                d.get("kind", "internal"),
+                d.get("duration_ms"),
+                d.get("status", "ok"),
+                d.get("error_type"),
+                d.get("error_message"),
+                json.dumps(d),
+            ],
+        )
+
+    elif ev.type == "dependency":
+        conn.execute(
+            "INSERT INTO dependency_calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ev.timestamp,
+                d.get("trace_id"),
+                d.get("span_id"),
+                d.get("parent_span_id"),
+                service,
+                d.get("dep_type", "unknown"),
+                d.get("target", ""),
+                d.get("operation", ""),
+                d.get("duration_ms"),
+                d.get("status", "ok"),
+                d.get("status_code"),
+                d.get("error_message"),
+                json.dumps(d),
+            ],
+        )
+
+    elif ev.type == "runtime_metric":
+        conn.execute(
+            "INSERT INTO sdk_metrics VALUES (?, ?, ?, ?, ?)",
+            [
+                ev.timestamp,
+                service,
+                d.get("metric_name", ""),
+                d.get("value", 0),
+                json.dumps(d.get("labels", {})),
+            ],
+        )
+
+    elif ev.type == "deploy":
+        from argus_agent.storage.timeseries import get_previous_deploy_version
+
+        prev = get_previous_deploy_version(service)
+        conn.execute(
+            "INSERT INTO deploy_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ev.timestamp,
+                service,
+                d.get("version", ""),
+                d.get("git_sha", ""),
+                d.get("environment", ""),
+                prev or "",
+                json.dumps(d),
+            ],
+        )
+
+
+def _check_deploys(events: list[TelemetryEvent], default_service: str) -> None:
+    """Publish DEPLOY_DETECTED if a deploy event has a new version."""
+    from argus_agent.events.bus import get_event_bus
+    from argus_agent.events.types import Event, EventSeverity, EventSource, EventType
+
+    bus = get_event_bus()
+    for ev in events:
+        if ev.type != "deploy":
+            continue
+        svc = ev.service or default_service
+        git_sha = ev.data.get("git_sha", "")
+        if not git_sha:
+            continue
+
+        # The routing already stored prev_version in the deploy row
+        prev_version = ev.data.get("_previous_version", "")
+        if prev_version and prev_version != git_sha:
+            bus.publish(Event(
+                source=EventSource.SDK_TELEMETRY,
+                type=EventType.DEPLOY_DETECTED,
+                severity=EventSeverity.NOTABLE,
+                data={"service": svc, "git_sha": git_sha, "previous": prev_version},
+                message=f"New deploy detected for '{svc}': {git_sha[:12]}",
+            ))

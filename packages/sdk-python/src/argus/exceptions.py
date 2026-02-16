@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import traceback
 from types import TracebackType
-
+from typing import Any
 
 _original_excepthook = sys.excepthook
 
@@ -33,8 +33,32 @@ def capture(exc: BaseException) -> None:
         return
 
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    argus._client.send_event("exception", {
+    event_data: dict[str, Any] = {
         "type": type(exc).__name__,
         "message": str(exc),
         "traceback": tb,
-    })
+    }
+
+    # Attach trace context
+    try:
+        from argus.context import get_current_context
+
+        ctx = get_current_context()
+        if ctx:
+            event_data["trace_id"] = ctx.trace_id
+            event_data["span_id"] = ctx.span_id
+    except ImportError:
+        pass
+
+    # Attach breadcrumbs
+    try:
+        from argus.breadcrumbs import clear_breadcrumbs, get_breadcrumbs
+
+        crumbs = get_breadcrumbs()
+        if crumbs:
+            event_data["breadcrumbs"] = crumbs
+            clear_breadcrumbs()
+    except ImportError:
+        pass
+
+    argus._client.send_event("exception", event_data)

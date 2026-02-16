@@ -1,6 +1,7 @@
 """Example FastAPI application instrumented with Argus SDK."""
 
 import asyncio
+import logging
 import os
 import random
 
@@ -11,15 +12,16 @@ from argus.logger import ArgusHandler
 from argus.middleware.fastapi import ArgusMiddleware
 from argus.serverless import detect_runtime
 
-import logging
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-# Initialize Argus SDK
+# Initialize Argus SDK with all Phase 1 features
 argus.init(
     server_url=os.getenv("ARGUS_URL", "http://localhost:7600"),
     api_key=os.getenv("ARGUS_API_KEY", ""),
     service_name="example-fastapi",
+    runtime_metrics=True,       # UC2: Runtime Metrics
+    auto_instrument=True,       # UC3: Dependency Calls (patches httpx)
 )
 install_exception_hook()
 
@@ -28,8 +30,6 @@ handler = ArgusHandler()
 logging.getLogger().addHandler(handler)
 
 # Argus auto-detects serverless runtimes (Lambda, Vercel, etc.)
-# In serverless, it uses faster flush intervals and enriches events
-# with runtime context. For traditional servers, this is a no-op.
 runtime = detect_runtime()
 if runtime:
     logger_setup = logging.getLogger("example")
@@ -79,6 +79,87 @@ async def slow_endpoint():
     delay = random.uniform(1, 3)
     await asyncio.sleep(delay)
     return {"message": "done", "delay_seconds": round(delay, 2)}
+
+
+# --- Phase 1 endpoints ---
+
+
+@trace("fetch_users_from_db")
+async def _fetch_users_from_db():
+    """Simulated DB lookup — creates a child span under the /chain trace."""
+    await asyncio.sleep(random.uniform(0.02, 0.08))
+    return [
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob"},
+        {"id": 3, "name": "Charlie"},
+    ]
+
+
+@app.get("/chain")
+@trace("chain_handler")
+async def chain():
+    """UC1+UC3: Outgoing HTTP call to self + nested trace spans.
+
+    - Makes an httpx call to GET /users (dependency tracking + trace propagation)
+    - Calls a nested @trace function (parent/child span relationship)
+    """
+    import httpx
+
+    port = os.getenv("PORT", "8000")
+    base = f"http://localhost:{port}"
+
+    # Outgoing HTTP call — auto-instrumented by argus
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{base}/users")
+        upstream_users = resp.json()
+
+    # Nested traced function — creates child span
+    db_users = await _fetch_users_from_db()
+
+    return {
+        "upstream_users": upstream_users,
+        "db_users": db_users,
+    }
+
+
+@app.post("/checkout")
+@trace("checkout_handler")
+async def checkout():
+    """UC5: Error correlation with trace context + breadcrumbs.
+
+    Adds breadcrumbs at each step, then raises an exception.
+    The captured exception will include the trace_id, span_id, and breadcrumbs.
+    """
+    argus.add_breadcrumb("checkout", "Validating cart contents", {"items": 3})
+    await asyncio.sleep(0.01)
+
+    argus.add_breadcrumb("checkout", "Charging payment", {"amount": 99.99, "method": "card"})
+    await asyncio.sleep(0.01)
+
+    argus.add_breadcrumb("checkout", "Updating inventory")
+
+    try:
+        # Simulate a payment failure
+        raise RuntimeError("Payment gateway timeout")
+    except RuntimeError as e:
+        argus.capture_exception(e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/external")
+@trace("external_call")
+async def external():
+    """UC3: Real external dependency tracking.
+
+    Makes an outgoing httpx call to a public API (jsonplaceholder).
+    """
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get("https://jsonplaceholder.typicode.com/todos/1")
+        data = resp.json()
+
+    return {"external_result": data}
 
 
 @app.on_event("shutdown")

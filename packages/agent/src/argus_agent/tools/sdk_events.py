@@ -23,7 +23,8 @@ class SDKEventsTool(Tool):
     def description(self) -> str:
         return (
             "Query telemetry events sent by applications using the Argus SDK. "
-            "Shows logs, exceptions, traces, and custom events from instrumented apps. "
+            "Shows logs, exceptions, spans, dependencies, runtime metrics, deploys, "
+            "breadcrumbs, and custom events from instrumented apps. "
             "Filter by service name, event type, and time range."
         )
 
@@ -43,8 +44,8 @@ class SDKEventsTool(Tool):
                 "event_type": {
                     "type": "string",
                     "description": (
-                        "Filter by type: log, metric, trace_start, "
-                        "trace_end, exception, event"
+                        "Filter by type: log, exception, event, span, "
+                        "dependency, runtime_metric, deploy, breadcrumb"
                     ),
                 },
                 "since_minutes": {

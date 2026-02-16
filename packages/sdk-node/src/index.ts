@@ -4,6 +4,13 @@
 
 import { ArgusClient, type ArgusClientConfig } from "./client";
 import {
+  getCurrentContext,
+  runWithContext,
+  startSpan,
+  startTrace,
+  type TraceContext,
+} from "./context";
+import {
   buildContext,
   detectRuntime,
   endInvocation,
@@ -21,6 +28,18 @@ export {
   type ServerlessContext,
   type ServerlessRuntime,
 } from "./serverless";
+export {
+  getCurrentContext,
+  runWithContext,
+  startTrace,
+  startSpan,
+  toTraceparent,
+  fromTraceparent,
+  type TraceContext,
+} from "./context";
+export { addBreadcrumb, getBreadcrumbs, clearBreadcrumbs } from "./breadcrumbs";
+export { startRuntimeMetrics, stopRuntimeMetrics } from "./runtime";
+export { patchHttp, unpatchHttp } from "./integrations/http";
 
 export const VERSION = "0.1.0";
 
@@ -54,6 +73,15 @@ export function init(config: ArgusClientConfig): void {
     }
     _client.setServerlessContext(ctx);
   }
+
+  // Send deploy event with version info
+  const deployData = _detectVersionInfo();
+  if (deployData.git_sha || deployData.sdk_version) {
+    _client.sendEvent("deploy", {
+      service: config.serviceName || "",
+      ...deployData,
+    });
+  }
 }
 
 export function getClient(): ArgusClient | null {
@@ -65,11 +93,32 @@ export function event(name: string, data: Record<string, unknown> = {}): void {
 }
 
 export function captureException(err: Error): void {
-  _client?.sendEvent("exception", {
+  const data: Record<string, unknown> = {
     type: err.constructor.name,
     message: err.message,
     stack: err.stack || "",
-  });
+  };
+
+  // Attach trace context
+  const ctx = getCurrentContext();
+  if (ctx) {
+    data.trace_id = ctx.traceId;
+    data.span_id = ctx.spanId;
+  }
+
+  // Attach breadcrumbs
+  try {
+    const { getBreadcrumbs, clearBreadcrumbs } = require("./breadcrumbs");
+    const crumbs = getBreadcrumbs();
+    if (crumbs.length > 0) {
+      data.breadcrumbs = crumbs;
+      clearBreadcrumbs();
+    }
+  } catch {
+    // breadcrumbs module not available
+  }
+
+  _client?.sendEvent("exception", data);
 }
 
 export function trace(name?: string) {
@@ -79,43 +128,69 @@ export function trace(name?: string) {
     const traceName = name || fn.name || "anonymous";
 
     const wrapped = function (this: unknown, ...args: unknown[]) {
-      _client?.sendEvent("trace_start", { name: traceName });
-      const start = Date.now();
-      try {
-        const result = fn.apply(this, args);
-        if (result instanceof Promise) {
-          return result
-            .then((val: unknown) => {
-              _client?.sendEvent("trace_end", {
-                name: traceName,
-                duration_ms: Date.now() - start,
+      if (!_client) return fn.apply(this, args);
+
+      const parent = getCurrentContext();
+      const ctx = startSpan(parent);
+
+      return runWithContext(ctx, () => {
+        const start = Date.now();
+        try {
+          const result = fn.apply(this, args);
+          if (result instanceof Promise) {
+            return result
+              .then((val: unknown) => {
+                _client?.sendEvent("span", {
+                  trace_id: ctx.traceId,
+                  span_id: ctx.spanId,
+                  parent_span_id: ctx.parentSpanId,
+                  name: traceName,
+                  kind: "internal",
+                  duration_ms: Date.now() - start,
+                  status: "ok",
+                });
+                return val;
+              })
+              .catch((err: Error) => {
+                _client?.sendEvent("span", {
+                  trace_id: ctx.traceId,
+                  span_id: ctx.spanId,
+                  parent_span_id: ctx.parentSpanId,
+                  name: traceName,
+                  kind: "internal",
+                  duration_ms: Date.now() - start,
+                  status: "error",
+                  error_type: err.constructor.name,
+                  error_message: err.message,
+                });
+                throw err;
               });
-              return val;
-            })
-            .catch((err: Error) => {
-              _client?.sendEvent("trace_end", {
-                name: traceName,
-                duration_ms: Date.now() - start,
-                error: err.message,
-                error_type: err.constructor.name,
-              });
-              throw err;
-            });
+          }
+          _client?.sendEvent("span", {
+            trace_id: ctx.traceId,
+            span_id: ctx.spanId,
+            parent_span_id: ctx.parentSpanId,
+            name: traceName,
+            kind: "internal",
+            duration_ms: Date.now() - start,
+            status: "ok",
+          });
+          return result;
+        } catch (err) {
+          _client?.sendEvent("span", {
+            trace_id: ctx.traceId,
+            span_id: ctx.spanId,
+            parent_span_id: ctx.parentSpanId,
+            name: traceName,
+            kind: "internal",
+            duration_ms: Date.now() - start,
+            status: "error",
+            error_type: (err as Error).constructor.name,
+            error_message: (err as Error).message,
+          });
+          throw err;
         }
-        _client?.sendEvent("trace_end", {
-          name: traceName,
-          duration_ms: Date.now() - start,
-        });
-        return result;
-      } catch (err) {
-        _client?.sendEvent("trace_end", {
-          name: traceName,
-          duration_ms: Date.now() - start,
-          error: (err as Error).message,
-          error_type: (err as Error).constructor.name,
-        });
-        throw err;
-      }
+      });
     } as unknown as T;
 
     Object.defineProperty(wrapped, "name", { value: traceName });
@@ -132,4 +207,47 @@ export async function shutdown(): Promise<void> {
     await _client.close();
     _client = null;
   }
+}
+
+function _detectVersionInfo(): Record<string, string> {
+  const data: Record<string, string> = { sdk_version: VERSION };
+
+  // Try environment variables for git SHA
+  const shaEnvVars = [
+    "GIT_SHA",
+    "COMMIT_SHA",
+    "VERCEL_GIT_COMMIT_SHA",
+    "RAILWAY_GIT_COMMIT_SHA",
+    "RENDER_GIT_COMMIT",
+    "HEROKU_SLUG_COMMIT",
+  ];
+  for (const env of shaEnvVars) {
+    const val = process.env[env];
+    if (val) {
+      data.git_sha = val;
+      break;
+    }
+  }
+
+  // Fallback to git rev-parse
+  if (!data.git_sha) {
+    try {
+      const { execSync } = require("node:child_process");
+      data.git_sha = execSync("git rev-parse HEAD", {
+        encoding: "utf-8",
+        timeout: 2000,
+      }).trim();
+    } catch {
+      // not in a git repo
+    }
+  }
+
+  // Environment
+  data.environment =
+    process.env.ENVIRONMENT ||
+    process.env.ENV ||
+    process.env.NODE_ENV ||
+    "";
+
+  return data;
 }

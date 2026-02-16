@@ -170,6 +170,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from argus_agent.collectors.sdk_telemetry import SDKTelemetryCollector
 
     _sdk_telemetry_collector = SDKTelemetryCollector()
+    _sdk_telemetry_collector.anomaly_detector = _anomaly_detector
     await _sdk_telemetry_collector.start()
 
     # Start scheduler with periodic tasks
@@ -195,6 +196,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             quick_security_check,
             interval_seconds=300,
         )
+
+    # SDK baseline update (both modes)
+    _scheduler.register(
+        "sdk_baseline_update",
+        _make_sdk_baseline_update_task(_baseline_tracker),
+        interval_seconds=21600,  # 6h
+    )
 
     _scheduler.register(
         "ai_periodic_review",
@@ -247,19 +255,31 @@ def _make_baseline_update_task(tracker):
     return _update
 
 
+def _make_sdk_baseline_update_task(tracker):
+    """Create an SDK baseline update coroutine for the scheduler."""
+    async def _update():
+        tracker.update_sdk_baselines()
+    return _update
+
+
 def _register_all_tools() -> None:
     """Register all agent tools."""
     from argus_agent.tools.base import get_all_tools
+    from argus_agent.tools.behavior import register_behavior_tools
     from argus_agent.tools.chart import register_chart_tools
     from argus_agent.tools.command import register_command_tools
+    from argus_agent.tools.dependencies import register_dependency_tools
+    from argus_agent.tools.deploys import register_deploy_tools
     from argus_agent.tools.error_analysis import register_error_analysis_tools
     from argus_agent.tools.function_metrics import register_function_metrics_tools
     from argus_agent.tools.log_search import register_log_tools
     from argus_agent.tools.metrics import register_metrics_tools
     from argus_agent.tools.network import register_network_tools
     from argus_agent.tools.process import register_process_tools
+    from argus_agent.tools.runtime_metrics import register_runtime_metrics_tools
     from argus_agent.tools.sdk_events import register_sdk_tools
     from argus_agent.tools.security import register_security_tools
+    from argus_agent.tools.traces import register_trace_tools
 
     if not get_all_tools():
         register_log_tools()
@@ -272,6 +292,12 @@ def _register_all_tools() -> None:
         register_chart_tools()
         register_function_metrics_tools()
         register_error_analysis_tools()
+        # Phase 1 tools
+        register_trace_tools()
+        register_runtime_metrics_tools()
+        register_dependency_tools()
+        register_deploy_tools()
+        register_behavior_tools()
 
 
 def create_app() -> FastAPI:

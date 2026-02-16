@@ -78,6 +78,19 @@ class ArgusClient:
         except ImportError:
             pass
 
+        # Auto-attach trace context if not already present
+        try:
+            from argus.context import get_current_context
+
+            ctx = get_current_context()
+            if ctx:
+                if "trace_id" not in event_data:
+                    event_data["trace_id"] = ctx.trace_id
+                if "span_id" not in event_data:
+                    event_data["span_id"] = ctx.span_id
+        except ImportError:
+            pass
+
         try:
             self._queue.put_nowait({
                 "type": event_type,
