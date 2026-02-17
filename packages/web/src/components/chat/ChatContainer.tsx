@@ -65,6 +65,7 @@ export function ChatContainer() {
         <div className="mx-auto max-w-3xl space-y-4">
           {messages.length === 0 && (
             <div className="py-20 text-center">
+              <img src="/argus-logo.png" alt="Argus" className="mx-auto mb-4 h-16 w-16" />
               <h2 className="mb-2 text-lg font-medium text-[var(--foreground)]">
                 Welcome to Argus
               </h2>

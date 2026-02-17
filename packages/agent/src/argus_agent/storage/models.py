@@ -112,6 +112,19 @@ class AppConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class NotificationChannelConfig(Base):
+    """Persisted notification channel configuration."""
+
+    __tablename__ = "notification_channel_configs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    channel_type: Mapped[str] = mapped_column(String(50), index=True, unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class TokenUsage(Base):
     """Track LLM token usage for budget management."""
 

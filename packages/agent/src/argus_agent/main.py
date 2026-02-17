@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +35,7 @@ _anomaly_detector = None
 _investigator = None
 _action_engine = None
 _sdk_telemetry_collector = None
+_soak_runner = None
 
 
 def _get_collectors():
@@ -77,7 +79,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _metrics_collector, _process_monitor, _log_watcher, _scheduler
     global _security_scanner, _alert_engine, _token_budget
     global _baseline_tracker, _anomaly_detector, _investigator, _action_engine
-    global _sdk_telemetry_collector
+    global _sdk_telemetry_collector, _soak_runner
 
     settings = get_settings()
 
@@ -119,28 +121,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     _action_engine = ActionEngine(ws_manager=manager)
 
-    # 4. Alert engine with channels
-    from argus_agent.alerting.channels import WebhookChannel, WebSocketChannel
+    # 4. Alert engine with channels (DB-backed)
     from argus_agent.alerting.engine import AlertEngine
+    from argus_agent.alerting.reload import reload_channels
+    from argus_agent.alerting.settings import NotificationSettingsService
     from argus_agent.events.bus import get_event_bus
 
     _alert_engine = AlertEngine(
         bus=get_event_bus(),
         on_investigate=_investigator.investigate_event,
     )
-    channels = [WebSocketChannel(manager)]
-    if settings.alerting.webhook_urls:
-        channels.append(WebhookChannel(settings.alerting.webhook_urls))
-    if settings.alerting.email_enabled:
-        from argus_agent.alerting.channels import EmailChannel
-
-        channels.append(EmailChannel(
-            smtp_host=settings.alerting.email_smtp_host,
-            smtp_port=settings.alerting.email_smtp_port,
-            from_addr=settings.alerting.email_from,
-            to_addrs=settings.alerting.email_to,
-        ))
-    _alert_engine.set_channels(channels)
+    # Seed DB from static config on first run
+    svc = NotificationSettingsService()
+    await svc.initialize_from_config(settings.alerting)
+    # Load channels from DB
+    await reload_channels()
     await _alert_engine.start()
 
     is_sdk_only = settings.mode == "sdk_only"
@@ -216,6 +211,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     await _scheduler.start()
 
+    # Soak test runner (opt-in via ARGUS_SOAK_ENABLED=true)
+    if os.environ.get("ARGUS_SOAK_ENABLED", "").lower() in ("true", "1", "yes"):
+        from argus_agent.scheduler.soak import SoakTestRunner
+
+        _soak_runner = SoakTestRunner()
+        await _soak_runner.start()
+
     # Collect initial system snapshot for agent context (full mode only)
     if not is_sdk_only:
         from argus_agent.collectors.system_metrics import update_system_snapshot
@@ -230,6 +232,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown in reverse order
+    if _soak_runner:
+        await _soak_runner.stop()
     if _scheduler:
         await _scheduler.stop()
     if _sdk_telemetry_collector:
@@ -321,8 +325,6 @@ def create_app() -> FastAPI:
     )
 
     # CORS for web UI
-    import os
-
     cors_env = os.environ.get("ARGUS_CORS_ORIGINS", "")
     origins = [o.strip() for o in cors_env.split(",") if o.strip()] if cors_env else []
     origins += ["http://localhost:3000", "http://127.0.0.1:3000"]

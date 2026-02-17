@@ -4,6 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Argus - AI-Native Observability",
   description: "AI-native observability, monitoring, and security platform",
+  icons: { icon: "/argus-logo.png" },
 };
 
 export default function RootLayout({
@@ -17,6 +18,7 @@ export default function RootLayout({
         <div className="flex h-screen flex-col">
           <header className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2">
             <div className="flex items-center gap-3">
+              <img src="/argus-logo.png" alt="Argus" className="h-7 w-7" />
               <h1 className="text-lg font-semibold tracking-tight">Argus</h1>
               <span className="rounded bg-argus-600/20 px-2 py-0.5 text-xs text-argus-400">
                 v0.1.0
@@ -37,7 +39,7 @@ export default function RootLayout({
               </a>
             </nav>
           </header>
-          <main className="flex-1 overflow-hidden">{children}</main>
+          <main className="flex-1 overflow-y-auto">{children}</main>
         </div>
       </body>
     </html>
