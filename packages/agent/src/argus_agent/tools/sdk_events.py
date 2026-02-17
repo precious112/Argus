@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from argus_agent.tools.base import Tool, ToolRisk
+from argus_agent.tools.base import Tool, ToolRisk, resolve_time_range
 
 logger = logging.getLogger("argus.tools.sdk_events")
 
@@ -53,6 +52,14 @@ class SDKEventsTool(Tool):
                     "description": "Look back N minutes (default 60)",
                     "default": 60,
                 },
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (overrides since_minutes)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO datetime upper bound",
+                },
                 "limit": {
                     "type": "integer",
                     "description": "Max events to return (default 50)",
@@ -74,12 +81,19 @@ class SDKEventsTool(Tool):
         except RuntimeError:
             return {"error": "Time-series store not initialized", "events": []}
 
+        since_dt, until_dt = resolve_time_range(
+            since_minutes, kwargs.get("since"), kwargs.get("until"),
+        )
+
         conditions = []
         params: list[Any] = []
 
-        since = datetime.now(UTC) - timedelta(minutes=since_minutes)
         conditions.append("timestamp >= ?")
-        params.append(since)
+        params.append(since_dt)
+
+        if until_dt:
+            conditions.append("timestamp <= ?")
+            params.append(until_dt)
 
         if service:
             conditions.append("service = ?")

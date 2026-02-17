@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from argus_agent.tools.base import Tool, ToolRisk
+from argus_agent.tools.base import Tool, ToolRisk, resolve_time_range
 
 logger = logging.getLogger("argus.tools.error_analysis")
 
@@ -46,6 +45,14 @@ class ErrorAnalysisTool(Tool):
                     "description": "Look back N minutes (default 1440 = 24h)",
                     "default": 1440,
                 },
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (overrides since_minutes)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO datetime upper bound",
+                },
                 "limit": {
                     "type": "integer",
                     "description": "Max error groups to return (default 20)",
@@ -58,6 +65,9 @@ class ErrorAnalysisTool(Tool):
         service = kwargs.get("service", "")
         since_minutes = kwargs.get("since_minutes", 1440)
         limit = min(kwargs.get("limit", 20), 100)
+        since_dt, until_dt = resolve_time_range(
+            since_minutes, kwargs.get("since"), kwargs.get("until"),
+        )
 
         try:
             from argus_agent.storage.timeseries import query_error_groups
@@ -66,6 +76,8 @@ class ErrorAnalysisTool(Tool):
                 service=service,
                 since_minutes=since_minutes,
                 limit=limit,
+                since_dt=since_dt,
+                until_dt=until_dt,
             )
         except RuntimeError:
             return {"error": "Time-series store not initialized", "error_groups": []}
@@ -118,6 +130,14 @@ class ErrorCorrelationTool(Tool):
                     "description": "Look back N minutes (default 60)",
                     "default": 60,
                 },
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (overrides since_minutes)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO datetime upper bound",
+                },
             },
         }
 
@@ -133,11 +153,16 @@ class ErrorCorrelationTool(Tool):
         except RuntimeError:
             return {"error": "Time-series store not initialized"}
 
-        since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+        since_dt, until_dt = resolve_time_range(
+            since_minutes, kwargs.get("since"), kwargs.get("until"),
+        )
 
         # 1. Find recent errors matching criteria
         conditions = ["timestamp >= ?", "event_type = 'exception'"]
-        params: list[Any] = [since]
+        params: list[Any] = [since_dt]
+        if until_dt:
+            conditions.append("timestamp <= ?")
+            params.append(until_dt)
         if service:
             conditions.append("service = ?")
             params.append(service)
@@ -175,7 +200,7 @@ class ErrorCorrelationTool(Tool):
         for tid in list(trace_ids)[:5]:
             trace_spans = conn.execute(
                 "SELECT name, kind, duration_ms, status, error_type "
-                "FROM spans WHERE trace_id = ? ORDER BY timestamp",
+                "FROM spans WHERE trace_id = ? ORDER BY timestamp LIMIT 10",
                 [tid],
             ).fetchall()
             related_traces.append({
@@ -184,13 +209,16 @@ class ErrorCorrelationTool(Tool):
                 "spans": [
                     {"name": s[0], "kind": s[1], "duration_ms": s[2],
                      "status": s[3], "error_type": s[4]}
-                    for s in trace_spans[:10]
+                    for s in trace_spans
                 ],
             })
 
         # 3. Find dependency failures around the same time
         dep_conditions = ["timestamp >= ?", "status != 'ok'"]
-        dep_params: list[Any] = [since]
+        dep_params: list[Any] = [since_dt]
+        if until_dt:
+            dep_conditions.append("timestamp <= ?")
+            dep_params.append(until_dt)
         if service:
             dep_conditions.append("service = ?")
             dep_params.append(service)
@@ -213,7 +241,10 @@ class ErrorCorrelationTool(Tool):
 
         # 4. Find recent deploys
         deploy_conditions = ["timestamp >= ?"]
-        deploy_params: list[Any] = [since]
+        deploy_params: list[Any] = [since_dt]
+        if until_dt:
+            deploy_conditions.append("timestamp <= ?")
+            deploy_params.append(until_dt)
         if service:
             deploy_conditions.append("service = ?")
             deploy_params.append(service)

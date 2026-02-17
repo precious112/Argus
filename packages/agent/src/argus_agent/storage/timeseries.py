@@ -326,6 +326,8 @@ def query_function_metrics(
     function_name: str = "",
     since_minutes: int = 60,
     interval_minutes: int = 5,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregate invocation events into per-bucket function metrics.
 
@@ -333,10 +335,14 @@ def query_function_metrics(
     p50/p95/p99 duration, cold_start_count, cold_start_pct.
     """
     conn = get_connection()
-    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    since = since_dt if since_dt else datetime.now(UTC) - timedelta(minutes=since_minutes)
 
     conditions = ["timestamp >= ?", "event_type IN ('invocation_start', 'invocation_end')"]
     params: list[Any] = [since]
+
+    if until_dt:
+        conditions.append("timestamp <= ?")
+        params.append(until_dt)
 
     if service:
         conditions.append("service = ?")
@@ -404,13 +410,19 @@ def query_error_groups(
     service: str = "",
     since_minutes: int = 1440,
     limit: int = 20,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Group exception events by type/message pattern with counts."""
     conn = get_connection()
-    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    since = since_dt if since_dt else datetime.now(UTC) - timedelta(minutes=since_minutes)
 
     conditions = ["timestamp >= ?", "event_type = 'exception'"]
     params: list[Any] = [since]
+
+    if until_dt:
+        conditions.append("timestamp <= ?")
+        params.append(until_dt)
 
     if service:
         conditions.append("service = ?")
@@ -579,14 +591,14 @@ def insert_span(
     )
 
 
-def query_trace(trace_id: str) -> list[dict[str, Any]]:
+def query_trace(trace_id: str, limit: int = 200) -> list[dict[str, Any]]:
     """Reconstruct all spans for a trace, ordered by timestamp."""
     conn = get_connection()
     result = conn.execute(
         "SELECT timestamp, trace_id, span_id, parent_span_id, service, name, "
         "kind, duration_ms, status, error_type, error_message, data "
-        "FROM spans WHERE trace_id = ? ORDER BY timestamp",
-        [trace_id],
+        "FROM spans WHERE trace_id = ? ORDER BY timestamp LIMIT ?",
+        [trace_id, limit],
     ).fetchall()
     return [
         {
@@ -611,12 +623,18 @@ def query_slow_spans(
     service: str = "",
     since_minutes: int = 60,
     limit: int = 20,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Find the slowest spans by duration."""
     conn = get_connection()
-    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    since = since_dt if since_dt else datetime.now(UTC) - timedelta(minutes=since_minutes)
     conditions = ["timestamp >= ?", "duration_ms IS NOT NULL"]
     params: list[Any] = [since]
+
+    if until_dt:
+        conditions.append("timestamp <= ?")
+        params.append(until_dt)
 
     if service:
         conditions.append("service = ?")
@@ -651,12 +669,18 @@ def query_slow_spans(
 def query_trace_summary(
     service: str = "",
     since_minutes: int = 60,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregate span stats grouped by service + name."""
     conn = get_connection()
-    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    since = since_dt if since_dt else datetime.now(UTC) - timedelta(minutes=since_minutes)
     conditions = ["timestamp >= ?", "duration_ms IS NOT NULL"]
     params: list[Any] = [since]
+
+    if until_dt:
+        conditions.append("timestamp <= ?")
+        params.append(until_dt)
 
     if service:
         conditions.append("service = ?")
@@ -707,12 +731,18 @@ def query_request_metrics(
     method: str = "",
     since_minutes: int = 60,
     interval_minutes: int = 5,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregate HTTP request spans (kind='server') into time-bucketed metrics."""
     conn = get_connection()
-    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    since = since_dt if since_dt else datetime.now(UTC) - timedelta(minutes=since_minutes)
     conditions = ["timestamp >= ?", "kind = 'server'", "duration_ms IS NOT NULL"]
     params: list[Any] = [since]
+
+    if until_dt:
+        conditions.append("timestamp <= ?")
+        params.append(until_dt)
 
     if service:
         conditions.append("service = ?")
@@ -787,12 +817,18 @@ def query_sdk_metrics(
     metric_name: str = "",
     since_minutes: int = 60,
     limit: int = 500,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Query SDK runtime metrics."""
     conn = get_connection()
-    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    since = since_dt if since_dt else datetime.now(UTC) - timedelta(minutes=since_minutes)
     conditions = ["timestamp >= ?"]
     params: list[Any] = [since]
+
+    if until_dt:
+        conditions.append("timestamp <= ?")
+        params.append(until_dt)
 
     if service:
         conditions.append("service = ?")
@@ -905,12 +941,18 @@ def query_dependencies(
 def query_dependency_summary(
     service: str = "",
     since_minutes: int = 60,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregate dependency calls by type + target."""
     conn = get_connection()
-    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    since = since_dt if since_dt else datetime.now(UTC) - timedelta(minutes=since_minutes)
     conditions = ["timestamp >= ?"]
     params: list[Any] = [since]
+
+    if until_dt:
+        conditions.append("timestamp <= ?")
+        params.append(until_dt)
 
     if service:
         conditions.append("service = ?")
@@ -953,16 +995,29 @@ def query_dependency_summary(
     ]
 
 
-def query_dependency_map(since_minutes: int = 60) -> list[dict[str, Any]]:
+def query_dependency_map(
+    since_minutes: int = 60,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
+) -> list[dict[str, Any]]:
     """Build a service -> dependency edge list with call counts."""
     conn = get_connection()
-    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    since = since_dt if since_dt else datetime.now(UTC) - timedelta(minutes=since_minutes)
+
+    conditions = ["timestamp >= ?"]
+    params: list[Any] = [since]
+
+    if until_dt:
+        conditions.append("timestamp <= ?")
+        params.append(until_dt)
+
+    where = " AND ".join(conditions)
 
     result = conn.execute(
-        "SELECT service, dep_type, target, COUNT(*) AS cnt "
-        "FROM dependency_calls WHERE timestamp >= ? "
-        "GROUP BY service, dep_type, target ORDER BY cnt DESC",
-        [since],
+        f"SELECT service, dep_type, target, COUNT(*) AS cnt "  # noqa: S608
+        f"FROM dependency_calls WHERE {where} "
+        f"GROUP BY service, dep_type, target ORDER BY cnt DESC",
+        params,
     ).fetchall()
 
     return [
@@ -999,12 +1054,18 @@ def query_deploy_history(
     service: str = "",
     since_minutes: int = 10080,
     limit: int = 50,
+    since_dt: datetime | None = None,
+    until_dt: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """List deploy events, most recent first."""
     conn = get_connection()
-    since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    since = since_dt if since_dt else datetime.now(UTC) - timedelta(minutes=since_minutes)
     conditions = ["timestamp >= ?"]
     params: list[Any] = [since]
+
+    if until_dt:
+        conditions.append("timestamp <= ?")
+        params.append(until_dt)
 
     if service:
         conditions.append("service = ?")

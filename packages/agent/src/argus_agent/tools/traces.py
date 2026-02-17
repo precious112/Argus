@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from argus_agent.tools.base import Tool, ToolRisk
+from argus_agent.tools.base import Tool, ToolRisk, resolve_time_range
 
 logger = logging.getLogger("argus.tools.traces")
 
@@ -48,10 +48,11 @@ class TraceTimelineTool(Tool):
         if not trace_id:
             return {"error": "trace_id is required", "spans": []}
 
+        limit = 200
         try:
             from argus_agent.storage.timeseries import query_trace
 
-            spans = query_trace(trace_id)
+            spans = query_trace(trace_id, limit=limit)
         except RuntimeError:
             return {"error": "Time-series store not initialized", "spans": []}
 
@@ -69,13 +70,16 @@ class TraceTimelineTool(Tool):
             else:
                 roots.append(span)
 
-        return {
+        result: dict[str, Any] = {
             "trace_id": trace_id,
             "spans": spans,
             "root_spans": [r["span_id"] for r in roots],
             "total_spans": len(spans),
             "display_type": "trace",
         }
+        if len(spans) == limit:
+            result["truncated"] = True
+        return result
 
 
 class SlowTraceAnalysisTool(Tool):
@@ -111,6 +115,14 @@ class SlowTraceAnalysisTool(Tool):
                     "description": "Look back N minutes (default 60)",
                     "default": 60,
                 },
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (overrides since_minutes)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO datetime upper bound",
+                },
                 "limit": {
                     "type": "integer",
                     "description": "Max results (default 20)",
@@ -123,12 +135,21 @@ class SlowTraceAnalysisTool(Tool):
         service = kwargs.get("service", "")
         since_minutes = kwargs.get("since_minutes", 60)
         limit = min(kwargs.get("limit", 20), 100)
+        since_dt, until_dt = resolve_time_range(
+            since_minutes, kwargs.get("since"), kwargs.get("until"),
+        )
 
         try:
             from argus_agent.storage.timeseries import query_slow_spans, query_trace_summary
 
-            slow = query_slow_spans(service=service, since_minutes=since_minutes, limit=limit)
-            summary = query_trace_summary(service=service, since_minutes=since_minutes)
+            slow = query_slow_spans(
+                service=service, since_minutes=since_minutes, limit=limit,
+                since_dt=since_dt, until_dt=until_dt,
+            )
+            summary = query_trace_summary(
+                service=service, since_minutes=since_minutes,
+                since_dt=since_dt, until_dt=until_dt,
+            )
         except RuntimeError:
             return {"error": "Time-series store not initialized"}
 
@@ -181,6 +202,14 @@ class RequestMetricsTool(Tool):
                     "description": "Look back N minutes (default 60)",
                     "default": 60,
                 },
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (overrides since_minutes)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO datetime upper bound",
+                },
                 "interval_minutes": {
                     "type": "integer",
                     "description": "Bucket size in minutes (default 5)",
@@ -190,6 +219,9 @@ class RequestMetricsTool(Tool):
         }
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
+        since_dt, until_dt = resolve_time_range(
+            kwargs.get("since_minutes", 60), kwargs.get("since"), kwargs.get("until"),
+        )
         try:
             from argus_agent.storage.timeseries import query_request_metrics
 
@@ -199,6 +231,8 @@ class RequestMetricsTool(Tool):
                 method=kwargs.get("method", ""),
                 since_minutes=kwargs.get("since_minutes", 60),
                 interval_minutes=kwargs.get("interval_minutes", 5),
+                since_dt=since_dt,
+                until_dt=until_dt,
             )
         except RuntimeError:
             return {"error": "Time-series store not initialized", "buckets": []}

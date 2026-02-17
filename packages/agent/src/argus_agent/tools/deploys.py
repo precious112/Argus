@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from argus_agent.tools.base import Tool, ToolRisk
+from argus_agent.tools.base import Tool, ToolRisk, resolve_time_range
 
 logger = logging.getLogger("argus.tools.deploys")
 
@@ -44,6 +44,14 @@ class DeployHistoryTool(Tool):
                     "description": "Look back N minutes (default 10080 = 7 days)",
                     "default": 10080,
                 },
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (overrides since_minutes)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO datetime upper bound",
+                },
                 "limit": {
                     "type": "integer",
                     "description": "Max results (default 20)",
@@ -53,6 +61,9 @@ class DeployHistoryTool(Tool):
         }
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
+        since_dt, until_dt = resolve_time_range(
+            kwargs.get("since_minutes", 10080), kwargs.get("since"), kwargs.get("until"),
+        )
         try:
             from argus_agent.storage.timeseries import query_deploy_history
 
@@ -60,6 +71,8 @@ class DeployHistoryTool(Tool):
                 service=kwargs.get("service", ""),
                 since_minutes=kwargs.get("since_minutes", 10080),
                 limit=min(kwargs.get("limit", 20), 50),
+                since_dt=since_dt,
+                until_dt=until_dt,
             )
         except RuntimeError:
             return {"error": "Time-series store not initialized", "deploys": []}

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from argus_agent.tools.base import Tool, ToolRisk
+from argus_agent.tools.base import Tool, ToolRisk, resolve_time_range
 
 logger = logging.getLogger("argus.tools.behavior")
 
@@ -46,6 +45,14 @@ class BehaviorAnalysisTool(Tool):
                     "description": "Look back N minutes for recent data (default 30)",
                     "default": 30,
                 },
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (overrides since_minutes)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO datetime upper bound",
+                },
             },
         }
 
@@ -60,7 +67,9 @@ class BehaviorAnalysisTool(Tool):
         except RuntimeError:
             return {"error": "Time-series store not initialized"}
 
-        since = datetime.now(UTC) - timedelta(minutes=since_minutes)
+        since_dt, until_dt = resolve_time_range(
+            since_minutes, kwargs.get("since"), kwargs.get("until"),
+        )
 
         # 1. Get current baselines
         baselines = conn.execute(
@@ -87,11 +96,17 @@ class BehaviorAnalysisTool(Tool):
             baseline_info = [b for b in baseline_info if b["metric"].startswith(prefix)]
 
         # 2. Query recent SDK runtime metrics
+        rt_conditions = ["timestamp >= ?", "event_type = 'runtime_metric'"]
+        rt_params: list[Any] = [since_dt]
+        if until_dt:
+            rt_conditions.append("timestamp <= ?")
+            rt_params.append(until_dt)
+        rt_where = " AND ".join(rt_conditions)
         anomalies = conn.execute(
-            "SELECT timestamp, service, data FROM sdk_events "
-            "WHERE timestamp >= ? AND event_type = 'runtime_metric' "
-            "ORDER BY timestamp DESC LIMIT 50",
-            [since],
+            f"SELECT timestamp, service, data FROM sdk_events "  # noqa: S608
+            f"WHERE {rt_where} "
+            f"ORDER BY timestamp DESC LIMIT 50",
+            rt_params,
         ).fetchall()
 
         # Check each against baselines for anomalies
@@ -119,7 +134,10 @@ class BehaviorAnalysisTool(Tool):
 
         # 3. Recent deploys
         deploy_conditions = ["timestamp >= ?"]
-        deploy_params: list[Any] = [since]
+        deploy_params: list[Any] = [since_dt]
+        if until_dt:
+            deploy_conditions.append("timestamp <= ?")
+            deploy_params.append(until_dt)
         if service:
             deploy_conditions.append("service = ?")
             deploy_params.append(service)
@@ -141,12 +159,19 @@ class BehaviorAnalysisTool(Tool):
         ]
 
         # 4. Overall health summary
+        health_conditions = ["timestamp >= ?", "duration_ms IS NOT NULL"]
+        health_params: list[Any] = [since_dt]
+        if until_dt:
+            health_conditions.append("timestamp <= ?")
+            health_params.append(until_dt)
+        if service:
+            health_conditions.append("service = ?")
+            health_params.append(service)
+        health_where = " AND ".join(health_conditions)
         span_health = conn.execute(
-            "SELECT COUNT(*), COUNT(*) FILTER (WHERE status != 'ok'), "
-            "AVG(duration_ms) FROM spans "
-            "WHERE timestamp >= ? AND duration_ms IS NOT NULL"
-            + (" AND service = ?" if service else ""),
-            [since] + ([service] if service else []),
+            f"SELECT COUNT(*), COUNT(*) FILTER (WHERE status != 'ok'), "  # noqa: S608
+            f"AVG(duration_ms) FROM spans WHERE {health_where}",
+            health_params,
         ).fetchone()
 
         health = {}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from argus_agent.tools.base import Tool, ToolRisk
+from argus_agent.tools.base import Tool, ToolRisk, resolve_time_range
 
 logger = logging.getLogger("argus.tools.function_metrics")
 
@@ -48,6 +48,14 @@ class FunctionMetricsTool(Tool):
                     "description": "Look back N minutes (default 60)",
                     "default": 60,
                 },
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (overrides since_minutes)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO datetime upper bound",
+                },
                 "interval_minutes": {
                     "type": "integer",
                     "description": "Bucket interval in minutes (default 5)",
@@ -61,6 +69,9 @@ class FunctionMetricsTool(Tool):
         function_name = kwargs.get("function_name", "")
         since_minutes = kwargs.get("since_minutes", 60)
         interval_minutes = kwargs.get("interval_minutes", 5)
+        since_dt, until_dt = resolve_time_range(
+            since_minutes, kwargs.get("since"), kwargs.get("until"),
+        )
 
         try:
             from argus_agent.storage.timeseries import query_function_metrics
@@ -70,6 +81,8 @@ class FunctionMetricsTool(Tool):
                 function_name=function_name,
                 since_minutes=since_minutes,
                 interval_minutes=interval_minutes,
+                since_dt=since_dt,
+                until_dt=until_dt,
             )
         except RuntimeError:
             return {"error": "Time-series store not initialized", "buckets": []}
