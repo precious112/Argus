@@ -315,7 +315,7 @@ async def test_email_channel_with_smtp_auth():
     call_kwargs = mock_send.call_args[1]
     assert call_kwargs["username"] == "user"
     assert call_kwargs["password"] == "pass"
-    assert call_kwargs["use_tls"] is True
+    assert call_kwargs["start_tls"] is True
 
 
 @pytest.mark.asyncio

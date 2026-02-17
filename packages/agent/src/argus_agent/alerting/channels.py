@@ -260,20 +260,28 @@ class EmailChannel(NotificationChannel):
             msg.set_content(plain)
             msg.add_alternative(html, subtype="html")
 
-            smtp_kwargs: dict[str, Any] = {
-                "hostname": self._smtp_host,
-                "port": self._smtp_port,
-                "use_tls": self._use_tls,
-            }
-            if self._smtp_user:
-                smtp_kwargs["username"] = self._smtp_user
-                smtp_kwargs["password"] = self._smtp_password
-
-            await aiosmtplib.send(msg, **smtp_kwargs)
+            await aiosmtplib.send(msg, **self._smtp_kwargs())
             return True
         except Exception:
             logger.exception("Email notification failed")
             return False
+
+    def _smtp_kwargs(self) -> dict[str, Any]:
+        """Build kwargs for aiosmtplib.send with correct TLS mode."""
+        kwargs: dict[str, Any] = {
+            "hostname": self._smtp_host,
+            "port": self._smtp_port,
+        }
+        if self._use_tls:
+            # Port 465 uses implicit TLS; port 587 (and others) use STARTTLS
+            if self._smtp_port == 465:
+                kwargs["use_tls"] = True
+            else:
+                kwargs["start_tls"] = True
+        if self._smtp_user:
+            kwargs["username"] = self._smtp_user
+            kwargs["password"] = self._smtp_password
+        return kwargs
 
     async def test_connection(self) -> dict[str, Any]:
         """Send a test email."""
@@ -292,16 +300,7 @@ class EmailChannel(NotificationChannel):
             subtype="html",
         )
 
-        smtp_kwargs: dict[str, Any] = {
-            "hostname": self._smtp_host,
-            "port": self._smtp_port,
-            "use_tls": self._use_tls,
-        }
-        if self._smtp_user:
-            smtp_kwargs["username"] = self._smtp_user
-            smtp_kwargs["password"] = self._smtp_password
-
-        await aiosmtplib.send(msg, **smtp_kwargs)
+        await aiosmtplib.send(msg, **self._smtp_kwargs())
         return {"ok": True, "to": self._to_addrs}
 
     @staticmethod
