@@ -18,7 +18,7 @@ export default function RootLayout({
         <div className="flex h-screen flex-col">
           <header className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2">
             <div className="flex items-center gap-3">
-              <img src="/argus-logo.png" alt="Argus" className="h-7 w-7" />
+              <img src="/argus-logo.png" alt="Argus" className="h-7 w-auto" />
               <h1 className="text-lg font-semibold tracking-tight">Argus</h1>
               <span className="rounded bg-argus-600/20 px-2 py-0.5 text-xs text-argus-400">
                 v0.1.0

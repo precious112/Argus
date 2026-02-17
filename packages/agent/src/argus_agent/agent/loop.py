@@ -101,6 +101,21 @@ class AgentLoop:
             # Build context
             messages = self.memory.get_context_messages(system_prompt)
 
+            # On the final round, force a summary (no tools available)
+            is_final_round = round_num == MAX_TOOL_ROUNDS - 1
+            if is_final_round:
+                tool_defs_for_round = None
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[SYSTEM] You have used all available tool call rounds. "
+                        "Do NOT attempt any more tool calls or announce future actions. "
+                        "Summarize your findings so far clearly and concisely."
+                    ),
+                })
+            else:
+                tool_defs_for_round = tool_defs
+
             # Call LLM with streaming
             await self._emit("thinking_start", {})
 
@@ -108,7 +123,7 @@ class AgentLoop:
             all_tool_calls: list[dict[str, Any]] = []
             response_metadata: dict[str, Any] = {}
 
-            async for delta in self.provider.stream(messages, tools=tool_defs or None):
+            async for delta in self.provider.stream(messages, tools=tool_defs_for_round or None):
                 # Stream text content to the user
                 if delta.content:
                     full_content += delta.content
@@ -189,6 +204,7 @@ class AgentLoop:
                 continue
 
             # No tool calls in this response
+            result.content = full_content
             if full_content:
                 self.memory.add_assistant_message(content=full_content)
 
@@ -199,16 +215,13 @@ class AgentLoop:
                 _consecutive_text_only += 1
                 continue
 
-            result.content = full_content
             return result
 
-        # Exhausted max rounds
+        # Exhausted max rounds — always append notice so the user knows
         exhaustion_msg = (
-            "I've reached the maximum number of tool calls for this turn. "
-            "Here's what I found so far based on the tools I've used."
+            "\n\n---\n*I've reached the maximum number of tool call rounds for this turn.*"
         )
-        if not result.content:
-            result.content = exhaustion_msg
-            await self._emit("assistant_message_delta", {"content": exhaustion_msg})
+        result.content = (result.content or "") + exhaustion_msg
+        await self._emit("assistant_message_delta", {"content": exhaustion_msg})
         self.memory.add_assistant_message(content=result.content)
         return result

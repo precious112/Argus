@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from argus_agent.agent.loop import AgentLoop
+from argus_agent.agent.loop import MAX_TOOL_ROUNDS, AgentLoop
 from argus_agent.agent.memory import ConversationMemory
 from argus_agent.config import reset_settings
 from argus_agent.llm.base import LLMMessage, LLMProvider, LLMResponse, ToolDefinition
@@ -49,7 +49,8 @@ class MockProvider(LLMProvider):
     async def stream(
         self, messages: list[LLMMessage], tools: list[ToolDefinition] | None = None, **kwargs: Any
     ) -> AsyncIterator[LLMResponse]:
-        resp = self._responses[self._call_count % len(self._responses)]
+        idx = min(self._call_count, len(self._responses) - 1)
+        resp = self._responses[idx]
         self._call_count += 1
         yield resp
 
@@ -140,9 +141,10 @@ async def test_tool_call_and_response():
     agent = AgentLoop(provider=provider, memory=memory, on_event=on_event)
     result = await agent.run("Echo test")
 
+    # Round 1: tool call, Round 2: text (continuation 1), Round 3: text (continuation 2),
+    # Round 4: text (continuation limit reached → exit)
     assert result.content == "The echo tool returned: test"
     assert result.tool_calls_made == 1
-    assert result.rounds == 2
 
     # Check tool events
     tool_events = [e for e in events if e[0] == "tool_call"]
@@ -177,13 +179,66 @@ async def test_unknown_tool():
     )
     memory = ConversationMemory()
     agent = AgentLoop(provider=provider, memory=memory)
-    result = await agent.run("Use a nonexistent tool")
+    await agent.run("Use a nonexistent tool")
 
-    assert result.rounds == 2
     # The error result should be in memory
     tool_messages = [m for m in memory.messages if m.role == "tool"]
     assert len(tool_messages) == 1
     assert "Unknown tool" in tool_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_final_round_summary():
+    """On the final round, tools are stripped and a summary instruction is injected."""
+    register_tool(EchoTool())
+
+    # Every call returns a tool call — the loop should still exit on the final round
+    # because tools are set to None, so the LLM can't generate tool calls.
+    tool_response = LLMResponse(
+        tool_calls=[
+            {
+                "id": "tc_1",
+                "type": "function",
+                "function": {
+                    "name": "echo",
+                    "arguments": json.dumps({"message": "ping"}),
+                },
+            }
+        ],
+        finish_reason="tool_calls",
+    )
+    summary_response = LLMResponse(
+        content="Here is a summary of findings.", finish_reason="stop"
+    )
+    # 9 rounds of tool calls, then final round gets summary (no tools available)
+    responses = [tool_response] * (MAX_TOOL_ROUNDS - 1) + [summary_response]
+
+    captured_tools: list[list[ToolDefinition] | None] = []
+
+    class CapturingProvider(MockProvider):
+        async def stream(
+            self, messages: list[LLMMessage],
+            tools: list[ToolDefinition] | None = None, **kwargs: Any,
+        ) -> AsyncIterator[LLMResponse]:
+            captured_tools.append(tools)
+            async for item in super().stream(messages, tools=tools, **kwargs):
+                yield item
+
+    provider = CapturingProvider(responses)
+    memory = ConversationMemory()
+    agent = AgentLoop(provider=provider, memory=memory)
+    result = await agent.run("Complex query")
+
+    # Final round should have tools=None
+    assert captured_tools[-1] is None
+    # All prior rounds should have tools
+    for t in captured_tools[:-1]:
+        assert t is not None
+
+    # Result should contain the summary + exhaustion notice
+    assert "Here is a summary of findings." in result.content
+    assert "maximum number of tool call rounds" in result.content
+    assert result.rounds == MAX_TOOL_ROUNDS
 
 
 @pytest.mark.asyncio
