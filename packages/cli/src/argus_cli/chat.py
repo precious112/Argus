@@ -124,8 +124,29 @@ async def start_chat(server_url: str) -> None:
     # Add client=cli query parameter
     ws_url += "?client=cli"
 
+    _BANNER_LINES = [
+        r" █████╗ ██████╗  ██████╗ ██╗   ██╗███████╗",
+        r"██╔══██╗██╔══██╗██╔════╝ ██║   ██║██╔════╝",
+        r"███████║██████╔╝██║  ███╗██║   ██║███████╗",
+        r"██╔══██║██╔══██╗██║   ██║██║   ██║╚════██║",
+        r"██║  ██║██║  ██║╚██████╔╝╚██████╔╝███████║",
+        r"╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚══════╝",
+    ]
+    _BANNER_COLORS = [
+        "#FFFFFF",
+        "#CCE0FF",
+        "#99C2FF",
+        "#5599FF",
+        "#2266CC",
+        "#0044AA",
+    ]
+    styled_banner = "\n".join(
+        f"[bold {color}]{line}[/bold {color}]"
+        for line, color in zip(_BANNER_LINES, _BANNER_COLORS)
+    )
+    styled_banner += "\n[dim]v0.1.0[/dim]"
     console.print(Panel(
-        "[bold cyan]Argus[/bold cyan] Interactive Session",
+        styled_banner,
         subtitle="Ctrl+C to quit",
         border_style="cyan",
     ))
