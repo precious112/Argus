@@ -37,5 +37,17 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
+  cli:
+    build:
+      context: .
+      dockerfile: Dockerfile.cli
+    profiles: ["cli"]
+    environment:
+      - ARGUS_URL=http://argus:7600
+    depends_on:
+      - argus
+    stdin_open: true
+    tty: true
+
 volumes:
   argus_data:
