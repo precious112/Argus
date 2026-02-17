@@ -80,7 +80,7 @@ async def ingest_telemetry(
         bus = get_event_bus()
         for ev in batch.events:
             if ev.type == "exception":
-                bus.publish(Event(
+                await bus.publish(Event(
                     source=EventSource.SDK_TELEMETRY,
                     type=EventType.ERROR_BURST,
                     severity=EventSeverity.NOTABLE,
@@ -200,7 +200,7 @@ def _check_deploys(events: list[TelemetryEvent], default_service: str) -> None:
         # The routing already stored prev_version in the deploy row
         prev_version = ev.data.get("_previous_version", "")
         if prev_version and prev_version != git_sha:
-            bus.publish(Event(
+            bus.publish_nowait(Event(
                 source=EventSource.SDK_TELEMETRY,
                 type=EventType.DEPLOY_DETECTED,
                 severity=EventSeverity.NOTABLE,
