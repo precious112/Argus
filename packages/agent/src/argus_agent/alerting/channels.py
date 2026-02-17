@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -114,6 +115,7 @@ class SlackChannel(NotificationChannel):
     def __init__(self, bot_token: str, channel_id: str) -> None:
         self._bot_token = bot_token
         self._channel_id = channel_id
+        self._ssl_context = ssl.create_default_context()
 
     async def send(self, alert: Any, event: Any) -> bool:
         if not self._bot_token or not self._channel_id:
@@ -122,7 +124,7 @@ class SlackChannel(NotificationChannel):
         try:
             from slack_sdk.web.async_client import AsyncWebClient
 
-            client = AsyncWebClient(token=self._bot_token)
+            client = AsyncWebClient(token=self._bot_token, ssl=self._ssl_context)
             severity = str(alert.severity)
             color = _SEVERITY_COLORS.get(severity, "#95a5a6")
             message = event.message or "No details available"
@@ -168,7 +170,7 @@ class SlackChannel(NotificationChannel):
         """List Slack channels the bot can see."""
         from slack_sdk.web.async_client import AsyncWebClient
 
-        client = AsyncWebClient(token=self._bot_token)
+        client = AsyncWebClient(token=self._bot_token, ssl=self._ssl_context)
         result = []
         cursor = None
         while True:
@@ -188,7 +190,7 @@ class SlackChannel(NotificationChannel):
         """Test the Slack connection and send a test message."""
         from slack_sdk.web.async_client import AsyncWebClient
 
-        client = AsyncWebClient(token=self._bot_token)
+        client = AsyncWebClient(token=self._bot_token, ssl=self._ssl_context)
         auth = await client.auth_test()
         await client.chat_postMessage(
             channel=self._channel_id,
