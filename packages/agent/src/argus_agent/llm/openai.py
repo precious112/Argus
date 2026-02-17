@@ -119,7 +119,7 @@ class OpenAIProvider(LLMProvider):
             "model": self._model,
             "messages": _messages_to_openai(messages),
             "temperature": kwargs.get("temperature", self._config.temperature),
-            "max_tokens": kwargs.get("max_tokens", self._config.max_tokens),
+            "max_completion_tokens": kwargs.get("max_tokens", self._config.max_tokens),
         }
         if tools:
             params["tools"] = _tools_to_openai(tools)
@@ -156,7 +156,7 @@ class OpenAIProvider(LLMProvider):
             "model": self._model,
             "messages": _messages_to_openai(messages),
             "temperature": kwargs.get("temperature", self._config.temperature),
-            "max_tokens": kwargs.get("max_tokens", self._config.max_tokens),
+            "max_completion_tokens": kwargs.get("max_tokens", self._config.max_tokens),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
