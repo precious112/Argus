@@ -10,7 +10,7 @@ from typing import Any
 
 from argus_agent.agent.memory import ConversationMemory
 from argus_agent.agent.prompt import build_system_prompt
-from argus_agent.llm.base import LLMProvider
+from argus_agent.llm.base import LLMMessage, LLMProvider
 from argus_agent.tools.base import Tool, get_tool, get_tool_definitions
 
 logger = logging.getLogger("argus.agent.loop")
@@ -105,14 +105,14 @@ class AgentLoop:
             is_final_round = round_num == MAX_TOOL_ROUNDS - 1
             if is_final_round:
                 tool_defs_for_round = None
-                messages.append({
-                    "role": "user",
-                    "content": (
+                messages.append(LLMMessage(
+                    role="user",
+                    content=(
                         "[SYSTEM] You have used all available tool call rounds. "
                         "Do NOT attempt any more tool calls or announce future actions. "
                         "Summarize your findings so far clearly and concisely."
                     ),
-                })
+                ))
             else:
                 tool_defs_for_round = tool_defs
 
