@@ -14,7 +14,16 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 
+from rich.prompt import Confirm, Prompt
+
 _DEFAULT_SERVER = os.environ.get("ARGUS_URL", "http://localhost:7600")
+
+_PROVIDERS = ["openai", "anthropic", "gemini"]
+_DEFAULT_MODELS: dict[str, str] = {
+    "openai": "gpt-4o",
+    "anthropic": "claude-sonnet-4-5-20250929",
+    "gemini": "gemini-2.0-flash",
+}
 
 
 @app.callback()
@@ -193,6 +202,92 @@ def ask(
         data = api.ask(question)
         answer = data.get("answer", data.get("error", "No response"))
         print_answer(answer)
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        api.close()
+
+
+config_app = typer.Typer(help="View and update LLM configuration.")
+app.add_typer(config_app, name="config")
+
+
+@config_app.callback(invoke_without_command=True)
+def config_show(
+    ctx: typer.Context,
+    server: str = typer.Option(_DEFAULT_SERVER, help="Argus server URL"),
+) -> None:
+    """Show current LLM configuration."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    from argus_cli.api import ArgusAPI
+    from argus_cli.display import print_config
+
+    api = ArgusAPI(server)
+    try:
+        data = api.settings()
+        print_config(data)
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        api.close()
+
+
+@config_app.command(name="set")
+def config_set_cmd(
+    server: str = typer.Option(_DEFAULT_SERVER, help="Argus server URL"),
+    provider: str | None = typer.Option(None, "-p", "--provider", help="LLM provider"),
+    model: str | None = typer.Option(None, "-m", "--model", help="Model name"),
+    api_key: str | None = typer.Option(None, "-k", "--api-key", help="API key"),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation"),
+) -> None:
+    """Update LLM settings (interactive or via flags)."""
+    # If no flags provided, use interactive prompts
+    if provider is None and model is None and api_key is None:
+        provider = Prompt.ask(
+            "Select LLM provider",
+            choices=_PROVIDERS,
+            default="openai",
+        )
+        default_model = _DEFAULT_MODELS.get(provider, "")
+        model = Prompt.ask("Model name", default=default_model)
+        api_key = Prompt.ask(
+            "API key (leave blank to keep current)",
+            default="",
+            password=True,
+        )
+        if not api_key:
+            api_key = None
+
+        # Confirmation
+        typer.echo(f"\n  Provider: {provider}")
+        typer.echo(f"  Model:    {model}")
+        typer.echo(f"  API key:  {'(will update)' if api_key else '(unchanged)'}")
+        if not Confirm.ask("\nSave these settings?", default=True):
+            raise typer.Exit(0)
+
+    elif not yes:
+        parts = []
+        if provider:
+            parts.append(f"provider={provider}")
+        if model:
+            parts.append(f"model={model}")
+        if api_key:
+            parts.append("api_key=(hidden)")
+        typer.echo(f"Updating: {', '.join(parts)}")
+        if not Confirm.ask("Continue?", default=True):
+            raise typer.Exit(0)
+
+    from argus_cli.api import ArgusAPI
+    from argus_cli.display import print_config_update
+
+    api = ArgusAPI(server)
+    try:
+        data = api.update_llm_settings(provider=provider, model=model, api_key=api_key)
+        print_config_update(data)
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)

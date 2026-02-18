@@ -274,6 +274,7 @@ async def service_metrics(
 async def get_settings_endpoint() -> dict[str, Any]:
     """Get sanitized server settings (no secrets)."""
     from argus_agent.config import get_settings
+    from argus_agent.llm.settings import LLMSettingsService
     from argus_agent.main import _get_token_budget
 
     settings = get_settings()
@@ -285,6 +286,10 @@ async def get_settings_endpoint() -> dict[str, Any]:
     _discover_providers()
     available_providers = list(_providers.keys())
 
+    # Check if settings are DB-persisted
+    llm_svc = LLMSettingsService()
+    db_persisted = await llm_svc.has_persisted_settings()
+
     return {
         "llm": {
             "provider": settings.llm.provider,
@@ -292,6 +297,7 @@ async def get_settings_endpoint() -> dict[str, Any]:
             "status": _get_llm_status(),
             "api_key_set": bool(settings.llm.api_key),
             "providers": available_providers,
+            "source": "db" if db_persisted else "env/yaml",
         },
         "budget": budget.get_status() if budget else {},
         "collectors": {
@@ -341,8 +347,9 @@ def _persist_to_yaml(section: str, data: dict[str, Any]) -> None:
 
 @router.put("/settings/llm")
 async def update_llm_settings(body: dict[str, Any]) -> dict[str, Any]:
-    """Update LLM provider, model, and/or API key."""
+    """Update LLM provider, model, and/or API key (persisted to DB)."""
     from argus_agent.config import get_settings
+    from argus_agent.llm.settings import LLMSettingsService
 
     settings = get_settings()
 
@@ -350,22 +357,25 @@ async def update_llm_settings(body: dict[str, Any]) -> dict[str, Any]:
     model = body.get("model")
     api_key = body.get("api_key", "")
 
+    # Update in-memory settings for immediate effect
     if provider:
         settings.llm.provider = provider
     if model:
         settings.llm.model = model
-    # Preserve existing key if masked or empty
     if api_key and api_key != "••••••••":
         settings.llm.api_key = api_key
 
-    # Persist to YAML (without the raw api_key)
-    persist_data: dict[str, Any] = {
-        "provider": settings.llm.provider,
-        "model": settings.llm.model,
-    }
+    # Persist to DB (replaces YAML persistence for LLM settings)
+    persist_data: dict[str, Any] = {}
+    if provider:
+        persist_data["provider"] = provider
+    if model:
+        persist_data["model"] = model
     if api_key and api_key != "••••••••":
         persist_data["api_key"] = api_key
-    _persist_to_yaml("llm", persist_data)
+
+    llm_svc = LLMSettingsService()
+    await llm_svc.save(persist_data)
 
     return {
         "provider": settings.llm.provider,

@@ -227,8 +227,8 @@ class SecurityScanner:
                 name = (info.get("name") or "").lower()
                 exe = info.get("exe") or ""
 
-                # Known bad process names
-                if name in KNOWN_BAD_NAMES:
+                # Known bad process names (substring match)
+                if any(bad in name for bad in KNOWN_BAD_NAMES):
                     entry = {"pid": info["pid"], "name": name, "reason": "known_bad_name"}
                     suspicious.append(entry)
                     events.append({

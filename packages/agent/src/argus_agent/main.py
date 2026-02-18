@@ -36,6 +36,7 @@ _investigator = None
 _action_engine = None
 _sdk_telemetry_collector = None
 _soak_runner = None
+_alert_formatter = None
 
 
 def _get_collectors():
@@ -73,13 +74,18 @@ def _get_action_engine():
     return _action_engine
 
 
+def _get_alert_formatter():
+    """Get the alert formatter instance."""
+    return _alert_formatter
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
     global _metrics_collector, _process_monitor, _log_watcher, _scheduler
     global _security_scanner, _alert_engine, _token_budget
     global _baseline_tracker, _anomaly_detector, _investigator, _action_engine
-    global _sdk_telemetry_collector, _soak_runner
+    global _sdk_telemetry_collector, _soak_runner, _alert_formatter
 
     settings = get_settings()
 
@@ -89,6 +95,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize databases
     await init_db(settings.storage.sqlite_path)
     init_timeseries(settings.storage.duckdb_path)
+
+    # Apply DB-persisted LLM settings (overrides env/YAML defaults)
+    from argus_agent.llm.settings import LLMSettingsService
+
+    await LLMSettingsService().apply_to_settings()
 
     # Register all tools (skip host tools in SDK-only mode)
     _register_all_tools(is_sdk_only=settings.mode == "sdk_only")
@@ -107,13 +118,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _baseline_tracker = BaselineTracker()
     _anomaly_detector = AnomalyDetector(_baseline_tracker)
 
-    # 3. Investigator
+    # 3. Investigator + Alert formatter
     from argus_agent.agent.investigator import Investigator
+    from argus_agent.alerting.formatter import AlertFormatter
     from argus_agent.api.ws import manager
+
+    _alert_formatter = AlertFormatter(
+        channels=[],
+        batch_window=settings.alerting.batch_window,
+        min_severity=settings.alerting.min_external_severity,
+        ai_enhance=settings.alerting.ai_enhance,
+    )
 
     _investigator = Investigator(
         budget=_token_budget,
         ws_manager=manager,
+        formatter=_alert_formatter,
     )
 
     # 3b. Action engine
@@ -134,8 +154,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Seed DB from static config on first run
     svc = NotificationSettingsService()
     await svc.initialize_from_config(settings.alerting)
-    # Load channels from DB
+    _alert_engine.set_formatter(_alert_formatter)
+    # Load channels from DB (sets WS on engine, external on formatter)
     await reload_channels()
+    await _alert_formatter.start()
     await _alert_engine.start()
 
     is_sdk_only = settings.mode == "sdk_only"
@@ -232,6 +254,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown in reverse order
+    if _alert_formatter:
+        await _alert_formatter.stop()
     if _soak_runner:
         await _soak_runner.stop()
     if _scheduler:

@@ -81,6 +81,9 @@ class AlertConfig(BaseModel):
     email_smtp_port: int = 587
     email_from: str = ""
     email_to: list[str] = Field(default_factory=list)
+    batch_window: int = 90
+    min_external_severity: str = "NOTABLE"
+    ai_enhance: bool = False
 
 
 class Settings(BaseSettings):

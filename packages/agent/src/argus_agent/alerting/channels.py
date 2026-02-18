@@ -26,6 +26,23 @@ class NotificationChannel(ABC):
         """Send a notification for the given alert/event. Returns True on success."""
         ...
 
+    async def send_urgent(self, alert: Any, event: Any, friendly_message: str) -> bool:
+        """Send an urgent alert with a human-friendly message. Default: fall back to send()."""
+        return await self.send(alert, event)
+
+    async def send_digest(self, digest: Any) -> bool:
+        """Send a batched digest of NOTABLE alerts. Default: send each individually."""
+        success = True
+        for group in digest.groups:
+            for item in group.items:
+                if not await self.send(item.alert, item.event):
+                    success = False
+        return success
+
+    async def send_investigation_report(self, title: str, summary: str) -> bool:
+        """Send an AI investigation report. Default: no-op."""
+        return True
+
 
 class WebSocketChannel(NotificationChannel):
     """Broadcasts alerts to all connected WebSocket clients."""
@@ -76,6 +93,32 @@ class WebhookChannel(NotificationChannel):
                         success = False
             except Exception:
                 logger.exception("Webhook POST failed for %s", url)
+                success = False
+        return success
+
+    async def send_investigation_report(self, title: str, summary: str) -> bool:
+        if not self._urls:
+            return True
+
+        import httpx
+
+        success = True
+        for url in self._urls:
+            payload: dict[str, Any]
+            if "hooks.slack.com" in url:
+                payload = {"text": f"*\U0001f916 AI Investigation Report — {title}*\n{summary}"}
+            elif "discord.com/api/webhooks" in url:
+                payload = {"content": f"**AI Investigation Report — {title}**\n{summary}"}
+            else:
+                payload = {"type": "investigation_report", "title": title, "summary": summary}
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code >= 400:
+                        logger.warning("Webhook investigation report returned %d", resp.status_code)
+                        success = False
+            except Exception:
+                logger.exception("Webhook investigation report failed for %s", url)
                 success = False
         return success
 
@@ -186,6 +229,112 @@ class SlackChannel(NotificationChannel):
                 break
         return result
 
+    async def send_urgent(self, alert: Any, event: Any, friendly_message: str) -> bool:
+        if not self._bot_token or not self._channel_id:
+            return True
+        try:
+            from slack_sdk.web.async_client import AsyncWebClient
+
+            client = AsyncWebClient(token=self._bot_token, ssl=self._ssl_context)
+            severity = str(alert.severity)
+            color = _SEVERITY_COLORS.get(severity, "#e74c3c")
+
+            blocks = [
+                {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": f"\U0001f534 {alert.rule_name}"},
+                },
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": friendly_message},
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": "\u23f3 AI investigation in progress..."},
+                    ],
+                },
+            ]
+
+            await client.chat_postMessage(
+                channel=self._channel_id,
+                text=f"\U0001f534 {alert.rule_name}: {friendly_message}",
+                blocks=blocks,
+                attachments=[{"color": color, "blocks": []}],
+            )
+            return True
+        except Exception:
+            logger.exception("Slack urgent notification failed")
+            return False
+
+    async def send_digest(self, digest: Any) -> bool:
+        if not self._bot_token or not self._channel_id:
+            return True
+        try:
+            from slack_sdk.web.async_client import AsyncWebClient
+
+            client = AsyncWebClient(token=self._bot_token, ssl=self._ssl_context)
+
+            lines = [
+                f"\U0001f4cb *Argus Summary* — {digest.total_count} alert(s) "
+                f"in the last {digest.window_seconds}s\n"
+            ]
+            for group in digest.groups:
+                prefix = f"\U0001f7e1 ({group.count}x) " if group.count > 1 else "\U0001f7e1 "
+                lines.append(f"{prefix}{group.summary}")
+
+            if digest.ai_summary:
+                lines.append(f"\n\U0001f916 *AI Assessment:* {digest.ai_summary}")
+
+            body = "\n".join(lines)
+
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": body},
+                },
+            ]
+
+            await client.chat_postMessage(
+                channel=self._channel_id,
+                text=f"Argus Summary — {digest.total_count} alert(s)",
+                blocks=blocks,
+                attachments=[{"color": _SEVERITY_COLORS["NOTABLE"], "blocks": []}],
+            )
+            return True
+        except Exception:
+            logger.exception("Slack digest notification failed")
+            return False
+
+    async def send_investigation_report(self, title: str, summary: str) -> bool:
+        if not self._bot_token or not self._channel_id:
+            return True
+        try:
+            from slack_sdk.web.async_client import AsyncWebClient
+
+            client = AsyncWebClient(token=self._bot_token, ssl=self._ssl_context)
+
+            blocks = [
+                {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": "\U0001f916 AI Investigation Report"},
+                },
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"*{title}*\n\n{summary}"},
+                },
+            ]
+
+            await client.chat_postMessage(
+                channel=self._channel_id,
+                text=f"AI Investigation Report — {title}",
+                blocks=blocks,
+            )
+            return True
+        except Exception:
+            logger.exception("Slack investigation report failed")
+            return False
+
     async def test_connection(self) -> dict[str, Any]:
         """Test the Slack connection and send a test message."""
         from slack_sdk.web.async_client import AsyncWebClient
@@ -264,6 +413,36 @@ class EmailChannel(NotificationChannel):
             return True
         except Exception:
             logger.exception("Email notification failed")
+            return False
+
+    async def send_investigation_report(self, title: str, summary: str) -> bool:
+        if not self._to_addrs:
+            return True
+        try:
+            from email.message import EmailMessage
+
+            import aiosmtplib
+
+            subject = f"[Argus] AI Investigation Report — {title}"
+            plain = f"AI Investigation Report — {title}\n\n{summary}"
+            html = (
+                "<html><body>"
+                f"<h2>AI Investigation Report — {title}</h2>"
+                f"<p style='white-space:pre-wrap;'>{summary}</p>"
+                "</body></html>"
+            )
+
+            msg = EmailMessage()
+            msg["Subject"] = subject
+            msg["From"] = self._from_addr
+            msg["To"] = ", ".join(self._to_addrs)
+            msg.set_content(plain)
+            msg.add_alternative(html, subtype="html")
+
+            await aiosmtplib.send(msg, **self._smtp_kwargs())
+            return True
+        except Exception:
+            logger.exception("Email investigation report failed")
             return False
 
     def _smtp_kwargs(self) -> dict[str, Any]:

@@ -49,5 +49,45 @@ services:
     stdin_open: true
     tty: true
 
+  example-fastapi:
+    build:
+      context: .
+      dockerfile: examples/python-fastapi/Dockerfile
+    environment:
+      - ARGUS_URL=http://argus:7600
+      - PORT=8000
+    depends_on:
+      - argus
+    profiles: ["test"]
+    restart: unless-stopped
+
+  example-express:
+    build:
+      context: .
+      dockerfile: examples/node-express/Dockerfile
+    environment:
+      - ARGUS_URL=http://argus:7600
+      - PORT=8001
+    depends_on:
+      - argus
+    profiles: ["test"]
+    restart: unless-stopped
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: packages/test-runner/Dockerfile
+    pid: "host"
+    privileged: true
+    environment:
+      - TARGET_APPS=[{"name":"fastapi","url":"http://example-fastapi:8000"},{"name":"express","url":"http://example-express:8001"}]
+      - SCENARIO_INTERVAL=300
+      - ENABLE_SYSTEM_STRESS=true
+    depends_on:
+      - example-fastapi
+      - example-express
+    profiles: ["test"]
+    restart: unless-stopped
+
 volumes:
   argus_data:

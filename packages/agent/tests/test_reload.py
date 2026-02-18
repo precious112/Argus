@@ -49,24 +49,29 @@ async def test_reload_creates_channels_from_db():
     await svc.upsert("webhook", True, {"urls": ["https://example.com/hook"]})
 
     mock_engine = MagicMock()
-    captured_channels = []
+    engine_channels: list = []
+    mock_engine.set_channels = lambda ch: engine_channels.extend(ch)
 
-    def capture_channels(channels):
-        captured_channels.extend(channels)
+    mock_formatter = MagicMock()
+    formatter_channels: list = []
+    mock_formatter.set_channels = lambda ch: formatter_channels.extend(ch)
 
-    mock_engine.set_channels = capture_channels
     mock_manager = AsyncMock()
 
     with (
         patch("argus_agent.main._get_alert_engine", return_value=mock_engine),
+        patch("argus_agent.main._get_alert_formatter", return_value=mock_formatter),
         patch("argus_agent.api.ws.manager", mock_manager),
     ):
         await reload_channels()
 
-    # Should have: WebSocket + Slack + Email + Webhook = 4
-    assert len(captured_channels) == 4
-    types = {type(c) for c in captured_channels}
-    assert WebSocketChannel in types
+    # Engine gets only WebSocket
+    assert len(engine_channels) == 1
+    assert isinstance(engine_channels[0], WebSocketChannel)
+
+    # Formatter gets external channels: Slack + Email + Webhook = 3
+    assert len(formatter_channels) == 3
+    types = {type(c) for c in formatter_channels}
     assert SlackChannel in types
     assert EmailChannel in types
     assert WebhookChannel in types
@@ -85,20 +90,29 @@ async def test_reload_skips_disabled_channels():
     })
 
     mock_engine = MagicMock()
-    captured_channels = []
-    mock_engine.set_channels = lambda ch: captured_channels.extend(ch)
+    engine_channels: list = []
+    mock_engine.set_channels = lambda ch: engine_channels.extend(ch)
+
+    mock_formatter = MagicMock()
+    formatter_channels: list = []
+    mock_formatter.set_channels = lambda ch: formatter_channels.extend(ch)
+
     mock_manager = AsyncMock()
 
     with (
         patch("argus_agent.main._get_alert_engine", return_value=mock_engine),
+        patch("argus_agent.main._get_alert_formatter", return_value=mock_formatter),
         patch("argus_agent.api.ws.manager", mock_manager),
     ):
         await reload_channels()
 
-    # WebSocket + Email only (Slack disabled)
-    assert len(captured_channels) == 2
-    types = {type(c) for c in captured_channels}
-    assert WebSocketChannel in types
+    # Engine: WebSocket only
+    assert len(engine_channels) == 1
+    assert isinstance(engine_channels[0], WebSocketChannel)
+
+    # Formatter: Email only (Slack disabled)
+    assert len(formatter_channels) == 1
+    types = {type(c) for c in formatter_channels}
     assert EmailChannel in types
     assert SlackChannel not in types
 
@@ -107,19 +121,28 @@ async def test_reload_skips_disabled_channels():
 @pytest.mark.usefixtures("_init_db")
 async def test_reload_always_includes_websocket():
     mock_engine = MagicMock()
-    captured_channels = []
-    mock_engine.set_channels = lambda ch: captured_channels.extend(ch)
+    engine_channels: list = []
+    mock_engine.set_channels = lambda ch: engine_channels.extend(ch)
+
+    mock_formatter = MagicMock()
+    formatter_channels: list = []
+    mock_formatter.set_channels = lambda ch: formatter_channels.extend(ch)
+
     mock_manager = AsyncMock()
 
     with (
         patch("argus_agent.main._get_alert_engine", return_value=mock_engine),
+        patch("argus_agent.main._get_alert_formatter", return_value=mock_formatter),
         patch("argus_agent.api.ws.manager", mock_manager),
     ):
         await reload_channels()
 
-    # Even with no DB configs, WebSocket is always present
-    assert len(captured_channels) == 1
-    assert isinstance(captured_channels[0], WebSocketChannel)
+    # Even with no DB configs, WebSocket is always present on engine
+    assert len(engine_channels) == 1
+    assert isinstance(engine_channels[0], WebSocketChannel)
+
+    # No external channels
+    assert len(formatter_channels) == 0
 
 
 @pytest.mark.asyncio

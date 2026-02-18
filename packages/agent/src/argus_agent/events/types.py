@@ -63,6 +63,7 @@ class EventType(StrEnum):
     SDK_LATENCY_DEGRADATION = "sdk_latency_degradation"
     SDK_COLD_START_SPIKE = "sdk_cold_start_spike"
     SDK_SERVICE_SILENT = "sdk_service_silent"
+    SDK_TRAFFIC_BURST = "sdk_traffic_burst"
 
     # Phase 1: Observability events
     TRACE_SLOW_REQUEST = "trace_slow_request"

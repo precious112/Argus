@@ -16,9 +16,13 @@ logger = logging.getLogger("argus.alerting.reload")
 
 
 async def reload_channels() -> None:
-    """Read enabled channel configs from DB and update the running AlertEngine."""
+    """Read enabled channel configs from DB and update the running AlertEngine.
+
+    WebSocketChannel goes to the engine (immediate, unfiltered).
+    External channels (Slack, Email, Webhook) go to the formatter (severity-routed).
+    """
     from argus_agent.api.ws import manager
-    from argus_agent.main import _get_alert_engine
+    from argus_agent.main import _get_alert_engine, _get_alert_formatter
 
     engine = _get_alert_engine()
     if engine is None:
@@ -28,9 +32,10 @@ async def reload_channels() -> None:
     svc = NotificationSettingsService()
     configs = await svc.get_all_raw()
 
-    channels: list[WebSocketChannel | SlackChannel | EmailChannel | WebhookChannel] = [
-        WebSocketChannel(manager),
-    ]
+    # WebSocket always goes directly to the engine
+    engine.set_channels([WebSocketChannel(manager)])
+
+    external: list[SlackChannel | EmailChannel | WebhookChannel] = []
 
     for row in configs:
         if not row["enabled"]:
@@ -39,12 +44,12 @@ async def reload_channels() -> None:
         ctype = row["channel_type"]
 
         if ctype == "slack":
-            channels.append(SlackChannel(
+            external.append(SlackChannel(
                 bot_token=cfg.get("bot_token", ""),
                 channel_id=cfg.get("channel_id", ""),
             ))
         elif ctype == "email":
-            channels.append(EmailChannel(
+            external.append(EmailChannel(
                 smtp_host=cfg.get("smtp_host", ""),
                 smtp_port=cfg.get("smtp_port", 587),
                 from_addr=cfg.get("from_addr", ""),
@@ -56,7 +61,14 @@ async def reload_channels() -> None:
         elif ctype == "webhook":
             urls = cfg.get("urls", [])
             if urls:
-                channels.append(WebhookChannel(urls))
+                external.append(WebhookChannel(urls))
 
-    engine.set_channels(channels)
-    logger.info("Reloaded %d notification channel(s) from DB", len(channels))
+    # External channels route through the formatter (severity-based batching)
+    formatter = _get_alert_formatter()
+    if formatter is not None:
+        formatter.set_channels(external)
+    else:
+        logger.debug("No formatter available, external channels not set")
+
+    total = 1 + len(external)  # 1 for WebSocket
+    logger.info("Reloaded %d notification channel(s) from DB", total)

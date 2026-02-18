@@ -164,6 +164,48 @@ class BaselineTracker:
             )
             updated[bl.metric_name] = bl
 
+        # 3. Traffic request counts per service (5-min buckets over 7 days)
+        traffic_rows = conn.execute(
+            """
+            SELECT
+                'traffic.' || service || '.request_count_5m' AS metric_key,
+                AVG(cnt)                            AS mean,
+                STDDEV_POP(cnt)                     AS stddev,
+                MIN(cnt)                            AS min_val,
+                MAX(cnt)                            AS max_val,
+                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY cnt) AS p50,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY cnt) AS p95,
+                PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY cnt) AS p99,
+                COUNT(*)                            AS sample_count
+            FROM (
+                SELECT
+                    service,
+                    time_bucket(INTERVAL '5 minutes', timestamp) AS bucket,
+                    COUNT(*) AS cnt
+                FROM spans
+                WHERE timestamp >= ? AND kind = 'server'
+                GROUP BY service, bucket
+            ) sub
+            GROUP BY metric_key
+            HAVING COUNT(*) >= 10
+            """,
+            [since],
+        ).fetchall()
+
+        for row in traffic_rows:
+            bl = MetricBaseline(
+                metric_name=row[0],
+                mean=float(row[1]),
+                stddev=float(row[2]) if row[2] is not None else 0.0,
+                min=float(row[3]),
+                max=float(row[4]),
+                p50=float(row[5]),
+                p95=float(row[6]),
+                p99=float(row[7]),
+                sample_count=int(row[8]),
+            )
+            updated[bl.metric_name] = bl
+
         # Merge into existing baselines (don't overwrite system baselines)
         self._baselines.update(updated)
 

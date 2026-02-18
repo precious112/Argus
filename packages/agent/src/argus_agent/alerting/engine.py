@@ -25,6 +25,7 @@ class AlertRule:
     name: str
     event_types: list[str]
     min_severity: EventSeverity = EventSeverity.NOTABLE
+    max_severity: EventSeverity | None = None
     cooldown_seconds: int = 300  # 5 min default
     auto_investigate: bool = False
 
@@ -93,11 +94,24 @@ DEFAULT_RULES: list[AlertRule] = [
         auto_investigate=True,
     ),
     AlertRule(
+        id="resource_warning",
+        name="Resource Warning",
+        event_types=[
+            EventType.CPU_HIGH, EventType.MEMORY_HIGH,
+            EventType.DISK_HIGH, EventType.LOAD_HIGH,
+        ],
+        min_severity=EventSeverity.NOTABLE,
+        max_severity=EventSeverity.NOTABLE,
+        cooldown_seconds=600,
+        auto_investigate=False,
+    ),
+    AlertRule(
         id="anomaly",
         name="Anomaly Detected",
         event_types=[EventType.ANOMALY_DETECTED],
         min_severity=EventSeverity.NOTABLE,
         cooldown_seconds=600,
+        auto_investigate=True,
     ),
     AlertRule(
         id="sdk_error_spike",
@@ -127,6 +141,13 @@ DEFAULT_RULES: list[AlertRule] = [
         min_severity=EventSeverity.NOTABLE,
         cooldown_seconds=1800,
     ),
+    AlertRule(
+        id="sdk_traffic_burst",
+        name="Traffic Burst",
+        event_types=[EventType.SDK_TRAFFIC_BURST],
+        min_severity=EventSeverity.NOTABLE,
+        auto_investigate=True,
+    ),
 ]
 
 
@@ -150,11 +171,15 @@ class AlertEngine:
         self._rules = {r.id: r for r in (rules or DEFAULT_RULES)}
         self._on_investigate = on_investigate
         self._channels: list[Any] = []  # NotificationChannel instances
+        self._formatter: Any = None  # AlertFormatter for external channels
         self._active_alerts: list[ActiveAlert] = []
         self._last_fired: dict[str, datetime] = {}  # rule_id -> last fire time
 
     def set_channels(self, channels: list[Any]) -> None:
         self._channels = channels
+
+    def set_formatter(self, formatter: Any) -> None:
+        self._formatter = formatter
 
     async def start(self, bus: EventBus | None = None) -> None:
         """Subscribe to NOTABLE+ events on the event bus."""
@@ -195,12 +220,19 @@ class AlertEngine:
             self._active_alerts.append(alert)
             logger.info("Alert fired: %s [%s] %s", rule.name, event.severity, event.message)
 
-            # Send to notification channels
+            # Send to notification channels (WebSocket — immediate, unfiltered)
             for channel in self._channels:
                 try:
                     await channel.send(alert, event)
                 except Exception:
                     logger.exception("Notification channel error")
+
+            # Route to formatter for external channels (severity-routed, batched)
+            if self._formatter is not None:
+                try:
+                    await self._formatter.submit(alert, event)
+                except Exception:
+                    logger.exception("Formatter submit error")
 
             # Auto-investigate urgent events
             if (
@@ -218,8 +250,12 @@ class AlertEngine:
         if event.type not in rule.event_types:
             return False
         severity_order = [EventSeverity.NORMAL, EventSeverity.NOTABLE, EventSeverity.URGENT]
-        if severity_order.index(event.severity) < severity_order.index(rule.min_severity):
+        event_idx = severity_order.index(event.severity)
+        if event_idx < severity_order.index(rule.min_severity):
             return False
+        if rule.max_severity is not None:
+            if event_idx > severity_order.index(rule.max_severity):
+                return False
         return True
 
     def get_active_alerts(self, include_resolved: bool = False) -> list[ActiveAlert]:

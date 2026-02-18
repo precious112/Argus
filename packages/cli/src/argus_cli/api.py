@@ -55,5 +55,22 @@ class ArgusAPI:
     def settings(self) -> dict[str, Any]:
         return self._client.get("/settings").json()
 
+    def update_llm_settings(
+        self,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if provider is not None:
+            body["provider"] = provider
+        if model is not None:
+            body["model"] = model
+        if api_key is not None:
+            body["api_key"] = api_key
+        resp = self._client.put("/settings/llm", json=body)
+        resp.raise_for_status()
+        return resp.json()
+
     def close(self) -> None:
         self._client.close()

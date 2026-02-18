@@ -179,6 +179,9 @@ class SDKTelemetryCollector:
         # Check SDK runtime metrics against baselines
         await self._check_sdk_metric_anomalies(bus)
 
+        # Check for traffic bursts
+        await self._check_traffic_bursts(bus)
+
     async def _check_sdk_metric_anomalies(self, bus: object) -> None:
         """Check recent SDK runtime metrics against baselines."""
         if self._anomaly_detector is None:
@@ -214,5 +217,51 @@ class SDKTelemetryCollector:
                         "metric_name": metric_name,
                         "value": value,
                         "z_score": anomaly.z_score,
+                    },
+                ))
+
+    async def _check_traffic_bursts(self, bus: object) -> None:
+        """Check for sudden traffic spikes per service."""
+        if self._anomaly_detector is None:
+            return
+
+        try:
+            from argus_agent.storage.timeseries import query_request_metrics
+        except RuntimeError:
+            return
+
+        for svc in list(self._known_services):
+            try:
+                buckets = query_request_metrics(
+                    service=svc, since_minutes=5, interval_minutes=5,
+                )
+            except Exception:
+                continue
+
+            if not buckets:
+                continue
+
+            request_count = buckets[-1].get("request_count", 0)
+            if request_count < 10:
+                continue
+
+            baseline_key = f"traffic.{svc}.request_count_5m"
+            anomaly = self._anomaly_detector.check_metric(baseline_key, request_count)
+            if anomaly:
+                bl = self._anomaly_detector._tracker.get_baseline(baseline_key)
+                baseline_mean = bl.mean if bl else 0.0
+                await bus.publish(Event(
+                    source=EventSource.SDK_TELEMETRY,
+                    type=EventType.SDK_TRAFFIC_BURST,
+                    severity=anomaly.severity,
+                    message=(
+                        f"Traffic spike on '{svc}': {request_count} requests "
+                        f"in 5 min (z-score={anomaly.z_score:.1f})"
+                    ),
+                    data={
+                        "service": svc,
+                        "request_count": request_count,
+                        "z_score": anomaly.z_score,
+                        "baseline_mean": baseline_mean,
                     },
                 ))
