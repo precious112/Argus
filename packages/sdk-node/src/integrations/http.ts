@@ -13,7 +13,7 @@ export function patchHttp(): void {
   _originalFetch = globalThis.fetch;
 
   globalThis.fetch = async function patchedFetch(
-    input: RequestInfo | URL,
+    input: string | Request | URL,
     init?: RequestInit,
   ): Promise<Response> {
     const client = getClient();
