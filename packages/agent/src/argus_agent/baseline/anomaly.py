@@ -28,6 +28,7 @@ class Anomaly:
     z_score: float
     severity: EventSeverity
     message: str
+    baseline_mean: float = 0.0
 
 
 class AnomalyDetector:
@@ -80,6 +81,7 @@ class AnomalyDetector:
                 f"Anomaly: {name}={value:.1f} "
                 f"(z={z:.1f}, baseline mean={bl.mean:.1f}, stddev={bl.stddev:.1f})"
             ),
+            baseline_mean=round(bl.mean, 1),
         )
 
     def check_all_current(self, metrics: dict[str, float]) -> list[Anomaly]:

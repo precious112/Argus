@@ -165,8 +165,9 @@ class SystemMetricsCollector:
                             severity=anomaly.severity,
                             message=anomaly.message,
                             data={
-                                "metric_name": anomaly.metric_name,
+                                "metric": anomaly.metric_name,
                                 "value": anomaly.value,
+                                "mean": anomaly.baseline_mean,
                                 "z_score": anomaly.z_score,
                             },
                         )
