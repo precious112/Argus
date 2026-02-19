@@ -474,6 +474,61 @@ async def test_openai_stream_empty_yields_final():
 
 
 @pytest.mark.asyncio
+async def test_fixed_temp_model_omits_temperature():
+    """Models in _FIXED_TEMPERATURE_PREFIXES should not send temperature."""
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=_Response(
+            choices=[_Choice(message=_Message(content="ok"))],
+        )
+    )
+
+    mock_module = MagicMock()
+    mock_module.AsyncOpenAI.return_value = mock_client
+    with patch.dict("sys.modules", {"openai": mock_module}):
+        from importlib import reload
+
+        import argus_agent.llm.openai as mod
+
+        reload(mod)
+        provider = mod.OpenAIProvider(_make_config(model="gpt-5-mini"))
+
+    provider._client = mock_client
+    await provider.complete([LLMMessage(role="user", content="Hi")])
+
+    call_kwargs = mock_client.chat.completions.create.call_args[1]
+    assert "temperature" not in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_normal_model_includes_temperature():
+    """Normal models should include temperature in API params."""
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=_Response(
+            choices=[_Choice(message=_Message(content="ok"))],
+        )
+    )
+
+    mock_module = MagicMock()
+    mock_module.AsyncOpenAI.return_value = mock_client
+    with patch.dict("sys.modules", {"openai": mock_module}):
+        from importlib import reload
+
+        import argus_agent.llm.openai as mod
+
+        reload(mod)
+        provider = mod.OpenAIProvider(_make_config(model="gpt-4o"))
+
+    provider._client = mock_client
+    await provider.complete([LLMMessage(role="user", content="Hi")])
+
+    call_kwargs = mock_client.chat.completions.create.call_args[1]
+    assert "temperature" in call_kwargs
+    assert call_kwargs["temperature"] == 0.1
+
+
+@pytest.mark.asyncio
 async def test_openai_stream_api_error():
     """stream() wraps API errors in LLMError."""
     mock_client = AsyncMock()

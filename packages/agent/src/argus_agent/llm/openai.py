@@ -20,6 +20,13 @@ _MODEL_CONTEXT: dict[str, int] = {
     "gpt-3.5-turbo": 16_385,
 }
 
+# Models that only accept temperature=1 (the default); omit the param entirely.
+_FIXED_TEMPERATURE_PREFIXES = ("o1", "o3", "gpt-5-mini", "gpt-5-nano")
+
+
+def _supports_temperature(model: str) -> bool:
+    return not model.startswith(_FIXED_TEMPERATURE_PREFIXES)
+
 
 def _messages_to_openai(messages: list[LLMMessage]) -> list[dict[str, Any]]:
     """Convert internal messages to OpenAI API format."""
@@ -118,9 +125,10 @@ class OpenAIProvider(LLMProvider):
         params: dict[str, Any] = {
             "model": self._model,
             "messages": _messages_to_openai(messages),
-            "temperature": kwargs.get("temperature", self._config.temperature),
             "max_completion_tokens": kwargs.get("max_tokens", self._config.max_tokens),
         }
+        if _supports_temperature(self._model):
+            params["temperature"] = kwargs.get("temperature", self._config.temperature)
         if tools:
             params["tools"] = _tools_to_openai(tools)
 
@@ -155,11 +163,12 @@ class OpenAIProvider(LLMProvider):
         params: dict[str, Any] = {
             "model": self._model,
             "messages": _messages_to_openai(messages),
-            "temperature": kwargs.get("temperature", self._config.temperature),
             "max_completion_tokens": kwargs.get("max_tokens", self._config.max_tokens),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if _supports_temperature(self._model):
+            params["temperature"] = kwargs.get("temperature", self._config.temperature)
         if tools:
             params["tools"] = _tools_to_openai(tools)
 
