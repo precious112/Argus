@@ -141,10 +141,11 @@ async def test_tool_call_and_response():
     agent = AgentLoop(provider=provider, memory=memory, on_event=on_event)
     result = await agent.run("Echo test")
 
-    # Round 1: tool call, Round 2: text (continuation 1), Round 3: text (continuation 2),
-    # Round 4: text (continuation limit reached → exit)
+    # Round 1: tool call, Round 2: text-only → final answer, return immediately
     assert result.content == "The echo tool returned: test"
     assert result.tool_calls_made == 1
+    assert result.rounds == 2
+    assert provider._call_count == 2
 
     # Check tool events
     tool_events = [e for e in events if e[0] == "tool_call"]
@@ -235,9 +236,8 @@ async def test_final_round_summary():
     for t in captured_tools[:-1]:
         assert t is not None
 
-    # Result should contain the summary + exhaustion notice
-    assert "Here is a summary of findings." in result.content
-    assert "maximum number of tool call rounds" in result.content
+    # Result should contain the summary (text-only = final answer, no exhaustion notice)
+    assert result.content == "Here is a summary of findings."
     assert result.rounds == MAX_TOOL_ROUNDS
 
 
@@ -254,3 +254,61 @@ async def test_memory_tracking():
     assert memory.messages[0].content == "Test message"
     assert memory.messages[1].role == "assistant"
     assert memory.messages[1].content == "Response text"
+
+
+@pytest.mark.asyncio
+async def test_no_duplicate_text_after_tools():
+    """After tool calls, text-only response is returned once without re-calling the LLM."""
+    register_tool(EchoTool())
+
+    provider = MockProvider(
+        [
+            LLMResponse(
+                tool_calls=[
+                    {
+                        "id": "tc_1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": json.dumps({"message": "hello"}),
+                        },
+                    }
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="Final answer after tool.", finish_reason="stop"),
+        ]
+    )
+    memory = ConversationMemory()
+    events: list[tuple[str, dict]] = []
+
+    async def on_event(event_type: str, data: dict[str, Any]) -> None:
+        events.append((event_type, data))
+
+    agent = AgentLoop(provider=provider, memory=memory, on_event=on_event)
+    result = await agent.run("Do something")
+
+    # LLM called exactly twice: once for tool call, once for final text
+    assert provider._call_count == 2
+    assert result.rounds == 2
+
+    # assistant_message_delta events should contain the text exactly once
+    delta_events = [e for e in events if e[0] == "assistant_message_delta"]
+    combined_text = "".join(e[1]["content"] for e in delta_events)
+    assert combined_text == "Final answer after tool."
+
+
+@pytest.mark.asyncio
+async def test_text_only_without_prior_tools_returns_immediately():
+    """A text-only response with no prior tools returns in 1 round."""
+    provider = MockProvider(
+        [LLMResponse(content="Just text, no tools needed.", finish_reason="stop")]
+    )
+    memory = ConversationMemory()
+    agent = AgentLoop(provider=provider, memory=memory)
+    result = await agent.run("Simple question")
+
+    assert result.content == "Just text, no tools needed."
+    assert result.rounds == 1
+    assert result.tool_calls_made == 0
+    assert provider._call_count == 1

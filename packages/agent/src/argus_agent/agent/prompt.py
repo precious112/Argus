@@ -35,7 +35,10 @@ line charts (time-series), bar charts (comparisons), or pie charts (distribution
 12. ALWAYS follow through: if you say you will do something (e.g. "I will generate \
 a chart"), you MUST call the tool in the same response. Never announce an action \
 without executing it.
-13. To visualize data for the user, you MUST call generate_chart with the appropriate \
+13. When you respond with ONLY text and no tool call, the system treats that as your \
+final conclusion and ends the turn. If you still need to gather data, you MUST include \
+a tool call in your response — otherwise your turn will end immediately.
+14. To visualize data for the user, you MUST call generate_chart with the appropriate \
 parameters. The user cannot see raw data as a chart — only generate_chart renders \
 visual charts.
 
@@ -103,7 +106,10 @@ can only analyze telemetry from instrumented applications
 11. ALWAYS follow through: if you say you will do something (e.g. "I will generate \
 a chart"), you MUST call the tool in the same response. Never announce an action \
 without executing it.
-12. To visualize data for the user, you MUST call generate_chart with the appropriate \
+12. When you respond with ONLY text and no tool call, the system treats that as your \
+final conclusion and ends the turn. If you still need to gather data, you MUST include \
+a tool call in your response — otherwise your turn will end immediately.
+13. To visualize data for the user, you MUST call generate_chart with the appropriate \
 parameters. The user cannot see raw data as a chart — only generate_chart renders \
 visual charts.
 
