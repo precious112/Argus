@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,6 +34,9 @@ _baseline_tracker = None
 _anomaly_detector = None
 _investigator = None
 _action_engine = None
+_sdk_telemetry_collector = None
+_soak_runner = None
+_alert_formatter = None
 
 
 def _get_collectors():
@@ -70,12 +74,18 @@ def _get_action_engine():
     return _action_engine
 
 
+def _get_alert_formatter():
+    """Get the alert formatter instance."""
+    return _alert_formatter
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
     global _metrics_collector, _process_monitor, _log_watcher, _scheduler
     global _security_scanner, _alert_engine, _token_budget
     global _baseline_tracker, _anomaly_detector, _investigator, _action_engine
+    global _sdk_telemetry_collector, _soak_runner, _alert_formatter
 
     settings = get_settings()
 
@@ -86,8 +96,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db(settings.storage.sqlite_path)
     init_timeseries(settings.storage.duckdb_path)
 
-    # Register all tools
-    _register_all_tools()
+    # Apply DB-persisted LLM settings (overrides env/YAML defaults)
+    from argus_agent.llm.settings import LLMSettingsService
+
+    await LLMSettingsService().apply_to_settings()
+
+    # Register all tools (skip host tools in SDK-only mode)
+    _register_all_tools(is_sdk_only=settings.mode == "sdk_only")
 
     # --- Phase 3: Proactive Intelligence ---
 
@@ -103,13 +118,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _baseline_tracker = BaselineTracker()
     _anomaly_detector = AnomalyDetector(_baseline_tracker)
 
-    # 3. Investigator
+    # 3. Investigator + Alert formatter
     from argus_agent.agent.investigator import Investigator
+    from argus_agent.alerting.formatter import AlertFormatter
     from argus_agent.api.ws import manager
+
+    _alert_formatter = AlertFormatter(
+        channels=[],
+        batch_window=settings.alerting.batch_window,
+        min_severity=settings.alerting.min_external_severity,
+        ai_enhance=settings.alerting.ai_enhance,
+    )
 
     _investigator = Investigator(
         budget=_token_budget,
         ws_manager=manager,
+        formatter=_alert_formatter,
     )
 
     # 3b. Action engine
@@ -117,49 +141,54 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     _action_engine = ActionEngine(ws_manager=manager)
 
-    # 4. Alert engine with channels
-    from argus_agent.alerting.channels import WebhookChannel, WebSocketChannel
+    # 4. Alert engine with channels (DB-backed)
     from argus_agent.alerting.engine import AlertEngine
+    from argus_agent.alerting.reload import reload_channels
+    from argus_agent.alerting.settings import NotificationSettingsService
     from argus_agent.events.bus import get_event_bus
 
     _alert_engine = AlertEngine(
         bus=get_event_bus(),
         on_investigate=_investigator.investigate_event,
     )
-    channels = [WebSocketChannel(manager)]
-    if settings.alerting.webhook_urls:
-        channels.append(WebhookChannel(settings.alerting.webhook_urls))
-    if settings.alerting.email_enabled:
-        from argus_agent.alerting.channels import EmailChannel
-
-        channels.append(EmailChannel(
-            smtp_host=settings.alerting.email_smtp_host,
-            smtp_port=settings.alerting.email_smtp_port,
-            from_addr=settings.alerting.email_from,
-            to_addrs=settings.alerting.email_to,
-        ))
-    _alert_engine.set_channels(channels)
+    # Seed DB from static config on first run
+    svc = NotificationSettingsService()
+    await svc.initialize_from_config(settings.alerting)
+    _alert_engine.set_formatter(_alert_formatter)
+    # Load channels from DB (sets WS on engine, external on formatter)
+    await reload_channels()
+    await _alert_formatter.start()
     await _alert_engine.start()
 
-    # Start collectors
-    from argus_agent.collectors.log_watcher import LogWatcher
-    from argus_agent.collectors.process_monitor import ProcessMonitor
-    from argus_agent.collectors.system_metrics import SystemMetricsCollector
+    is_sdk_only = settings.mode == "sdk_only"
 
-    _metrics_collector = SystemMetricsCollector()
-    _metrics_collector.anomaly_detector = _anomaly_detector
-    _process_monitor = ProcessMonitor()
-    _log_watcher = LogWatcher()
+    # Start host-level collectors only in full mode
+    if not is_sdk_only:
+        from argus_agent.collectors.log_watcher import LogWatcher
+        from argus_agent.collectors.process_monitor import ProcessMonitor
+        from argus_agent.collectors.system_metrics import SystemMetricsCollector
 
-    await _metrics_collector.start()
-    await _process_monitor.start()
-    await _log_watcher.start()
+        _metrics_collector = SystemMetricsCollector()
+        _metrics_collector.anomaly_detector = _anomaly_detector
+        _process_monitor = ProcessMonitor()
+        _log_watcher = LogWatcher()
 
-    # 5. Security scanner
-    from argus_agent.collectors.security_scanner import SecurityScanner
+        await _metrics_collector.start()
+        await _process_monitor.start()
+        await _log_watcher.start()
 
-    _security_scanner = SecurityScanner()
-    await _security_scanner.start()
+        # Security scanner
+        from argus_agent.collectors.security_scanner import SecurityScanner
+
+        _security_scanner = SecurityScanner()
+        await _security_scanner.start()
+
+    # Start SDK telemetry virtual collector (both modes)
+    from argus_agent.collectors.sdk_telemetry import SDKTelemetryCollector
+
+    _sdk_telemetry_collector = SDKTelemetryCollector()
+    _sdk_telemetry_collector.anomaly_detector = _anomaly_detector
+    await _sdk_telemetry_collector.start()
 
     # Start scheduler with periodic tasks
     from argus_agent.scheduler.scheduler import Scheduler
@@ -170,18 +199,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     _scheduler = Scheduler()
-    _scheduler.register("health_check", quick_health_check, interval_seconds=300)  # 5 min
-    _scheduler.register("trend_analysis", trend_analysis, interval_seconds=1800)  # 30 min
+
+    if not is_sdk_only:
+        _scheduler.register("health_check", quick_health_check, interval_seconds=300)
+        _scheduler.register("trend_analysis", trend_analysis, interval_seconds=1800)
+        _scheduler.register(
+            "baseline_update",
+            _make_baseline_update_task(_baseline_tracker),
+            interval_seconds=21600,
+        )
+        _scheduler.register(
+            "security_check",
+            quick_security_check,
+            interval_seconds=300,
+        )
+
+    # SDK baseline update (both modes)
     _scheduler.register(
-        "baseline_update",
-        _make_baseline_update_task(_baseline_tracker),
+        "sdk_baseline_update",
+        _make_sdk_baseline_update_task(_baseline_tracker),
         interval_seconds=21600,  # 6h
     )
-    _scheduler.register(
-        "security_check",
-        quick_security_check,
-        interval_seconds=300,  # 5 min
-    )
+
     _scheduler.register(
         "ai_periodic_review",
         _investigator.periodic_review,
@@ -194,17 +233,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     await _scheduler.start()
 
-    # Collect initial system snapshot for agent context
-    from argus_agent.collectors.system_metrics import update_system_snapshot
+    # Soak test runner (opt-in via ARGUS_SOAK_ENABLED=true)
+    if os.environ.get("ARGUS_SOAK_ENABLED", "").lower() in ("true", "1", "yes"):
+        from argus_agent.scheduler.soak import SoakTestRunner
 
-    await update_system_snapshot()
+        _soak_runner = SoakTestRunner()
+        await _soak_runner.start()
 
-    logger.info("Argus agent server started on %s:%d", settings.server.host, settings.server.port)
+    # Collect initial system snapshot for agent context (full mode only)
+    if not is_sdk_only:
+        from argus_agent.collectors.system_metrics import update_system_snapshot
+
+        await update_system_snapshot()
+
+    mode_str = "sdk_only" if is_sdk_only else "full"
+    logger.info(
+        "Argus agent server started on %s:%d (mode=%s)",
+        settings.server.host, settings.server.port, mode_str,
+    )
     yield
 
     # Shutdown in reverse order
+    if _alert_formatter:
+        await _alert_formatter.stop()
+    if _soak_runner:
+        await _soak_runner.stop()
     if _scheduler:
         await _scheduler.stop()
+    if _sdk_telemetry_collector:
+        await _sdk_telemetry_collector.stop()
     if _security_scanner:
         await _security_scanner.stop()
     if _log_watcher:
@@ -226,27 +283,58 @@ def _make_baseline_update_task(tracker):
     return _update
 
 
-def _register_all_tools() -> None:
-    """Register all agent tools."""
+def _make_sdk_baseline_update_task(tracker):
+    """Create an SDK baseline update coroutine for the scheduler."""
+    async def _update():
+        tracker.update_sdk_baselines()
+    return _update
+
+
+def _register_all_tools(*, is_sdk_only: bool = False) -> None:
+    """Register all agent tools.
+
+    When *is_sdk_only* is True, host-level tools (metrics, process, network,
+    security, command, log search) are skipped — they report data from the
+    agent's own server which is irrelevant in SDK mode.
+    """
     from argus_agent.tools.base import get_all_tools
+    from argus_agent.tools.behavior import register_behavior_tools
     from argus_agent.tools.chart import register_chart_tools
-    from argus_agent.tools.command import register_command_tools
-    from argus_agent.tools.log_search import register_log_tools
-    from argus_agent.tools.metrics import register_metrics_tools
-    from argus_agent.tools.network import register_network_tools
-    from argus_agent.tools.process import register_process_tools
+    from argus_agent.tools.dependencies import register_dependency_tools
+    from argus_agent.tools.deploys import register_deploy_tools
+    from argus_agent.tools.error_analysis import register_error_analysis_tools
+    from argus_agent.tools.function_metrics import register_function_metrics_tools
+    from argus_agent.tools.runtime_metrics import register_runtime_metrics_tools
     from argus_agent.tools.sdk_events import register_sdk_tools
-    from argus_agent.tools.security import register_security_tools
+    from argus_agent.tools.traces import register_trace_tools
 
     if not get_all_tools():
-        register_log_tools()
-        register_metrics_tools()
-        register_process_tools()
-        register_network_tools()
-        register_security_tools()
-        register_command_tools()
+        # Host-level tools — only in full mode
+        if not is_sdk_only:
+            from argus_agent.tools.command import register_command_tools
+            from argus_agent.tools.log_search import register_log_tools
+            from argus_agent.tools.metrics import register_metrics_tools
+            from argus_agent.tools.network import register_network_tools
+            from argus_agent.tools.process import register_process_tools
+            from argus_agent.tools.security import register_security_tools
+
+            register_log_tools()
+            register_metrics_tools()
+            register_process_tools()
+            register_network_tools()
+            register_security_tools()
+            register_command_tools()
+
+        # SDK / analysis tools — always registered
         register_sdk_tools()
         register_chart_tools()
+        register_function_metrics_tools()
+        register_error_analysis_tools()
+        register_trace_tools()
+        register_runtime_metrics_tools()
+        register_dependency_tools()
+        register_deploy_tools()
+        register_behavior_tools()
 
 
 def create_app() -> FastAPI:
@@ -261,8 +349,6 @@ def create_app() -> FastAPI:
     )
 
     # CORS for web UI
-    import os
-
     cors_env = os.environ.get("ARGUS_CORS_ORIGINS", "")
     origins = [o.strip() for o in cors_env.split(",") if o.strip()] if cors_env else []
     origins += ["http://localhost:3000", "http://127.0.0.1:3000"]

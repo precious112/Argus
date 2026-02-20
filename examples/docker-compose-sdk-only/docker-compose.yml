@@ -1,0 +1,46 @@
+# Docker Compose for running Argus in SDK-only mode.
+#
+# Use this when hosting Argus on a separate VPS to monitor
+# serverless applications. Host-level collectors are disabled;
+# only SDK telemetry is processed.
+#
+# Usage:
+#   docker compose up -d
+#
+# Then point your SDK at: http://your-server:7600
+#   argus.init(server_url="http://your-server:7600", service_name="my-app")
+
+services:
+  argus:
+    image: argus-agent:latest
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    ports:
+      - "7600:7600"
+    environment:
+      # SDK-only mode: disables CPU/memory/disk/process/log/security collectors
+      - ARGUS_MODE=sdk_only
+      # Configure your LLM provider
+      - ARGUS_LLM__PROVIDER=openai
+      - ARGUS_LLM__API_KEY=${OPENAI_API_KEY}
+      - ARGUS_LLM__MODEL=gpt-4o
+    volumes:
+      - argus-data:/data
+    restart: unless-stopped
+
+  # Optional: Argus web UI
+  argus-web:
+    image: argus-web:latest
+    build:
+      context: ../../packages/web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_ARGUS_URL=http://argus:7600
+    depends_on:
+      - argus
+
+volumes:
+  argus-data:

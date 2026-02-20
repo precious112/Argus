@@ -10,7 +10,7 @@ from typing import Any
 from argus_agent.agent.loop import AgentLoop
 from argus_agent.agent.memory import ConversationMemory
 from argus_agent.api.protocol import ServerMessage, ServerMessageType
-from argus_agent.events.types import Event
+from argus_agent.events.types import Event, EventType
 from argus_agent.scheduler.budget import TokenBudget
 
 logger = logging.getLogger("argus.agent.investigator")
@@ -31,10 +31,12 @@ class Investigator:
         budget: TokenBudget,
         provider: Any = None,
         ws_manager: Any = None,
+        formatter: Any = None,
     ) -> None:
         self._budget = budget
         self._provider = provider
         self._ws_manager = ws_manager
+        self._formatter = formatter
         self._active: int = 0
         self._lock = asyncio.Lock()
 
@@ -99,11 +101,19 @@ class Investigator:
             result = None
 
         # Broadcast completion
+        summary = result.content if result else "Investigation failed"
         await self._broadcast(ServerMessageType.INVESTIGATION_END, {
             "investigation_id": investigation_id,
-            "summary": result.content if result else "Investigation failed",
+            "summary": summary,
             "tokens_used": (result.prompt_tokens + result.completion_tokens) if result else 0,
         })
+
+        # Post AI report to external channels (Slack, Email, Webhook)
+        if self._formatter is not None and result and result.content:
+            try:
+                await self._formatter.send_investigation_report(event, result.content)
+            except Exception:
+                logger.exception("Failed to send investigation report to external channels")
 
         logger.info("Investigation %s completed for %s", investigation_id, event.type)
 
@@ -204,4 +214,17 @@ class Investigator:
         ]
         if event.data:
             lines.insert(5, f"Data: {event.data}")
+
+        if event.type == EventType.SDK_TRAFFIC_BURST:
+            lines.extend([
+                "",
+                "TRAFFIC BURST INVESTIGATION GUIDANCE:",
+                "Determine whether this is a DDoS attack or an organic traffic surge.",
+                "DDoS indicators: single-IP concentration, repeated identical requests, "
+                "unusual user agents, high error rates under load.",
+                "Organic surge indicators: gradual ramp-up, diverse source IPs, "
+                "normal error rates, recognizable referrer patterns.",
+                "Check request logs for IP distribution, path patterns, and error rates.",
+            ])
+
         return "\n".join(lines)

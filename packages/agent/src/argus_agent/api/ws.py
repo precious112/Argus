@@ -62,9 +62,10 @@ def _get_provider():  # type: ignore[no-untyped-def]
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket) -> None:
+async def websocket_endpoint(websocket: WebSocket, client: str = "web") -> None:
     """Main WebSocket endpoint for chat communication."""
     await manager.connect(websocket)
+    client_type = client if client in ("cli", "web") else "web"
 
     # Send connected message with initial system status
     from argus_agent.collectors.system_metrics import get_system_snapshot
@@ -77,16 +78,19 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         ),
     )
 
-    # Send initial system status
+    # Send initial system status (always, so frontend knows the mode)
+    from argus_agent.config import get_settings
+
+    settings = get_settings()
     snapshot = get_system_snapshot()
-    if snapshot:
-        await manager.send(
-            websocket,
-            ServerMessage(
-                type=ServerMessageType.SYSTEM_STATUS,
-                data=snapshot,
-            ),
-        )
+    status_data: dict[str, Any] = {**snapshot, "mode": settings.mode}
+    await manager.send(
+        websocket,
+        ServerMessage(
+            type=ServerMessageType.SYSTEM_STATUS,
+            data=status_data,
+        ),
+    )
 
     # Per-connection conversation memory
     memory = ConversationMemory()
@@ -131,7 +135,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 # Run in background so the WebSocket loop stays free to
                 # receive action_response messages (approval/rejection).
                 agent_task = asyncio.create_task(
-                    _handle_user_message(websocket, memory, content)
+                    _handle_user_message(websocket, memory, content, client_type)
                 )
 
             elif msg.type == ClientMessageType.ACTION_RESPONSE:
@@ -162,6 +166,7 @@ async def _handle_user_message(
     websocket: WebSocket,
     memory: ConversationMemory,
     content: str,
+    client_type: str = "web",
 ) -> None:
     """Process a user message through the agent loop."""
     provider = _get_provider()
@@ -254,7 +259,10 @@ async def _handle_user_message(
         _register_all_tools()
 
     # Run the agent loop
-    agent = AgentLoop(provider=provider, memory=memory, on_event=on_event)
+    agent = AgentLoop(
+        provider=provider, memory=memory, on_event=on_event,
+        client_type=client_type,
+    )
 
     try:
         result = await agent.run(content)

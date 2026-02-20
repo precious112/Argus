@@ -85,7 +85,134 @@ class BaselineTracker:
         # Persist to DuckDB for other consumers
         self._persist(conn, updated)
 
-        logger.info("Baselines updated for %d metrics", len(updated))
+        logger.info("Baselines updated for %d system metrics", len(updated))
+
+    def update_sdk_baselines(self) -> None:
+        """Compute baselines from SDK runtime metrics and span durations."""
+        conn = get_connection()
+        since = datetime.now(UTC) - timedelta(days=7)
+
+        updated: dict[str, MetricBaseline] = {}
+
+        # 1. SDK runtime metrics from sdk_metrics table
+        sdk_rows = conn.execute(
+            """
+            SELECT
+                'sdk.' || service || '.' || metric_name AS metric_key,
+                AVG(value)                          AS mean,
+                STDDEV_POP(value)                   AS stddev,
+                MIN(value)                          AS min_val,
+                MAX(value)                          AS max_val,
+                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY value) AS p50,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY value) AS p95,
+                PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY value) AS p99,
+                COUNT(*)                            AS sample_count
+            FROM sdk_metrics
+            WHERE timestamp >= ?
+            GROUP BY metric_key
+            HAVING COUNT(*) >= 10
+            """,
+            [since],
+        ).fetchall()
+
+        for row in sdk_rows:
+            bl = MetricBaseline(
+                metric_name=row[0],
+                mean=float(row[1]),
+                stddev=float(row[2]) if row[2] is not None else 0.0,
+                min=float(row[3]),
+                max=float(row[4]),
+                p50=float(row[5]),
+                p95=float(row[6]),
+                p99=float(row[7]),
+                sample_count=int(row[8]),
+            )
+            updated[bl.metric_name] = bl
+
+        # 2. Span durations grouped by service + name
+        span_rows = conn.execute(
+            """
+            SELECT
+                'sdk.' || service || '.span.' || name AS metric_key,
+                AVG(duration_ms)                    AS mean,
+                STDDEV_POP(duration_ms)             AS stddev,
+                MIN(duration_ms)                    AS min_val,
+                MAX(duration_ms)                    AS max_val,
+                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY duration_ms) AS p50,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95,
+                PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration_ms) AS p99,
+                COUNT(*)                            AS sample_count
+            FROM spans
+            WHERE timestamp >= ? AND duration_ms IS NOT NULL
+            GROUP BY metric_key
+            HAVING COUNT(*) >= 10
+            """,
+            [since],
+        ).fetchall()
+
+        for row in span_rows:
+            bl = MetricBaseline(
+                metric_name=row[0],
+                mean=float(row[1]),
+                stddev=float(row[2]) if row[2] is not None else 0.0,
+                min=float(row[3]),
+                max=float(row[4]),
+                p50=float(row[5]),
+                p95=float(row[6]),
+                p99=float(row[7]),
+                sample_count=int(row[8]),
+            )
+            updated[bl.metric_name] = bl
+
+        # 3. Traffic request counts per service (5-min buckets over 7 days)
+        traffic_rows = conn.execute(
+            """
+            SELECT
+                'traffic.' || service || '.request_count_5m' AS metric_key,
+                AVG(cnt)                            AS mean,
+                STDDEV_POP(cnt)                     AS stddev,
+                MIN(cnt)                            AS min_val,
+                MAX(cnt)                            AS max_val,
+                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY cnt) AS p50,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY cnt) AS p95,
+                PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY cnt) AS p99,
+                COUNT(*)                            AS sample_count
+            FROM (
+                SELECT
+                    service,
+                    time_bucket(INTERVAL '5 minutes', timestamp) AS bucket,
+                    COUNT(*) AS cnt
+                FROM spans
+                WHERE timestamp >= ? AND kind = 'server'
+                GROUP BY service, bucket
+            ) sub
+            GROUP BY metric_key
+            HAVING COUNT(*) >= 10
+            """,
+            [since],
+        ).fetchall()
+
+        for row in traffic_rows:
+            bl = MetricBaseline(
+                metric_name=row[0],
+                mean=float(row[1]),
+                stddev=float(row[2]) if row[2] is not None else 0.0,
+                min=float(row[3]),
+                max=float(row[4]),
+                p50=float(row[5]),
+                p95=float(row[6]),
+                p99=float(row[7]),
+                sample_count=int(row[8]),
+            )
+            updated[bl.metric_name] = bl
+
+        # Merge into existing baselines (don't overwrite system baselines)
+        self._baselines.update(updated)
+
+        # Persist all baselines
+        self._persist(conn, self._baselines)
+
+        logger.info("SDK baselines updated for %d metrics", len(updated))
 
     def format_for_prompt(self) -> str:
         """Format current baselines as text for the agent system prompt."""

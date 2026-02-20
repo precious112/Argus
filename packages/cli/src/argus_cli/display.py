@@ -130,6 +130,74 @@ def print_metrics(data: dict[str, float]) -> None:
     console.print(table)
 
 
+def print_services(services: list[dict[str, Any]]) -> None:
+    """Print SDK services as a table."""
+    if not services:
+        console.print("[dim]No SDK services found.[/dim]")
+        return
+
+    table = Table(title="SDK Services", show_header=True, header_style="bold green")
+    table.add_column("Service", style="bold")
+    table.add_column("Events", justify="right")
+    table.add_column("Errors", justify="right")
+    table.add_column("Invocations", justify="right")
+    table.add_column("Last Seen")
+
+    for s in services:
+        error_count = s.get("error_count", 0)
+        error_style = "red" if error_count > 0 else "green"
+        table.add_row(
+            s.get("service", ""),
+            str(s.get("event_count", 0)),
+            f"[{error_style}]{error_count}[/{error_style}]",
+            str(s.get("invocation_count", 0)),
+            s.get("last_seen", "")[:19],
+        )
+
+    console.print(table)
+
+
 def print_answer(text: str) -> None:
     """Print an agent response."""
     console.print(Panel(text, title="Argus", border_style="cyan"))
+
+
+def print_config(data: dict[str, Any]) -> None:
+    """Print LLM configuration as a rich table."""
+    llm = data.get("llm", {})
+
+    table = Table(title="LLM Configuration", show_header=True, header_style="bold cyan")
+    table.add_column("Setting", style="bold")
+    table.add_column("Value")
+
+    table.add_row("Provider", llm.get("provider", "N/A"))
+    table.add_row("Model", llm.get("model", "N/A"))
+
+    key_set = llm.get("api_key_set", False)
+    key_status = "[green]configured[/green]" if key_set else "[red]not set[/red]"
+    table.add_row("API Key", key_status)
+
+    table.add_row("Status", llm.get("status", "unknown"))
+
+    source = llm.get("source", "unknown")
+    source_style = "green" if source == "db" else "yellow"
+    table.add_row("Source", f"[{source_style}]{source}[/{source_style}]")
+
+    console.print(table)
+
+    providers = llm.get("providers", [])
+    if providers:
+        console.print(f"\nAvailable providers: [bold]{', '.join(providers)}[/bold]")
+
+
+def print_config_update(data: dict[str, Any]) -> None:
+    """Print confirmation after LLM settings update."""
+    console.print("[bold green]LLM settings updated successfully.[/bold green]")
+    table = Table(show_header=False)
+    table.add_column("Setting", style="bold")
+    table.add_column("Value")
+    table.add_row("Provider", data.get("provider", ""))
+    table.add_row("Model", data.get("model", ""))
+    key_set = data.get("api_key_set", False)
+    table.add_row("API Key", "[green]configured[/green]" if key_set else "[red]not set[/red]")
+    console.print(table)

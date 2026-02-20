@@ -58,6 +58,22 @@ class EventType(StrEnum):
     # Anomaly events
     ANOMALY_DETECTED = "anomaly_detected"
 
+    # SDK telemetry events
+    SDK_ERROR_SPIKE = "sdk_error_spike"
+    SDK_LATENCY_DEGRADATION = "sdk_latency_degradation"
+    SDK_COLD_START_SPIKE = "sdk_cold_start_spike"
+    SDK_SERVICE_SILENT = "sdk_service_silent"
+    SDK_TRAFFIC_BURST = "sdk_traffic_burst"
+
+    # Phase 1: Observability events
+    TRACE_SLOW_REQUEST = "trace_slow_request"
+    DEPENDENCY_SLOW = "dependency_slow"
+    DEPENDENCY_ERROR_RATE = "dependency_error_rate"
+    DEPLOY_DETECTED = "deploy_detected"
+    DEPLOY_REGRESSION = "deploy_regression"
+    SDK_METRIC_ANOMALY = "sdk_metric_anomaly"
+    BEHAVIOR_SHIFT = "behavior_shift"
+
     # Scheduler events
     HEALTH_CHECK = "health_check"
     TREND_ANALYSIS = "trend_analysis"

@@ -1,3 +1,4 @@
 fastapi>=0.100.0
 uvicorn>=0.25.0
+httpx>=0.25.0
 argus-python>=0.1.0

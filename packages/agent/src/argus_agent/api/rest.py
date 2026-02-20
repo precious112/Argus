@@ -26,21 +26,28 @@ async def health_check() -> dict[str, Any]:
 async def system_status() -> dict[str, Any]:
     """Get current system status summary."""
     from argus_agent.collectors.system_metrics import get_system_snapshot
+    from argus_agent.config import get_settings
     from argus_agent.main import _get_collectors
+
+    settings = get_settings()
+    is_sdk_only = settings.mode == "sdk_only"
 
     metrics_col, process_mon, log_watch, scheduler = _get_collectors()
 
-    collector_status = {
-        "system_metrics": "running" if metrics_col and metrics_col.is_running else "stopped",
-        "process_monitor": "running" if process_mon and process_mon.is_running else "stopped",
-        "log_watcher": "running" if log_watch and log_watch.is_running else "stopped",
-    }
+    collector_status: dict[str, str] = {}
+    if not is_sdk_only:
+        collector_status = {
+            "system_metrics": "running" if metrics_col and metrics_col.is_running else "stopped",
+            "process_monitor": "running" if process_mon and process_mon.is_running else "stopped",
+            "log_watcher": "running" if log_watch and log_watch.is_running else "stopped",
+        }
 
-    snapshot = get_system_snapshot()
+    snapshot = get_system_snapshot() if not is_sdk_only else {}
 
     result: dict[str, Any] = {
         "status": "ok",
         "version": __version__,
+        "mode": settings.mode,
         "collectors": collector_status,
         "system": snapshot if snapshot else {},
         "agent": {
@@ -52,7 +59,7 @@ async def system_status() -> dict[str, Any]:
     if scheduler and scheduler.is_running:
         result["scheduler"] = scheduler.get_status()
 
-    if log_watch:
+    if log_watch and not is_sdk_only:
         result["watched_files"] = log_watch.watched_files
 
     return result
@@ -179,11 +186,16 @@ async def get_logs(
 
 
 @router.post("/ask")
-async def ask_question(body: dict[str, Any]) -> dict[str, Any]:
+async def ask_question(
+    body: dict[str, Any],
+    client: str = "web",
+) -> dict[str, Any]:
     """One-off question to the agent (non-streaming)."""
     question = body.get("question", "")
     if not question:
         raise HTTPException(status_code=400, detail="No question provided")
+
+    client_type = client if client in ("cli", "web") else "web"
 
     try:
         from argus_agent.agent.loop import AgentLoop
@@ -195,7 +207,10 @@ async def ask_question(body: dict[str, Any]) -> dict[str, Any]:
             return {"answer": "LLM provider not configured.", "error": "no_provider"}
 
         memory = ConversationMemory()
-        agent = AgentLoop(provider=provider, memory=memory)
+        agent = AgentLoop(
+            provider=provider, memory=memory,
+            client_type=client_type,
+        )
         result = await agent.run(question)
         return {
             "answer": result.content,
@@ -208,20 +223,81 @@ async def ask_question(body: dict[str, Any]) -> dict[str, Any]:
         return {"answer": "", "error": str(e)}
 
 
+@router.get("/services")
+async def list_services() -> dict[str, Any]:
+    """List all services sending SDK telemetry with health summary."""
+    try:
+        from argus_agent.storage.timeseries import query_service_summary
+
+        summaries = query_service_summary(since_minutes=1440)
+        return {"services": summaries, "count": len(summaries)}
+    except RuntimeError:
+        return {"services": [], "count": 0, "error": "Storage not initialized"}
+
+
+@router.get("/services/{service}/metrics")
+async def service_metrics(
+    service: str,
+    since_minutes: int = 60,
+    interval_minutes: int = 5,
+) -> dict[str, Any]:
+    """Get aggregated metrics for a specific service."""
+    try:
+        from argus_agent.storage.timeseries import (
+            query_error_groups,
+            query_function_metrics,
+        )
+
+        buckets = query_function_metrics(
+            service=service,
+            since_minutes=since_minutes,
+            interval_minutes=interval_minutes,
+        )
+        errors = query_error_groups(service=service, since_minutes=since_minutes)
+
+        return {
+            "service": service,
+            "metrics": buckets,
+            "error_groups": errors,
+            "since_minutes": since_minutes,
+        }
+    except RuntimeError:
+        return {
+            "service": service,
+            "metrics": [],
+            "error_groups": [],
+            "error": "Storage not initialized",
+        }
+
+
 @router.get("/settings")
 async def get_settings_endpoint() -> dict[str, Any]:
     """Get sanitized server settings (no secrets)."""
     from argus_agent.config import get_settings
+    from argus_agent.llm.settings import LLMSettingsService
     from argus_agent.main import _get_token_budget
 
     settings = get_settings()
     budget = _get_token_budget()
+
+    # Discover available LLM providers
+    from argus_agent.llm.registry import _discover_providers, _providers
+
+    _discover_providers()
+    available_providers = list(_providers.keys())
+
+    # Check if settings are DB-persisted
+    llm_svc = LLMSettingsService()
+    db_persisted = await llm_svc.has_persisted_settings()
 
     return {
         "llm": {
             "provider": settings.llm.provider,
             "model": settings.llm.model,
             "status": _get_llm_status(),
+            "api_key_set": bool(settings.llm.api_key),
+            "providers": available_providers,
+            "source": "db" if db_persisted else "env/yaml",
         },
         "budget": budget.get_status() if budget else {},
         "collectors": {
@@ -233,11 +309,217 @@ async def get_settings_endpoint() -> dict[str, Any]:
             "webhook_count": len(settings.alerting.webhook_urls),
             "email_enabled": settings.alerting.email_enabled,
         },
+        "notifications": await _get_notification_configs(),
         "server": {
             "host": settings.server.host,
             "port": settings.server.port,
         },
     }
+
+
+def _persist_to_yaml(section: str, data: dict[str, Any]) -> None:
+    """Merge *data* into the *section* of argus.yaml and write it back."""
+    from pathlib import Path
+
+    import yaml
+
+    candidates = [Path("argus.yaml"), Path("argus.yml")]
+    config_path = None
+    for c in candidates:
+        if c.exists():
+            config_path = c
+            break
+    if config_path is None:
+        config_path = Path("argus.yaml")
+
+    existing: dict[str, Any] = {}
+    if config_path.exists():
+        with open(config_path) as f:
+            existing = yaml.safe_load(f) or {}
+
+    if section not in existing:
+        existing[section] = {}
+    existing[section].update(data)
+
+    with open(config_path, "w") as f:
+        yaml.safe_dump(existing, f, default_flow_style=False)
+
+
+@router.put("/settings/llm")
+async def update_llm_settings(body: dict[str, Any]) -> dict[str, Any]:
+    """Update LLM provider, model, and/or API key (persisted to DB)."""
+    from argus_agent.config import get_settings
+    from argus_agent.llm.settings import LLMSettingsService
+
+    settings = get_settings()
+
+    provider = body.get("provider")
+    model = body.get("model")
+    api_key = body.get("api_key", "")
+
+    # Update in-memory settings for immediate effect
+    if provider:
+        settings.llm.provider = provider
+    if model:
+        settings.llm.model = model
+    if api_key and api_key != "••••••••":
+        settings.llm.api_key = api_key
+
+    # Persist to DB (replaces YAML persistence for LLM settings)
+    persist_data: dict[str, Any] = {}
+    if provider:
+        persist_data["provider"] = provider
+    if model:
+        persist_data["model"] = model
+    if api_key and api_key != "••••••••":
+        persist_data["api_key"] = api_key
+
+    llm_svc = LLMSettingsService()
+    await llm_svc.save(persist_data)
+
+    return {
+        "provider": settings.llm.provider,
+        "model": settings.llm.model,
+        "api_key_set": bool(settings.llm.api_key),
+        "status": _get_llm_status(),
+    }
+
+
+@router.put("/settings/budget")
+async def update_budget_settings(body: dict[str, Any]) -> dict[str, Any]:
+    """Update AI budget limits (daily/hourly token limits)."""
+    from argus_agent.config import get_settings
+    from argus_agent.main import _get_token_budget
+
+    settings = get_settings()
+    budget = _get_token_budget()
+
+    daily = body.get("daily_token_limit")
+    hourly = body.get("hourly_token_limit")
+
+    if daily is not None:
+        daily = int(daily)
+        settings.ai_budget.daily_token_limit = daily
+        if budget:
+            budget._daily_limit = daily
+
+    if hourly is not None:
+        hourly = int(hourly)
+        settings.ai_budget.hourly_token_limit = hourly
+        if budget:
+            budget._hourly_limit = hourly
+
+    # Persist
+    persist_data: dict[str, Any] = {
+        "daily_token_limit": settings.ai_budget.daily_token_limit,
+        "hourly_token_limit": settings.ai_budget.hourly_token_limit,
+    }
+    _persist_to_yaml("ai_budget", persist_data)
+
+    return budget.get_status() if budget else {}
+
+
+# --- Notification Settings Endpoints ---
+
+
+@router.get("/notifications/settings")
+async def get_notification_settings() -> dict[str, Any]:
+    """Return all notification channel configs (secrets masked)."""
+    from argus_agent.alerting.settings import NotificationSettingsService
+
+    svc = NotificationSettingsService()
+    configs = await svc.get_all()
+    return {"channels": configs}
+
+
+@router.put("/notifications/settings/{channel_type}")
+async def upsert_notification_setting(
+    channel_type: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """Create or update a notification channel config, then reload channels."""
+    if channel_type not in ("slack", "email", "webhook"):
+        raise HTTPException(status_code=400, detail="Invalid channel_type")
+
+    from argus_agent.alerting.reload import reload_channels
+    from argus_agent.alerting.settings import NotificationSettingsService
+
+    svc = NotificationSettingsService()
+    result = await svc.upsert(
+        channel_type=channel_type,
+        enabled=body.get("enabled", False),
+        config=body.get("config", {}),
+    )
+    await reload_channels()
+    return result
+
+
+@router.post("/notifications/test/{channel_type}")
+async def test_notification(channel_type: str) -> dict[str, Any]:
+    """Send a test notification for the given channel type."""
+    if channel_type not in ("slack", "email", "webhook"):
+        raise HTTPException(status_code=400, detail="Invalid channel_type")
+
+    from argus_agent.alerting.settings import NotificationSettingsService
+
+    svc = NotificationSettingsService()
+    raw = await svc.get_by_type_raw(channel_type)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Channel not configured")
+
+    cfg = raw["config"]
+
+    try:
+        if channel_type == "slack":
+            from argus_agent.alerting.channels import SlackChannel
+
+            ch = SlackChannel(
+                bot_token=cfg.get("bot_token", ""),
+                channel_id=cfg.get("channel_id", ""),
+            )
+            return await ch.test_connection()
+
+        if channel_type == "email":
+            from argus_agent.alerting.channels import EmailChannel
+
+            ch = EmailChannel(
+                smtp_host=cfg.get("smtp_host", ""),
+                smtp_port=cfg.get("smtp_port", 587),
+                from_addr=cfg.get("from_addr", ""),
+                to_addrs=cfg.get("to_addrs", []),
+                smtp_user=cfg.get("smtp_user", ""),
+                smtp_password=cfg.get("smtp_password", ""),
+                use_tls=cfg.get("use_tls", True),
+            )
+            return await ch.test_connection()
+
+        # webhook — no dedicated test, just confirm config exists
+        return {"ok": True, "urls": len(cfg.get("urls", []))}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/notifications/slack/channels")
+async def list_slack_channels() -> dict[str, Any]:
+    """List Slack channels using the stored bot token."""
+    from argus_agent.alerting.settings import NotificationSettingsService
+
+    svc = NotificationSettingsService()
+    raw = await svc.get_by_type_raw("slack")
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Slack not configured")
+
+    try:
+        from argus_agent.alerting.channels import SlackChannel
+
+        ch = SlackChannel(
+            bot_token=raw["config"].get("bot_token", ""),
+            channel_id="",
+        )
+        channels = await ch.list_channels()
+        return {"channels": channels}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/audit")
@@ -251,6 +533,17 @@ async def audit_log(
     logger = AuditLogger()
     entries = await logger.get_audit_log(limit=min(limit, 200), offset=offset)
     return {"entries": entries, "count": len(entries), "offset": offset}
+
+
+async def _get_notification_configs() -> list[dict[str, Any]]:
+    """Get notification channel configs for the settings endpoint."""
+    try:
+        from argus_agent.alerting.settings import NotificationSettingsService
+
+        svc = NotificationSettingsService()
+        return await svc.get_all()
+    except Exception:
+        return []
 
 
 def _get_llm_status() -> str:

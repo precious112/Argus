@@ -81,6 +81,9 @@ class AlertConfig(BaseModel):
     email_smtp_port: int = 587
     email_from: str = ""
     email_to: list[str] = Field(default_factory=list)
+    batch_window: int = 90
+    min_external_severity: str = "NOTABLE"
+    ai_enhance: bool = False
 
 
 class Settings(BaseSettings):
@@ -91,6 +94,7 @@ class Settings(BaseSettings):
         env_nested_delimiter="__",
     )
 
+    mode: str = Field(default="full", description="Operating mode: 'full' or 'sdk_only'")
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ai_budget: AIBudgetConfig = Field(default_factory=AIBudgetConfig)

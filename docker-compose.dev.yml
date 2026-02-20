@@ -32,6 +32,20 @@ services:
       - NEXT_PUBLIC_AGENT_WS_URL=ws://localhost:7600/api/v1/ws
       - NEXT_PUBLIC_AGENT_API_URL=http://localhost:7600/api/v1
 
+  cli:
+    image: python:3.12-slim
+    working_dir: /app
+    command: ["sh", "-c", "pip install -e . && argus chat"]
+    profiles: ["cli"]
+    volumes:
+      - ./packages/cli:/app
+    environment:
+      - ARGUS_URL=http://argus:7600
+    depends_on:
+      - argus
+    stdin_open: true
+    tty: true
+
 volumes:
   argus_data:
   web_node_modules:

@@ -10,7 +10,7 @@ from typing import Any
 
 from argus_agent.agent.memory import ConversationMemory
 from argus_agent.agent.prompt import build_system_prompt
-from argus_agent.llm.base import LLMProvider
+from argus_agent.llm.base import LLMMessage, LLMProvider
 from argus_agent.tools.base import Tool, get_tool, get_tool_definitions
 
 logger = logging.getLogger("argus.agent.loop")
@@ -65,11 +65,13 @@ class AgentLoop:
         memory: ConversationMemory,
         on_event: EventCallback | None = None,
         budget: Any | None = None,
+        client_type: str = "web",
     ) -> None:
         self.provider = provider
         self.memory = memory
         self._on_event = on_event
         self._budget = budget  # Optional TokenBudget for background tasks
+        self._client_type = client_type
 
     async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit an event to the callback (e.g., WebSocket handler)."""
@@ -82,7 +84,12 @@ class AgentLoop:
         self.memory.add_user_message(user_message)
 
         result = AgentResult()
-        system_prompt = build_system_prompt()
+        from argus_agent.config import get_settings
+
+        system_prompt = build_system_prompt(
+            client_type=self._client_type,
+            mode=get_settings().mode,
+        )
         tool_defs = get_tool_definitions()
 
         for round_num in range(MAX_TOOL_ROUNDS):
@@ -91,6 +98,21 @@ class AgentLoop:
             # Build context
             messages = self.memory.get_context_messages(system_prompt)
 
+            # On the final round, force a summary (no tools available)
+            is_final_round = round_num == MAX_TOOL_ROUNDS - 1
+            if is_final_round:
+                tool_defs_for_round = None
+                messages.append(LLMMessage(
+                    role="user",
+                    content=(
+                        "[SYSTEM] You have used all available tool call rounds. "
+                        "Do NOT attempt any more tool calls or announce future actions. "
+                        "Summarize your findings so far clearly and concisely."
+                    ),
+                ))
+            else:
+                tool_defs_for_round = tool_defs
+
             # Call LLM with streaming
             await self._emit("thinking_start", {})
 
@@ -98,7 +120,7 @@ class AgentLoop:
             all_tool_calls: list[dict[str, Any]] = []
             response_metadata: dict[str, Any] = {}
 
-            async for delta in self.provider.stream(messages, tools=tool_defs or None):
+            async for delta in self.provider.stream(messages, tools=tool_defs_for_round or None):
                 # Stream text content to the user
                 if delta.content:
                     full_content += delta.content
@@ -176,20 +198,18 @@ class AgentLoop:
                 # Loop back for next LLM call with tool results
                 continue
 
-            # No tool calls - the LLM is done
+            # No tool calls — this is the final answer.
+            result.content = full_content
             if full_content:
                 self.memory.add_assistant_message(content=full_content)
 
-            result.content = full_content
             return result
 
-        # Exhausted max rounds
+        # Exhausted max rounds — always append notice so the user knows
         exhaustion_msg = (
-            "I've reached the maximum number of tool calls for this turn. "
-            "Here's what I found so far based on the tools I've used."
+            "\n\n---\n*I've reached the maximum number of tool call rounds for this turn.*"
         )
-        if not result.content:
-            result.content = exhaustion_msg
-            await self._emit("assistant_message_delta", {"content": exhaustion_msg})
+        result.content = (result.content or "") + exhaustion_msg
+        await self._emit("assistant_message_delta", {"content": exhaustion_msg})
         self.memory.add_assistant_message(content=result.content)
         return result

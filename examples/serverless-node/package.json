@@ -1,0 +1,9 @@
+{
+  "name": "argus-serverless-node-example",
+  "version": "1.0.0",
+  "description": "Example serverless function with Argus instrumentation",
+  "main": "handler.js",
+  "dependencies": {
+    "argus-node": "^0.1.0"
+  }
+}

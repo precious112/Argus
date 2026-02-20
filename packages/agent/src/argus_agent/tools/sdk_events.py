@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from argus_agent.tools.base import Tool, ToolRisk
+from argus_agent.tools.base import Tool, ToolRisk, resolve_time_range
 
 logger = logging.getLogger("argus.tools.sdk_events")
 
@@ -23,7 +22,8 @@ class SDKEventsTool(Tool):
     def description(self) -> str:
         return (
             "Query telemetry events sent by applications using the Argus SDK. "
-            "Shows logs, exceptions, traces, and custom events from instrumented apps. "
+            "Shows logs, exceptions, spans, dependencies, runtime metrics, deploys, "
+            "breadcrumbs, and custom events from instrumented apps. "
             "Filter by service name, event type, and time range."
         )
 
@@ -43,14 +43,22 @@ class SDKEventsTool(Tool):
                 "event_type": {
                     "type": "string",
                     "description": (
-                        "Filter by type: log, metric, trace_start, "
-                        "trace_end, exception, event"
+                        "Filter by type: log, exception, event, span, "
+                        "dependency, runtime_metric, deploy, breadcrumb"
                     ),
                 },
                 "since_minutes": {
                     "type": "integer",
                     "description": "Look back N minutes (default 60)",
                     "default": 60,
+                },
+                "since": {
+                    "type": "string",
+                    "description": "ISO datetime lower bound (overrides since_minutes)",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO datetime upper bound",
                 },
                 "limit": {
                     "type": "integer",
@@ -73,12 +81,19 @@ class SDKEventsTool(Tool):
         except RuntimeError:
             return {"error": "Time-series store not initialized", "events": []}
 
+        since_dt, until_dt = resolve_time_range(
+            since_minutes, kwargs.get("since"), kwargs.get("until"),
+        )
+
         conditions = []
         params: list[Any] = []
 
-        since = datetime.now(UTC) - timedelta(minutes=since_minutes)
         conditions.append("timestamp >= ?")
-        params.append(since)
+        params.append(since_dt)
+
+        if until_dt:
+            conditions.append("timestamp <= ?")
+            params.append(until_dt)
 
         if service:
             conditions.append("service = ?")

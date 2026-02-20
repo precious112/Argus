@@ -12,6 +12,7 @@ dependencies = [
     "websockets>=13.0",
     "httpx>=0.27.0",
     "pydantic>=2.9.0",
+    "prompt-toolkit>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -21,7 +22,7 @@ dev = [
 ]
 
 [project.scripts]
-argus = "argus_cli.main:app"
+argus = "argus_cli.main:main"
 
 [build-system]
 requires = ["hatchling"]

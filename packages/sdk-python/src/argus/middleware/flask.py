@@ -22,24 +22,61 @@ class ArgusFlask:
         app.teardown_request(self._teardown_request)
 
     def _before_request(self) -> None:
-        from flask import g
+        from flask import g, request
+
+        from argus.context import TraceContext, set_current_context, start_trace
 
         g._argus_start = time.monotonic()
 
+        # Parse incoming traceparent or start new trace
+        traceparent = request.headers.get("traceparent", "")
+        if traceparent:
+            ctx = TraceContext.from_traceparent(traceparent)
+            if ctx:
+                set_current_context(ctx)
+            else:
+                ctx = start_trace()
+        else:
+            ctx = start_trace()
+        g._argus_trace_ctx = ctx
+
+        # Add breadcrumb for request
+        try:
+            from argus.breadcrumbs import add_breadcrumb
+            add_breadcrumb("http", f"{request.method} {request.path}")
+        except ImportError:
+            pass
+
     def _after_request(self, response: Any) -> Any:
-        import argus
         from flask import g, request
 
-        duration_ms = round((time.monotonic() - getattr(g, "_argus_start", time.monotonic())) * 1000, 2)
-        if argus._client:
-            argus._client.send_event("log", {
-                "level": "ERROR" if response.status_code >= 500 else "INFO",
-                "message": f"{request.method} {request.path} {response.status_code} ({duration_ms}ms)",
+        import argus
+        from argus.context import set_current_context
+
+        ctx = getattr(g, "_argus_trace_ctx", None)
+        start = getattr(g, "_argus_start", time.monotonic())
+        duration_ms = round((time.monotonic() - start) * 1000, 2)
+
+        if argus._client and ctx:
+            span_status = "ok" if response.status_code < 500 else "error"
+            argus._client.send_event("span", {
+                "trace_id": ctx.trace_id,
+                "span_id": ctx.span_id,
+                "parent_span_id": ctx.parent_span_id,
+                "name": f"{request.method} {request.path}",
+                "kind": "server",
+                "duration_ms": duration_ms,
+                "status": span_status,
                 "method": request.method,
                 "path": request.path,
                 "status_code": response.status_code,
-                "duration_ms": duration_ms,
             })
+
+        # Add traceparent to response
+        if ctx:
+            response.headers["traceparent"] = ctx.to_traceparent()
+
+        set_current_context(None)
         return response
 
     def _teardown_request(self, exc: BaseException | None) -> None:

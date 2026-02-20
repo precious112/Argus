@@ -3,10 +3,30 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
 from argus_agent.llm.base import ToolDefinition
+
+
+def resolve_time_range(
+    since_minutes: int = 60,
+    since: str | None = None,
+    until: str | None = None,
+) -> tuple[datetime, datetime | None]:
+    """Convert since_minutes / since / until params to datetime objects.
+
+    When ``since`` (ISO datetime string) is provided it replaces the
+    ``since_minutes`` look-back computation.  ``until`` independently adds
+    an upper-bound.  Both are optional.
+    """
+    if since:
+        since_dt = datetime.fromisoformat(since)
+    else:
+        since_dt = datetime.now(UTC) - timedelta(minutes=since_minutes)
+    until_dt = datetime.fromisoformat(until) if until else None
+    return since_dt, until_dt
 
 
 class ToolRisk(StrEnum):

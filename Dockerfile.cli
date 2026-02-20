@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+WORKDIR /app
+COPY packages/cli/pyproject.toml packages/cli/README.md ./
+COPY packages/cli/src/ ./src/
+RUN uv pip install --system .
+ENTRYPOINT ["argus"]
+CMD ["chat"]

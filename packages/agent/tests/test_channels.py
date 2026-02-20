@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from argus_agent.alerting.channels import EmailChannel, WebhookChannel, WebSocketChannel
+from argus_agent.alerting.channels import (
+    EmailChannel,
+    SlackChannel,
+    WebhookChannel,
+    WebSocketChannel,
+)
 from argus_agent.events.types import Event, EventSeverity, EventSource, EventType
 
 
@@ -147,11 +152,115 @@ async def test_webhook_handles_http_error():
     assert result is False
 
 
-# ---- EmailChannel ----
+# ---- SlackChannel ----
 
 
 @pytest.mark.asyncio
-async def test_email_channel_sends():
+async def test_slack_channel_sends():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage = AsyncMock()
+
+    import slack_sdk.web.async_client  # ensure module is loaded before patching
+
+    with patch.object(
+        slack_sdk.web.async_client, "AsyncWebClient",
+        return_value=mock_client,
+    ):
+        result = await channel.send(_make_alert(), _make_event())
+
+    assert result is True
+    mock_client.chat_postMessage.assert_called_once()
+    call_kwargs = mock_client.chat_postMessage.call_args[1]
+    assert call_kwargs["channel"] == "C123"
+    assert "blocks" in call_kwargs
+    assert "attachments" in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_slack_channel_empty_token_noop():
+    channel = SlackChannel(bot_token="", channel_id="C123")
+    result = await channel.send(_make_alert(), _make_event())
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_slack_channel_empty_channel_noop():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="")
+    result = await channel.send(_make_alert(), _make_event())
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_slack_channel_handles_error():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage.side_effect = Exception("Slack API error")
+
+    import slack_sdk.web.async_client  # ensure module is loaded before patching
+
+    with patch.object(
+        slack_sdk.web.async_client, "AsyncWebClient",
+        return_value=mock_client,
+    ):
+        result = await channel.send(_make_alert(), _make_event())
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_slack_test_connection():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.auth_test = AsyncMock(return_value={"team": "T", "user": "U"})
+    mock_client.chat_postMessage = AsyncMock()
+
+    import slack_sdk.web.async_client  # ensure module is loaded before patching
+
+    with patch.object(
+        slack_sdk.web.async_client, "AsyncWebClient",
+        return_value=mock_client,
+    ):
+        result = await channel.test_connection()
+
+    assert result["ok"] is True
+    assert result["team"] == "T"
+    mock_client.chat_postMessage.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_slack_list_channels():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="")
+
+    mock_client = AsyncMock()
+    mock_client.conversations_list = AsyncMock(return_value={
+        "channels": [
+            {"id": "C1", "name": "general"},
+            {"id": "C2", "name": "alerts"},
+        ],
+        "response_metadata": {"next_cursor": ""},
+    })
+
+    import slack_sdk.web.async_client  # ensure module is loaded before patching
+
+    with patch.object(
+        slack_sdk.web.async_client, "AsyncWebClient",
+        return_value=mock_client,
+    ):
+        result = await channel.list_channels()
+
+    assert len(result) == 2
+    assert result[0]["name"] == "general"
+
+
+# ---- EmailChannel (HTML) ----
+
+
+@pytest.mark.asyncio
+async def test_email_channel_sends_html():
     import sys
     import types
 
@@ -173,6 +282,41 @@ async def test_email_channel_sends():
     msg = mock_send.call_args[0][0]
     assert "Test Rule" in msg["Subject"]
 
+    # Verify multipart: plain text + html
+    parts = list(msg.iter_parts())
+    assert len(parts) == 2
+    content_types = [p.get_content_type() for p in parts]
+    assert "text/plain" in content_types
+    assert "text/html" in content_types
+
+
+@pytest.mark.asyncio
+async def test_email_channel_with_smtp_auth():
+    import sys
+    import types
+
+    channel = EmailChannel(
+        smtp_host="smtp.example.com",
+        smtp_port=587,
+        from_addr="argus@example.com",
+        to_addrs=["admin@example.com"],
+        smtp_user="user",
+        smtp_password="pass",
+        use_tls=True,
+    )
+
+    mock_send = AsyncMock()
+    fake_module = types.ModuleType("aiosmtplib")
+    fake_module.send = mock_send
+    with patch.dict(sys.modules, {"aiosmtplib": fake_module}):
+        result = await channel.send(_make_alert(), _make_event())
+
+    assert result is True
+    call_kwargs = mock_send.call_args[1]
+    assert call_kwargs["username"] == "user"
+    assert call_kwargs["password"] == "pass"
+    assert call_kwargs["start_tls"] is True
+
 
 @pytest.mark.asyncio
 async def test_email_channel_empty_recipients():
@@ -184,3 +328,43 @@ async def test_email_channel_empty_recipients():
     )
     result = await channel.send(_make_alert(), _make_event())
     assert result is True  # No-op, success
+
+
+@pytest.mark.asyncio
+async def test_email_test_connection():
+    import sys
+    import types
+
+    channel = EmailChannel(
+        smtp_host="smtp.example.com",
+        smtp_port=587,
+        from_addr="argus@example.com",
+        to_addrs=["admin@example.com"],
+    )
+
+    mock_send = AsyncMock()
+    fake_module = types.ModuleType("aiosmtplib")
+    fake_module.send = mock_send
+    with patch.dict(sys.modules, {"aiosmtplib": fake_module}):
+        result = await channel.test_connection()
+
+    assert result["ok"] is True
+    assert result["to"] == ["admin@example.com"]
+    mock_send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_email_html_contains_severity_color():
+    html = EmailChannel._render_html(
+        rule_name="CPU Critical",
+        severity="URGENT",
+        source="system_metrics",
+        event_type="cpu_high",
+        timestamp="2025-01-01T12:00:00",
+        message="CPU at 99%",
+        alert_id="alert-xyz",
+    )
+    assert "#e74c3c" in html  # red for URGENT
+    assert "CPU Critical" in html
+    assert "CPU at 99%" in html
+    assert "alert-xyz" in html
