@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from argus_agent.agent.loop import AgentLoop
@@ -16,13 +18,32 @@ from argus_agent.scheduler.budget import TokenBudget
 logger = logging.getLogger("argus.agent.investigator")
 
 MAX_CONCURRENT = 2
+QUEUE_MAX_SIZE = 20
+
+
+class InvestigationStatus(StrEnum):
+    """Result of attempting to enqueue an investigation."""
+
+    QUEUED = "queued"
+    DROPPED_QUEUE_FULL = "dropped_queue_full"
+    DROPPED_BUDGET = "dropped_budget"
+
+
+@dataclass
+class InvestigationRequest:
+    """Carries all context needed to run an investigation."""
+
+    event: Event
+    alert_id: str = ""
+    channel_metadata: dict[str, str] = field(default_factory=dict)
 
 
 class Investigator:
     """Orchestrates autonomous AI investigations triggered by events.
 
     - Budget-gated: checks ``TokenBudget`` before starting
-    - Concurrency-limited to ``MAX_CONCURRENT`` simultaneous investigations
+    - Queue-based dispatch with ``MAX_CONCURRENT`` worker tasks
+    - Bounded queue (``QUEUE_MAX_SIZE``) to prevent unbounded memory
     - Broadcasts progress via WebSocket
     """
 
@@ -37,30 +58,95 @@ class Investigator:
         self._provider = provider
         self._ws_manager = ws_manager
         self._formatter = formatter
-        self._active: int = 0
-        self._lock = asyncio.Lock()
+        self._queue: asyncio.Queue[InvestigationRequest] = asyncio.Queue(
+            maxsize=QUEUE_MAX_SIZE,
+        )
+        self._workers: list[asyncio.Task[None]] = []
 
-    async def investigate_event(self, event: Event) -> None:
-        """Run an AI investigation for an urgent event."""
-        async with self._lock:
-            if self._active >= MAX_CONCURRENT:
-                logger.warning("Max concurrent investigations reached, skipping")
-                return
-            self._active += 1
+    async def start(self) -> None:
+        """Start the worker pool."""
+        for i in range(MAX_CONCURRENT):
+            task = asyncio.create_task(self._worker(i))
+            self._workers.append(task)
+        logger.info(
+            "Investigator started (%d workers, queue_max=%d)",
+            MAX_CONCURRENT,
+            QUEUE_MAX_SIZE,
+        )
 
-        try:
-            await self._run_investigation(event)
-        finally:
-            async with self._lock:
-                self._active -= 1
+    async def stop(self) -> None:
+        """Gracefully stop workers by draining the queue."""
+        for _ in self._workers:
+            # Sentinel: workers exit when they get None (but our queue is typed,
+            # so we cancel instead)
+            pass
+        for task in self._workers:
+            task.cancel()
+        await asyncio.gather(*self._workers, return_exceptions=True)
+        self._workers.clear()
+        logger.info("Investigator stopped")
 
-    async def _run_investigation(self, event: Event) -> None:
-        investigation_id = str(uuid.uuid4())
+    def enqueue_investigation(self, request: InvestigationRequest) -> InvestigationStatus:
+        """Non-blocking enqueue with pre-flight budget check.
 
-        # Budget check — investigations are "urgent" priority
+        Returns the status of the enqueue attempt.
+        """
         estimated_tokens = 4000
         if not self._budget.can_spend(estimated_tokens, priority="urgent"):
-            logger.warning("Budget exceeded, skipping investigation for %s", event.type)
+            logger.warning(
+                "Budget exceeded, dropping investigation for %s", request.event.type,
+            )
+            return InvestigationStatus.DROPPED_BUDGET
+
+        try:
+            self._queue.put_nowait(request)
+        except asyncio.QueueFull:
+            logger.warning(
+                "Investigation queue full (%d), dropping request for %s",
+                QUEUE_MAX_SIZE,
+                request.event.type,
+            )
+            return InvestigationStatus.DROPPED_QUEUE_FULL
+
+        logger.info(
+            "Investigation enqueued for %s (queue depth: %d)",
+            request.event.type,
+            self._queue.qsize(),
+        )
+        return InvestigationStatus.QUEUED
+
+    async def investigate_event(self, event: Event) -> None:
+        """Backward-compat wrapper: enqueue an event for investigation."""
+        request = InvestigationRequest(event=event)
+        self.enqueue_investigation(request)
+
+    async def _worker(self, worker_id: int) -> None:
+        """Process investigation requests from the queue."""
+        logger.debug("Investigation worker %d started", worker_id)
+        try:
+            while True:
+                request = await self._queue.get()
+                try:
+                    await self._run_investigation(request)
+                except Exception:
+                    logger.exception(
+                        "Worker %d: investigation failed for %s",
+                        worker_id,
+                        request.event.type,
+                    )
+                finally:
+                    self._queue.task_done()
+        except asyncio.CancelledError:
+            logger.debug("Investigation worker %d stopped", worker_id)
+
+    async def _run_investigation(self, request: InvestigationRequest) -> None:
+        event = request.event
+        investigation_id = str(uuid.uuid4())
+
+        # Authoritative budget check at dequeue time
+        estimated_tokens = 4000
+        if not self._budget.can_spend(estimated_tokens, priority="urgent"):
+            logger.warning("Budget exceeded at dequeue, skipping investigation for %s", event.type)
             return
 
         provider = self._get_provider()
@@ -92,6 +178,7 @@ class Investigator:
             memory=memory,
             on_event=on_event,
             budget=self._budget,
+            source="investigation",
         )
 
         try:
@@ -111,7 +198,9 @@ class Investigator:
         # Post AI report to external channels (Slack, Email, Webhook)
         if self._formatter is not None and result and result.content:
             try:
-                await self._formatter.send_investigation_report(event, result.content)
+                await self._formatter.send_investigation_report(
+                    event, result.content, channel_metadata=request.channel_metadata,
+                )
             except Exception:
                 logger.exception("Failed to send investigation report to external channels")
 
@@ -133,7 +222,7 @@ class Investigator:
             "Use the available tools to check current metrics and recent events."
         )
         memory = ConversationMemory(source="periodic_review")
-        loop = AgentLoop(provider=provider, memory=memory, budget=self._budget)
+        loop = AgentLoop(provider=provider, memory=memory, budget=self._budget, source="periodic")
 
         try:
             result = await loop.run(prompt)
@@ -166,7 +255,7 @@ class Investigator:
             "Use the available tools to gather current data."
         )
         memory = ConversationMemory(source="daily_digest")
-        loop = AgentLoop(provider=provider, memory=memory, budget=self._budget)
+        loop = AgentLoop(provider=provider, memory=memory, budget=self._budget, source="periodic")
 
         try:
             result = await loop.run(prompt)

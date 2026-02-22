@@ -233,9 +233,26 @@ function BudgetSection({
       )
     : 0;
 
+  const barColor = (pct: number) =>
+    pct > 80 ? "bg-red-500" : pct > 50 ? "bg-yellow-500" : "bg-emerald-500";
+
+  const fmtTokens = (n: number) => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return String(n);
+  };
+
   return (
     <section className="mb-6 rounded-lg border border-[var(--border)] bg-[var(--card)] p-4">
-      <h3 className="mb-3 text-lg font-medium">AI Budget</h3>
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-lg font-medium">AI Budget</h3>
+        <a
+          href="/analytics"
+          className="text-xs text-[var(--accent)] hover:underline"
+        >
+          View Analytics
+        </a>
+      </div>
       <div className="space-y-3 text-sm">
         <div>
           <label className="mb-1 block text-[var(--muted)]">
@@ -248,14 +265,14 @@ function BudgetSection({
             className="w-full rounded border border-[var(--border)] bg-transparent px-3 py-1.5 text-sm"
           />
           <div className="mt-1 flex items-center gap-2">
-            <div className="h-1.5 flex-1 rounded-full bg-[var(--border)]">
+            <div className="h-3 flex-1 rounded-full bg-[var(--border)]">
               <div
-                className="h-1.5 rounded-full bg-argus-500"
+                className={`h-3 rounded-full transition-all ${barColor(hourlyPct)}`}
                 style={{ width: `${hourlyPct}%` }}
               />
             </div>
             <span className="text-xs text-[var(--muted)]">
-              {initial.hourly_used || 0} / {initial.hourly_limit || 0}
+              {fmtTokens(initial.hourly_used || 0)} / {fmtTokens(initial.hourly_limit || 0)}
             </span>
           </div>
         </div>
@@ -270,14 +287,14 @@ function BudgetSection({
             className="w-full rounded border border-[var(--border)] bg-transparent px-3 py-1.5 text-sm"
           />
           <div className="mt-1 flex items-center gap-2">
-            <div className="h-1.5 flex-1 rounded-full bg-[var(--border)]">
+            <div className="h-3 flex-1 rounded-full bg-[var(--border)]">
               <div
-                className="h-1.5 rounded-full bg-argus-500"
+                className={`h-3 rounded-full transition-all ${barColor(dailyPct)}`}
                 style={{ width: `${dailyPct}%` }}
               />
             </div>
             <span className="text-xs text-[var(--muted)]">
-              {initial.daily_used || 0} / {initial.daily_limit || 0}
+              {fmtTokens(initial.daily_used || 0)} / {fmtTokens(initial.daily_limit || 0)}
             </span>
           </div>
         </div>

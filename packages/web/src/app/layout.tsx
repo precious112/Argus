@@ -34,6 +34,9 @@ export default function RootLayout({
               <a href="/history" className="hover:text-[var(--foreground)]">
                 History
               </a>
+              <a href="/analytics" className="hover:text-[var(--foreground)]">
+                Analytics
+              </a>
               <a href="/settings" className="hover:text-[var(--foreground)]">
                 Settings
               </a>

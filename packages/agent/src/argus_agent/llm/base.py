@@ -61,6 +61,12 @@ class LLMProvider(ABC):
 
     @property
     @abstractmethod
+    def model(self) -> str:
+        """Model identifier (e.g., 'gpt-4o')."""
+        ...
+
+    @property
+    @abstractmethod
     def max_context_tokens(self) -> int:
         """Maximum context window size in tokens."""
         ...

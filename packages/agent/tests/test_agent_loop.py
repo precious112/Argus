@@ -36,6 +36,10 @@ class MockProvider(LLMProvider):
         return "mock"
 
     @property
+    def model(self) -> str:
+        return "mock-model"
+
+    @property
     def max_context_tokens(self) -> int:
         return 128_000
 

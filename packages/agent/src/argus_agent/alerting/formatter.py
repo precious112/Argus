@@ -337,39 +337,58 @@ class AlertFormatter:
         await self._flush()
         logger.info("AlertFormatter stopped")
 
-    async def submit(self, alert: Any, event: Event) -> None:
-        """Route an alert by severity: URGENT → immediate, NOTABLE → buffer."""
+    async def submit(self, alert: Any, event: Event) -> dict[str, str]:
+        """Route an alert by severity: URGENT → immediate, NOTABLE → buffer.
+
+        Returns channel metadata (e.g. Slack thread_ts) for threading.
+        """
         severity_order = [EventSeverity.NORMAL, EventSeverity.NOTABLE, EventSeverity.URGENT]
         if severity_order.index(event.severity) < severity_order.index(self._min_severity):
-            return
+            return {}
 
         friendly = format_event(event)
 
         if event.severity == EventSeverity.URGENT:
-            await self._send_immediate(alert, event, friendly)
-        else:
-            item = DigestItem(alert=alert, event=event, friendly_message=friendly)
-            async with self._buffer_lock:
-                self._buffer.append(item)
+            return await self._send_immediate(alert, event, friendly)
 
-    async def _send_immediate(self, alert: Any, event: Event, friendly: str) -> None:
-        """Send an URGENT alert immediately to all external channels."""
+        item = DigestItem(alert=alert, event=event, friendly_message=friendly)
+        async with self._buffer_lock:
+            self._buffer.append(item)
+        return {}
+
+    async def _send_immediate(self, alert: Any, event: Event, friendly: str) -> dict[str, str]:
+        """Send an URGENT alert immediately to all external channels.
+
+        Returns merged channel metadata from all channels.
+        """
+        metadata: dict[str, str] = {}
         for channel in self._channels:
             try:
                 if hasattr(channel, "send_urgent"):
-                    await channel.send_urgent(alert, event, friendly)
+                    result = await channel.send_urgent(alert, event, friendly)
+                    if isinstance(result, dict):
+                        metadata.update(result)
                 else:
                     await channel.send(alert, event)
             except Exception:
                 logger.exception("Urgent send failed on channel %s", type(channel).__name__)
+        return metadata
 
-    async def send_investigation_report(self, event: Event, summary: str) -> None:
+    async def send_investigation_report(
+        self,
+        event: Event,
+        summary: str,
+        *,
+        channel_metadata: dict[str, str] | None = None,
+    ) -> None:
         """Post an AI investigation report to all external channels."""
         title = format_event(event)
         for channel in self._channels:
             try:
                 if hasattr(channel, "send_investigation_report"):
-                    await channel.send_investigation_report(title, summary)
+                    await channel.send_investigation_report(
+                        title, summary, channel_metadata=channel_metadata,
+                    )
                 else:
                     logger.debug(
                         "Channel %s has no send_investigation_report",

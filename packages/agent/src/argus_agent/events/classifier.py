@@ -112,11 +112,13 @@ class EventClassifier:
                 event.severity = EventSeverity.URGENT
                 event.message = rule.message_template.format(value=value)
                 event.type = _metric_to_event_type(metric_name)
+                event.data["value"] = value
                 return
             elif value >= rule.notable_threshold:
                 event.severity = EventSeverity.NOTABLE
                 event.message = rule.message_template.format(value=value)
                 event.type = _metric_to_event_type(metric_name)
+                event.data["value"] = value
                 return
 
     def add_threshold(self, rule: ThresholdRule) -> None:

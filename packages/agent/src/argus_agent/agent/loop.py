@@ -15,7 +15,7 @@ from argus_agent.tools.base import Tool, get_tool, get_tool_definitions
 
 logger = logging.getLogger("argus.agent.loop")
 
-MAX_TOOL_ROUNDS = 10
+MAX_TOOL_ROUNDS = 20
 
 
 def _coerce_args(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
@@ -66,12 +66,14 @@ class AgentLoop:
         on_event: EventCallback | None = None,
         budget: Any | None = None,
         client_type: str = "web",
+        source: str = "agent_loop",
     ) -> None:
         self.provider = provider
         self.memory = memory
         self._on_event = on_event
         self._budget = budget  # Optional TokenBudget for background tasks
         self._client_type = client_type
+        self._source = source
 
     async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit an event to the callback (e.g., WebSocket handler)."""
@@ -120,6 +122,10 @@ class AgentLoop:
             all_tool_calls: list[dict[str, Any]] = []
             response_metadata: dict[str, Any] = {}
 
+            # Track per-round deltas to avoid double-counting
+            prompt_before = result.prompt_tokens
+            completion_before = result.completion_tokens
+
             async for delta in self.provider.stream(messages, tools=tool_defs_for_round or None):
                 # Stream text content to the user
                 if delta.content:
@@ -139,11 +145,31 @@ class AgentLoop:
 
             await self._emit("thinking_end", {})
 
-            # Record token usage in budget if set
-            if self._budget and (result.prompt_tokens or result.completion_tokens):
-                self._budget.record_usage(
-                    result.prompt_tokens, result.completion_tokens, source="agent_loop"
-                )
+            # Compute per-round deltas
+            round_prompt = result.prompt_tokens - prompt_before
+            round_completion = result.completion_tokens - completion_before
+
+            # Record token usage in budget (per-round, not cumulative)
+            if round_prompt or round_completion:
+                if self._budget:
+                    self._budget.record_usage(
+                        round_prompt, round_completion, source=self._source
+                    )
+                # Persist to DB
+                try:
+                    from argus_agent.storage.token_usage import TokenUsageService
+
+                    svc = TokenUsageService()
+                    await svc.record(
+                        prompt_tokens=round_prompt,
+                        completion_tokens=round_completion,
+                        provider=self.provider.name,
+                        model=self.provider.model,
+                        source=self._source,
+                        conversation_id=getattr(self.memory, "conversation_id", ""),
+                    )
+                except Exception:
+                    logger.debug("Failed to persist token usage", exc_info=True)
 
             # If the LLM wants to call tools
             if all_tool_calls:

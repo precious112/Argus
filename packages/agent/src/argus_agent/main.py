@@ -135,6 +135,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         ws_manager=manager,
         formatter=_alert_formatter,
     )
+    await _investigator.start()
 
     # 3b. Action engine
     from argus_agent.actions.engine import ActionEngine
@@ -149,7 +150,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     _alert_engine = AlertEngine(
         bus=get_event_bus(),
-        on_investigate=_investigator.investigate_event,
+        on_investigate=_investigator.enqueue_investigation,
     )
     # Seed DB from static config on first run
     svc = NotificationSettingsService()
@@ -254,6 +255,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown in reverse order
+    if _investigator:
+        await _investigator.stop()
     if _alert_formatter:
         await _alert_formatter.stop()
     if _soak_runner:

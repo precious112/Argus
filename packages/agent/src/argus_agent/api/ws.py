@@ -262,6 +262,7 @@ async def _handle_user_message(
     agent = AgentLoop(
         provider=provider, memory=memory, on_event=on_event,
         client_type=client_type,
+        source="user_chat",
     )
 
     try:

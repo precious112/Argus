@@ -143,6 +143,10 @@ class AnthropicProvider(LLMProvider):
         return "anthropic"
 
     @property
+    def model(self) -> str:
+        return self._model
+
+    @property
     def max_context_tokens(self) -> int:
         return _MODEL_CONTEXT.get(self._model, 200_000)
 

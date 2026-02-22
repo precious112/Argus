@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -210,6 +210,7 @@ async def ask_question(
         agent = AgentLoop(
             provider=provider, memory=memory,
             client_type=client_type,
+            source="user_chat",
         )
         result = await agent.run(question)
         return {
@@ -520,6 +521,58 @@ async def list_slack_channels() -> dict[str, Any]:
         return {"channels": channels}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+# --- Analytics Endpoints ---
+
+
+@router.get("/analytics/usage")
+async def analytics_usage(
+    granularity: str = "hour",
+    since_hours: int = 24,
+    provider: str | None = None,
+    model: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Time-series token usage data."""
+    from argus_agent.storage.token_usage import TokenUsageService
+
+    if granularity not in ("hour", "day", "week", "month"):
+        raise HTTPException(status_code=400, detail="Invalid granularity")
+
+    since = datetime.now(UTC) - timedelta(hours=since_hours)
+    svc = TokenUsageService()
+    data = await svc.get_usage_over_time(
+        granularity=granularity, since=since,
+        provider=provider, model=model, source=source,
+    )
+    return {"granularity": granularity, "data": data}
+
+
+@router.get("/analytics/breakdown")
+async def analytics_breakdown(
+    group_by: str = "provider",
+    since_hours: int = 24,
+) -> dict[str, Any]:
+    """Categorical breakdown of token usage."""
+    from argus_agent.storage.token_usage import TokenUsageService
+
+    if group_by not in ("provider", "model", "source"):
+        raise HTTPException(status_code=400, detail="Invalid group_by")
+
+    since = datetime.now(UTC) - timedelta(hours=since_hours)
+    svc = TokenUsageService()
+    data = await svc.get_usage_by_dimension(dimension=group_by, since=since)
+    return {"group_by": group_by, "data": data}
+
+
+@router.get("/analytics/summary")
+async def analytics_summary() -> dict[str, Any]:
+    """Aggregate token usage stats."""
+    from argus_agent.storage.token_usage import TokenUsageService
+
+    svc = TokenUsageService()
+    return await svc.get_summary()
 
 
 @router.get("/audit")
