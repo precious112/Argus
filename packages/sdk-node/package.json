@@ -1,19 +1,45 @@
 {
-  "name": "@argus/node",
+  "name": "@argus-ai/node",
   "version": "0.1.0",
   "description": "Argus Node.js SDK - Instrumentation for AI-native observability",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "author": "Balogun Precious <preciouskent8@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/precious112/Argus",
+    "directory": "packages/sdk-node"
+  },
+  "bugs": {
+    "url": "https://github.com/precious112/Argus/issues"
+  },
+  "homepage": "https://github.com/precious112/Argus/tree/main/packages/sdk-node",
+  "keywords": [
+    "observability",
+    "monitoring",
+    "instrumentation",
+    "tracing",
+    "AI"
+  ],
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
   "scripts": {
     "build": "tsc",
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",
-    "test": "echo \"No tests yet\""
+    "test": "echo \"No tests yet\"",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {},
   "devDependencies": {
     "typescript": "^5.7.0",
     "@types/node": "^22.0.0"
-  },
-  "license": "MIT"
+  }
 }

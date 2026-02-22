@@ -4,6 +4,6 @@
   "description": "Example serverless function with Argus instrumentation",
   "main": "handler.js",
   "dependencies": {
-    "argus-node": "^0.1.0"
+    "@argus-ai/node": "^0.1.0"
   }
 }

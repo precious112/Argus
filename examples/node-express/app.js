@@ -4,24 +4,7 @@
 
 const express = require("express");
 
-// In production these would come from @argus/node
-// For local dev, point to the built SDK
-let Argus;
-try {
-  Argus = require("@argus/node");
-} catch {
-  Argus = {
-    init() {},
-    event() {},
-    captureException() {},
-    shutdown() {},
-    argusMiddleware() { return (req, res, next) => next(); },
-    addBreadcrumb() {},
-    startRuntimeMetrics() {},
-    patchHttp() {},
-    trace(name) { return (fn) => fn; },
-  };
-}
+const Argus = require("@argus-ai/node");
 
 Argus.init({
   serverUrl: process.env.ARGUS_URL || "http://localhost:7600",

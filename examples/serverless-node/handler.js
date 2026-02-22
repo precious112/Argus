@@ -5,7 +5,7 @@
  * Argus auto-detects the runtime from environment variables.
  */
 
-const argus = require("argus-node");
+const argus = require("@argus-ai/node");
 
 // Initialize Argus SDK
 argus.init({

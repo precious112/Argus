@@ -2,9 +2,13 @@
 and triggers system-level events for host collectors.
 
 Configured via environment variables:
-  TARGET_APPS        — JSON list of {"name","url"} objects
+  TARGET_APP         — "fastapi", "express", or "both" (default "both")
+  TARGET_APPS        — JSON list of {"name","url"} objects (overrides TARGET_APP)
   SCENARIO_INTERVAL  — seconds between full scenario cycles (default 300)
   ENABLE_SYSTEM_STRESS — run CPU/memory/process scenarios (default true)
+
+CLI usage:
+  python runner.py [fastapi|express|both]
 """
 
 from __future__ import annotations
@@ -44,13 +48,30 @@ class AppTarget:
     url: str
 
 
-def load_targets() -> list[AppTarget]:
-    raw = os.environ.get(
-        "TARGET_APPS",
-        '[{"name":"fastapi","url":"http://example-fastapi:8000"},'
-        '{"name":"express","url":"http://example-express:8001"}]',
-    )
-    return [AppTarget(**t) for t in json.loads(raw)]
+PRESETS: dict[str, list[dict[str, str]]] = {
+    "fastapi": [{"name": "fastapi", "url": "http://example-fastapi:8000"}],
+    "express": [{"name": "express", "url": "http://example-express:8001"}],
+    "both": [
+        {"name": "fastapi", "url": "http://example-fastapi:8000"},
+        {"name": "express", "url": "http://example-express:8001"},
+    ],
+}
+
+
+def load_targets(cli_app: str | None = None) -> list[AppTarget]:
+    # Explicit TARGET_APPS JSON takes highest precedence
+    raw = os.environ.get("TARGET_APPS")
+    if raw:
+        return [AppTarget(**t) for t in json.loads(raw)]
+
+    # CLI arg > TARGET_APP env var > default "both"
+    app = cli_app or os.environ.get("TARGET_APP", "both")
+    app = app.lower().strip()
+    if app not in PRESETS:
+        logger.error("Unknown app %r — expected one of: %s", app, ", ".join(PRESETS))
+        sys.exit(1)
+
+    return [AppTarget(**t) for t in PRESETS[app]]
 
 
 SCENARIO_INTERVAL = int(os.environ.get("SCENARIO_INTERVAL", "300"))
@@ -466,7 +487,8 @@ class ScenarioRunner:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    targets = load_targets()
+    cli_app = sys.argv[1] if len(sys.argv) > 1 else None
+    targets = load_targets(cli_app)
     logger.info("Test runner starting with targets: %s", [t.name for t in targets])
     logger.info(
         "Config: interval=%ds, system_stress=%s",
