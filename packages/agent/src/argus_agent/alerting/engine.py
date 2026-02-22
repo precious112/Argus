@@ -84,7 +84,7 @@ DEFAULT_RULES: list[AlertRule] = [
         id="error_burst",
         name="Error Burst",
         event_types=[EventType.ERROR_BURST],
-        min_severity=EventSeverity.URGENT,
+        min_severity=EventSeverity.NOTABLE,
         cooldown_seconds=600,
         auto_investigate=True,
     ),
