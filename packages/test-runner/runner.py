@@ -80,6 +80,7 @@ ENABLE_SYSTEM_STRESS = os.environ.get("ENABLE_SYSTEM_STRESS", "true").lower() in
     "1",
     "yes",
 )
+SCENARIOS = os.environ.get("SCENARIOS", "")  # comma-separated filter, e.g. "suspicious_activity"
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +373,7 @@ class SuspiciousActivity(Scenario):
             tmp_dir = tempfile.mkdtemp()
             script_path = os.path.join(tmp_dir, fake_name)
             with open(script_path, "w") as f:
-                f.write("#!/bin/sh\nsleep 30\n")
+                f.write("#!/bin/sh\nsleep 330\n")
             os.chmod(script_path, stat.S_IRWXU)
             proc = subprocess.Popen(
                 [script_path],
@@ -380,7 +381,7 @@ class SuspiciousActivity(Scenario):
                 stderr=subprocess.DEVNULL,
             )
             logger.info("Suspicious process PID: %d", proc.pid)
-            await asyncio.sleep(30)
+            await asyncio.sleep(330)
             proc.terminate()
             proc.wait(timeout=5)
         except Exception as exc:
@@ -394,7 +395,7 @@ class SuspiciousActivity(Scenario):
             os.close(fd)
             os.chmod(exe_path, stat.S_IRWXU)
             logger.info("Temp executable at: %s", exe_path)
-            await asyncio.sleep(15)
+            await asyncio.sleep(330)
             os.unlink(exe_path)
             logger.info("Temp executable removed")
         except Exception as exc:
@@ -450,6 +451,13 @@ class ScenarioRunner:
 
     async def run_forever(self) -> None:
         await self.wait_for_targets()
+
+        # Filter scenarios if SCENARIOS env var is set
+        if SCENARIOS:
+            allowed = {s.strip() for s in SCENARIOS.split(",") if s.strip()}
+            logger.info("SCENARIOS filter active: %s", allowed)
+            self.traffic_scenarios = [s for s in self.traffic_scenarios if s.name in allowed]
+            self.system_scenarios = [s for s in self.system_scenarios if s.name in allowed]
 
         cycle = 0
         while True:
