@@ -2,9 +2,13 @@
 and triggers system-level events for host collectors.
 
 Configured via environment variables:
-  TARGET_APPS        — JSON list of {"name","url"} objects
+  TARGET_APP         — "fastapi", "express", or "both" (default "both")
+  TARGET_APPS        — JSON list of {"name","url"} objects (overrides TARGET_APP)
   SCENARIO_INTERVAL  — seconds between full scenario cycles (default 300)
   ENABLE_SYSTEM_STRESS — run CPU/memory/process scenarios (default true)
+
+CLI usage:
+  python runner.py [fastapi|express|both]
 """
 
 from __future__ import annotations
@@ -44,13 +48,30 @@ class AppTarget:
     url: str
 
 
-def load_targets() -> list[AppTarget]:
-    raw = os.environ.get(
-        "TARGET_APPS",
-        '[{"name":"fastapi","url":"http://example-fastapi:8000"},'
-        '{"name":"express","url":"http://example-express:8001"}]',
-    )
-    return [AppTarget(**t) for t in json.loads(raw)]
+PRESETS: dict[str, list[dict[str, str]]] = {
+    "fastapi": [{"name": "fastapi", "url": "http://example-fastapi:8000"}],
+    "express": [{"name": "express", "url": "http://example-express:8001"}],
+    "both": [
+        {"name": "fastapi", "url": "http://example-fastapi:8000"},
+        {"name": "express", "url": "http://example-express:8001"},
+    ],
+}
+
+
+def load_targets(cli_app: str | None = None) -> list[AppTarget]:
+    # Explicit TARGET_APPS JSON takes highest precedence
+    raw = os.environ.get("TARGET_APPS")
+    if raw:
+        return [AppTarget(**t) for t in json.loads(raw)]
+
+    # CLI arg > TARGET_APP env var > default "both"
+    app = cli_app or os.environ.get("TARGET_APP", "both")
+    app = app.lower().strip()
+    if app not in PRESETS:
+        logger.error("Unknown app %r — expected one of: %s", app, ", ".join(PRESETS))
+        sys.exit(1)
+
+    return [AppTarget(**t) for t in PRESETS[app]]
 
 
 SCENARIO_INTERVAL = int(os.environ.get("SCENARIO_INTERVAL", "300"))
@@ -59,6 +80,7 @@ ENABLE_SYSTEM_STRESS = os.environ.get("ENABLE_SYSTEM_STRESS", "true").lower() in
     "1",
     "yes",
 )
+SCENARIOS = os.environ.get("SCENARIOS", "")  # comma-separated filter, e.g. "suspicious_activity"
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +373,7 @@ class SuspiciousActivity(Scenario):
             tmp_dir = tempfile.mkdtemp()
             script_path = os.path.join(tmp_dir, fake_name)
             with open(script_path, "w") as f:
-                f.write("#!/bin/sh\nsleep 30\n")
+                f.write("#!/bin/sh\nsleep 330\n")
             os.chmod(script_path, stat.S_IRWXU)
             proc = subprocess.Popen(
                 [script_path],
@@ -359,7 +381,7 @@ class SuspiciousActivity(Scenario):
                 stderr=subprocess.DEVNULL,
             )
             logger.info("Suspicious process PID: %d", proc.pid)
-            await asyncio.sleep(30)
+            await asyncio.sleep(330)
             proc.terminate()
             proc.wait(timeout=5)
         except Exception as exc:
@@ -373,7 +395,7 @@ class SuspiciousActivity(Scenario):
             os.close(fd)
             os.chmod(exe_path, stat.S_IRWXU)
             logger.info("Temp executable at: %s", exe_path)
-            await asyncio.sleep(15)
+            await asyncio.sleep(330)
             os.unlink(exe_path)
             logger.info("Temp executable removed")
         except Exception as exc:
@@ -430,6 +452,13 @@ class ScenarioRunner:
     async def run_forever(self) -> None:
         await self.wait_for_targets()
 
+        # Filter scenarios if SCENARIOS env var is set
+        if SCENARIOS:
+            allowed = {s.strip() for s in SCENARIOS.split(",") if s.strip()}
+            logger.info("SCENARIOS filter active: %s", allowed)
+            self.traffic_scenarios = [s for s in self.traffic_scenarios if s.name in allowed]
+            self.system_scenarios = [s for s in self.system_scenarios if s.name in allowed]
+
         cycle = 0
         while True:
             cycle += 1
@@ -466,7 +495,8 @@ class ScenarioRunner:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    targets = load_targets()
+    cli_app = sys.argv[1] if len(sys.argv) > 1 else None
+    targets = load_targets(cli_app)
     logger.info("Test runner starting with targets: %s", [t.name for t in targets])
     logger.info(
         "Config: interval=%ds, system_stress=%s",

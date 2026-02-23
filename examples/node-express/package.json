@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "express": "^4.18.0",
-    "@argus/node": "file:/tmp/sdk-node"
+    "@argus-ai/node": "^0.1.0"
   },
   "license": "MIT"
 }

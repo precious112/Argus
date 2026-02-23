@@ -368,3 +368,183 @@ async def test_email_html_contains_severity_color():
     assert "CPU Critical" in html
     assert "CPU at 99%" in html
     assert "alert-xyz" in html
+
+
+# ---- Slack send_urgent returns thread_ts ----
+
+
+@pytest.mark.asyncio
+async def test_slack_send_urgent_returns_thread_ts():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage = AsyncMock(return_value={"ok": True, "ts": "1234567890.123456"})
+
+    import slack_sdk.web.async_client
+
+    with patch.object(
+        slack_sdk.web.async_client, "AsyncWebClient",
+        return_value=mock_client,
+    ):
+        result = await channel.send_urgent(_make_alert(), _make_event(), "CPU is critical")
+
+    assert result == {"slack:C123": "1234567890.123456"}
+
+    # Verify no "in progress" text in blocks
+    call_kwargs = mock_client.chat_postMessage.call_args[1]
+    blocks_str = str(call_kwargs["blocks"])
+    assert "investigation in progress" not in blocks_str.lower()
+
+
+@pytest.mark.asyncio
+async def test_slack_send_urgent_no_ts_returns_empty():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage = AsyncMock(return_value={"ok": True})
+
+    import slack_sdk.web.async_client
+
+    with patch.object(
+        slack_sdk.web.async_client, "AsyncWebClient",
+        return_value=mock_client,
+    ):
+        result = await channel.send_urgent(_make_alert(), _make_event(), "CPU is critical")
+
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_slack_send_urgent_error_returns_empty():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage.side_effect = Exception("API error")
+
+    import slack_sdk.web.async_client
+
+    with patch.object(
+        slack_sdk.web.async_client, "AsyncWebClient",
+        return_value=mock_client,
+    ):
+        result = await channel.send_urgent(_make_alert(), _make_event(), "CPU is critical")
+
+    assert result == {}
+
+
+# ---- Slack investigation report threading ----
+
+
+@pytest.mark.asyncio
+async def test_slack_investigation_report_uses_thread_ts():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage = AsyncMock(return_value={"ok": True})
+
+    import slack_sdk.web.async_client
+
+    with patch.object(
+        slack_sdk.web.async_client, "AsyncWebClient",
+        return_value=mock_client,
+    ):
+        result = await channel.send_investigation_report(
+            "CPU Critical",
+            "Investigation summary",
+            channel_metadata={"slack:C123": "1234567890.123456"},
+        )
+
+    assert result is True
+    call_kwargs = mock_client.chat_postMessage.call_args[1]
+    assert call_kwargs["thread_ts"] == "1234567890.123456"
+
+
+@pytest.mark.asyncio
+async def test_slack_investigation_report_no_metadata_top_level():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage = AsyncMock(return_value={"ok": True})
+
+    import slack_sdk.web.async_client
+
+    with patch.object(
+        slack_sdk.web.async_client, "AsyncWebClient",
+        return_value=mock_client,
+    ):
+        result = await channel.send_investigation_report(
+            "CPU Critical",
+            "Investigation summary",
+        )
+
+    assert result is True
+    call_kwargs = mock_client.chat_postMessage.call_args[1]
+    assert "thread_ts" not in call_kwargs
+
+
+# ---- Retry logic ----
+
+
+@pytest.mark.asyncio
+async def test_slack_post_with_retry_succeeds_on_second_attempt():
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage = AsyncMock(
+        side_effect=[Exception("rate limited"), {"ok": True}],
+    )
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        result = await channel._post_with_retry(
+            mock_client, [], "Test Title",
+        )
+
+    assert result == {"ok": True}
+    assert mock_client.chat_postMessage.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_slack_post_with_retry_falls_back_to_top_level():
+    """When threaded post fails all retries, falls back to top-level."""
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    # First 3 calls fail (retries), 4th call (fallback) succeeds
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage = AsyncMock(
+        side_effect=[
+            Exception("fail 1"),
+            Exception("fail 2"),
+            Exception("fail 3"),
+            {"ok": True},  # fallback succeeds
+        ],
+    )
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        result = await channel._post_with_retry(
+            mock_client, [], "Test Title", thread_ts="1234.5678",
+        )
+
+    assert result == {"ok": True}
+    assert mock_client.chat_postMessage.call_count == 4
+    # Last call should not have thread_ts (fallback)
+    last_call_kwargs = mock_client.chat_postMessage.call_args[1]
+    assert "thread_ts" not in last_call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_slack_post_with_retry_all_fail_raises():
+    """When all retries fail with no thread_ts, raises the exception."""
+    channel = SlackChannel(bot_token="xoxb-test", channel_id="C123")
+
+    mock_client = AsyncMock()
+    mock_client.chat_postMessage = AsyncMock(
+        side_effect=Exception("persistent failure"),
+    )
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(Exception, match="persistent failure"):
+            await channel._post_with_retry(
+                mock_client, [], "Test Title",
+            )
+
+    assert mock_client.chat_postMessage.call_count == 3

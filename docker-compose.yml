@@ -80,9 +80,10 @@ services:
     pid: "host"
     privileged: true
     environment:
-      - TARGET_APPS=[{"name":"fastapi","url":"http://example-fastapi:8000"},{"name":"express","url":"http://example-express:8001"}]
+      - TARGET_APP=${TARGET_APP:-both}
       - SCENARIO_INTERVAL=300
       - ENABLE_SYSTEM_STRESS=true
+      - SCENARIOS=${SCENARIOS:-}
     depends_on:
       - example-fastapi
       - example-express

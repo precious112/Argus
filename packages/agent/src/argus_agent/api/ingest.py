@@ -83,7 +83,7 @@ async def ingest_telemetry(
                 await bus.publish(Event(
                     source=EventSource.SDK_TELEMETRY,
                     type=EventType.ERROR_BURST,
-                    severity=EventSeverity.NOTABLE,
+                    severity=EventSeverity.URGENT,
                     data={"service": ev.service or service, **ev.data},
                     message=(
                         f"Exception from {ev.service or service}: "

@@ -1,10 +1,23 @@
 [project]
-name = "argus-python"
+name = "argus-ai-sdk"
 version = "0.1.0"
 description = "Argus Python SDK - Instrumentation for AI-native observability"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
+authors = [{ name = "Balogun Precious", email = "preciouskent8@gmail.com" }]
+keywords = ["observability", "monitoring", "instrumentation", "tracing", "AI"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+]
 dependencies = [
     "httpx>=0.25.0",
 ]
@@ -17,6 +30,11 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.7.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/precious112/Argus"
+Repository = "https://github.com/precious112/Argus"
+"Bug Tracker" = "https://github.com/precious112/Argus/issues"
 
 [build-system]
 requires = ["hatchling"]

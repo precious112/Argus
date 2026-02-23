@@ -33,8 +33,8 @@ class LLMConfig(BaseModel):
 class AIBudgetConfig(BaseModel):
     """AI token budget for background tasks."""
 
-    daily_token_limit: int = 500_000
-    hourly_token_limit: int = 100_000
+    daily_token_limit: int = 5_000_000
+    hourly_token_limit: int = 500_000
     review_frequency: str = "6h"
     digest_frequency: str = "24h"
     priority_reserve: float = 0.3

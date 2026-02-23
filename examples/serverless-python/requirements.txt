@@ -1,1 +1,1 @@
-argus-python>=0.1.0
+argus-ai-sdk>=0.1.0

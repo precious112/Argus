@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from argus_agent.agent.investigator import InvestigationRequest, InvestigationStatus
 from argus_agent.events.bus import EventBus
 from argus_agent.events.types import Event, EventSeverity, EventType
 
 logger = logging.getLogger("argus.alerting.engine")
 
-InvestigateCallback = Callable[[Event], Coroutine[Any, Any, None]]
+InvestigateCallback = Callable[[InvestigationRequest], InvestigationStatus]
 
 
 @dataclass
@@ -28,6 +29,7 @@ class AlertRule:
     max_severity: EventSeverity | None = None
     cooldown_seconds: int = 300  # 5 min default
     auto_investigate: bool = False
+    investigate_cooldown_seconds: int = 10800  # 3h default, independent of alert cooldown
 
 
 @dataclass
@@ -51,6 +53,7 @@ DEFAULT_RULES: list[AlertRule] = [
         name="CPU Critical",
         event_types=[EventType.CPU_HIGH],
         min_severity=EventSeverity.URGENT,
+        cooldown_seconds=1800,
         auto_investigate=True,
     ),
     AlertRule(
@@ -58,6 +61,7 @@ DEFAULT_RULES: list[AlertRule] = [
         name="Memory Critical",
         event_types=[EventType.MEMORY_HIGH],
         min_severity=EventSeverity.URGENT,
+        cooldown_seconds=1800,
         auto_investigate=True,
     ),
     AlertRule(
@@ -65,6 +69,7 @@ DEFAULT_RULES: list[AlertRule] = [
         name="Disk Critical",
         event_types=[EventType.DISK_HIGH],
         min_severity=EventSeverity.URGENT,
+        cooldown_seconds=3600,
         auto_investigate=True,
     ),
     AlertRule(
@@ -73,12 +78,14 @@ DEFAULT_RULES: list[AlertRule] = [
         event_types=[EventType.PROCESS_CRASHED, EventType.PROCESS_OOM_KILLED],
         min_severity=EventSeverity.URGENT,
         auto_investigate=True,
+        investigate_cooldown_seconds=3600,  # 1h — crashes are discrete events
     ),
     AlertRule(
         id="error_burst",
         name="Error Burst",
         event_types=[EventType.ERROR_BURST],
-        min_severity=EventSeverity.URGENT,
+        min_severity=EventSeverity.NOTABLE,
+        cooldown_seconds=600,
         auto_investigate=True,
     ),
     AlertRule(
@@ -91,7 +98,9 @@ DEFAULT_RULES: list[AlertRule] = [
             EventType.SUSPICIOUS_OUTBOUND,
         ],
         min_severity=EventSeverity.NOTABLE,
+        cooldown_seconds=600,
         auto_investigate=True,
+        investigate_cooldown_seconds=7200,  # 2h — security warrants more frequent checks
     ),
     AlertRule(
         id="resource_warning",
@@ -102,7 +111,7 @@ DEFAULT_RULES: list[AlertRule] = [
         ],
         min_severity=EventSeverity.NOTABLE,
         max_severity=EventSeverity.NOTABLE,
-        cooldown_seconds=600,
+        cooldown_seconds=1800,
         auto_investigate=False,
     ),
     AlertRule(
@@ -110,7 +119,7 @@ DEFAULT_RULES: list[AlertRule] = [
         name="Anomaly Detected",
         event_types=[EventType.ANOMALY_DETECTED],
         min_severity=EventSeverity.NOTABLE,
-        cooldown_seconds=600,
+        cooldown_seconds=1800,
         auto_investigate=True,
     ),
     AlertRule(
@@ -118,6 +127,7 @@ DEFAULT_RULES: list[AlertRule] = [
         name="SDK Error Rate Spike",
         event_types=[EventType.SDK_ERROR_SPIKE],
         min_severity=EventSeverity.URGENT,
+        cooldown_seconds=900,
         auto_investigate=True,
     ),
     AlertRule(
@@ -146,6 +156,7 @@ DEFAULT_RULES: list[AlertRule] = [
         name="Traffic Burst",
         event_types=[EventType.SDK_TRAFFIC_BURST],
         min_severity=EventSeverity.NOTABLE,
+        cooldown_seconds=900,
         auto_investigate=True,
     ),
 ]
@@ -173,7 +184,8 @@ class AlertEngine:
         self._channels: list[Any] = []  # NotificationChannel instances
         self._formatter: Any = None  # AlertFormatter for external channels
         self._active_alerts: list[ActiveAlert] = []
-        self._last_fired: dict[str, datetime] = {}  # rule_id -> last fire time
+        self._last_fired: dict[str, datetime] = {}  # dedup_key -> last fire time
+        self._last_investigated: dict[str, datetime] = {}  # dedup_key -> last investigation time
 
     def set_channels(self, channels: list[Any]) -> None:
         self._channels = channels
@@ -202,7 +214,7 @@ class AlertEngine:
 
             # Dedup / cooldown
             now = datetime.now(UTC)
-            dedup_key = f"{event.source}:{event.type}:{rule.id}"
+            dedup_key = f"{event.source}:{rule.id}"
             last = self._last_fired.get(dedup_key)
             if last and (now - last).total_seconds() < rule.cooldown_seconds:
                 continue
@@ -228,22 +240,39 @@ class AlertEngine:
                     logger.exception("Notification channel error")
 
             # Route to formatter for external channels (severity-routed, batched)
+            channel_metadata: dict[str, str] = {}
             if self._formatter is not None:
                 try:
-                    await self._formatter.submit(alert, event)
+                    channel_metadata = await self._formatter.submit(alert, event)
                 except Exception:
                     logger.exception("Formatter submit error")
 
-            # Auto-investigate urgent events
+            # Auto-investigate urgent events (with separate investigation cooldown)
             if (
                 rule.auto_investigate
                 and event.severity == EventSeverity.URGENT
                 and self._on_investigate
             ):
-                try:
-                    await self._on_investigate(event)
-                except Exception:
-                    logger.exception("Auto-investigation error for alert %s", alert.id)
+                invest_last = self._last_investigated.get(dedup_key)
+                if (
+                    invest_last
+                    and (now - invest_last).total_seconds() < rule.investigate_cooldown_seconds
+                ):
+                    logger.info(
+                        "Investigation cooldown active for %s, skipping re-investigation",
+                        dedup_key,
+                    )
+                else:
+                    try:
+                        request = InvestigationRequest(
+                            event=event,
+                            alert_id=alert.id,
+                            channel_metadata=channel_metadata,
+                        )
+                        self._on_investigate(request)
+                        self._last_investigated[dedup_key] = now
+                    except Exception:
+                        logger.exception("Auto-investigation error for alert %s", alert.id)
 
     @staticmethod
     def _matches(rule: AlertRule, event: Event) -> bool:

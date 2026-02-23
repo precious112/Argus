@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import ssl
 from abc import ABC, abstractmethod
@@ -26,9 +27,12 @@ class NotificationChannel(ABC):
         """Send a notification for the given alert/event. Returns True on success."""
         ...
 
-    async def send_urgent(self, alert: Any, event: Any, friendly_message: str) -> bool:
-        """Send an urgent alert with a human-friendly message. Default: fall back to send()."""
-        return await self.send(alert, event)
+    async def send_urgent(
+        self, alert: Any, event: Any, friendly_message: str,
+    ) -> dict[str, str]:
+        """Send an urgent alert. Returns channel metadata (e.g. thread_ts) for threading."""
+        await self.send(alert, event)
+        return {}
 
     async def send_digest(self, digest: Any) -> bool:
         """Send a batched digest of NOTABLE alerts. Default: send each individually."""
@@ -39,7 +43,9 @@ class NotificationChannel(ABC):
                     success = False
         return success
 
-    async def send_investigation_report(self, title: str, summary: str) -> bool:
+    async def send_investigation_report(
+        self, title: str, summary: str, *, channel_metadata: dict[str, str] | None = None,
+    ) -> bool:
         """Send an AI investigation report. Default: no-op."""
         return True
 
@@ -96,7 +102,9 @@ class WebhookChannel(NotificationChannel):
                 success = False
         return success
 
-    async def send_investigation_report(self, title: str, summary: str) -> bool:
+    async def send_investigation_report(
+        self, title: str, summary: str, *, channel_metadata: dict[str, str] | None = None,
+    ) -> bool:
         if not self._urls:
             return True
 
@@ -229,9 +237,12 @@ class SlackChannel(NotificationChannel):
                 break
         return result
 
-    async def send_urgent(self, alert: Any, event: Any, friendly_message: str) -> bool:
+    async def send_urgent(
+        self, alert: Any, event: Any, friendly_message: str,
+    ) -> dict[str, str]:
+        """Send an urgent alert and return channel metadata for threading."""
         if not self._bot_token or not self._channel_id:
-            return True
+            return {}
         try:
             from slack_sdk.web.async_client import AsyncWebClient
 
@@ -248,24 +259,23 @@ class SlackChannel(NotificationChannel):
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": friendly_message},
                 },
-                {
-                    "type": "context",
-                    "elements": [
-                        {"type": "mrkdwn", "text": "\u23f3 AI investigation in progress..."},
-                    ],
-                },
             ]
 
-            await client.chat_postMessage(
+            resp = await client.chat_postMessage(
                 channel=self._channel_id,
                 text=f"\U0001f534 {alert.rule_name}: {friendly_message}",
                 blocks=blocks,
                 attachments=[{"color": color, "blocks": []}],
             )
-            return True
+
+            # Return thread_ts for threading investigation reports
+            ts = resp.get("ts", "") if resp else ""
+            if ts:
+                return {f"slack:{self._channel_id}": ts}
+            return {}
         except Exception:
             logger.exception("Slack urgent notification failed")
-            return False
+            return {}
 
     async def send_digest(self, digest: Any) -> bool:
         if not self._bot_token or not self._channel_id:
@@ -306,7 +316,9 @@ class SlackChannel(NotificationChannel):
             logger.exception("Slack digest notification failed")
             return False
 
-    async def send_investigation_report(self, title: str, summary: str) -> bool:
+    async def send_investigation_report(
+        self, title: str, summary: str, *, channel_metadata: dict[str, str] | None = None,
+    ) -> bool:
         if not self._bot_token or not self._channel_id:
             return True
         try:
@@ -325,15 +337,71 @@ class SlackChannel(NotificationChannel):
                 },
             ]
 
-            await client.chat_postMessage(
-                channel=self._channel_id,
-                text=f"AI Investigation Report — {title}",
-                blocks=blocks,
+            # Thread under original alert if we have thread_ts
+            thread_ts = None
+            if channel_metadata:
+                thread_ts = channel_metadata.get(f"slack:{self._channel_id}")
+
+            await self._post_with_retry(
+                client, blocks, title, thread_ts=thread_ts,
             )
             return True
         except Exception:
             logger.exception("Slack investigation report failed")
             return False
+
+    async def _post_with_retry(
+        self,
+        client: Any,
+        blocks: list[dict[str, Any]],
+        title: str,
+        *,
+        thread_ts: str | None = None,
+        max_retries: int = 3,
+    ) -> Any:
+        """Post a message with exponential backoff retry."""
+        delays = [1.5, 2.5, 4.5]
+        last_exc: Exception | None = None
+
+        for attempt in range(max_retries):
+            try:
+                kwargs: dict[str, Any] = {
+                    "channel": self._channel_id,
+                    "text": f"AI Investigation Report — {title}",
+                    "blocks": blocks,
+                }
+                if thread_ts:
+                    kwargs["thread_ts"] = thread_ts
+                return await client.chat_postMessage(**kwargs)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    delay = delays[attempt] if attempt < len(delays) else delays[-1]
+                    logger.warning(
+                        "Slack post attempt %d failed, retrying in %.1fs: %s",
+                        attempt + 1,
+                        delay,
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
+
+        # All retries exhausted — fall back to top-level if threaded
+        if thread_ts:
+            logger.warning(
+                "Threaded post failed after %d retries, falling back to top-level",
+                max_retries,
+            )
+            try:
+                return await client.chat_postMessage(
+                    channel=self._channel_id,
+                    text=f"AI Investigation Report — {title}",
+                    blocks=blocks,
+                )
+            except Exception:
+                logger.exception("Top-level fallback also failed")
+
+        if last_exc:
+            raise last_exc
 
     async def test_connection(self) -> dict[str, Any]:
         """Test the Slack connection and send a test message."""
@@ -415,7 +483,9 @@ class EmailChannel(NotificationChannel):
             logger.exception("Email notification failed")
             return False
 
-    async def send_investigation_report(self, title: str, summary: str) -> bool:
+    async def send_investigation_report(
+        self, title: str, summary: str, *, channel_metadata: dict[str, str] | None = None,
+    ) -> bool:
         if not self._to_addrs:
             return True
         try:
