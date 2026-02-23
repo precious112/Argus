@@ -20,7 +20,7 @@
 ---
 
 <!-- REPLACE WITH DEMO VIDEO WHEN READY -->
-<!-- ![Argus Dashboard](screenshot-path-here) -->
+![Argus Dashboard](https://raw.githubusercontent.com/precious112/Pstore_backend/refs/heads/master/media/media/Screenshot%202026-02-23%20at%207.27.19%20AM.png)
 
 ## Why Argus
 
