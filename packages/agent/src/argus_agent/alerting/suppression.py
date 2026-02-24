@@ -14,6 +14,13 @@ from argus_agent.storage.models import AlertAcknowledgment, AlertRuleMute
 logger = logging.getLogger("argus.alerting.suppression")
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure a datetime is UTC-aware (SQLite returns naive datetimes)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
+
 class SuppressionService:
     """Read/write alert acknowledgments and rule mutes in the DB."""
 
@@ -84,7 +91,7 @@ class SuppressionService:
 
             active = []
             for row in rows:
-                if row.expires_at is not None and now >= row.expires_at:
+                if row.expires_at is not None and now >= _ensure_utc(row.expires_at):
                     row.active = False
                     continue
                 active.append(self._ack_to_dict(row))
@@ -156,7 +163,7 @@ class SuppressionService:
 
             active = []
             for row in rows:
-                if now >= row.expires_at:
+                if now >= _ensure_utc(row.expires_at):
                     row.active = False
                     continue
                 active.append(self._mute_to_dict(row))
@@ -177,12 +184,12 @@ class SuppressionService:
         for ack in acks:
             expires = None
             if ack["expires_at"]:
-                expires = datetime.fromisoformat(ack["expires_at"])
+                expires = _ensure_utc(datetime.fromisoformat(ack["expires_at"]))
             engine._acknowledged_keys[ack["dedup_key"]] = expires
 
         mutes = await self.get_active_mutes()
         for mute in mutes:
-            expires = datetime.fromisoformat(mute["expires_at"])
+            expires = _ensure_utc(datetime.fromisoformat(mute["expires_at"]))
             engine._muted_rules[mute["rule_id"]] = expires
 
         logger.info(
