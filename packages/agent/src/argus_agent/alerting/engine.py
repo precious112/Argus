@@ -306,6 +306,14 @@ class AlertEngine:
             self._active_alerts.append(alert)
             logger.info("Alert fired: %s [%s] %s", rule.name, event.severity, event.message)
 
+            # Persist to database
+            try:
+                from argus_agent.storage.alert_history import AlertHistoryService
+
+                await AlertHistoryService().save(alert, event)
+            except Exception:
+                logger.exception("Failed to persist alert %s to database", alert.id)
+
             # Send to notification channels (WebSocket — immediate, unfiltered)
             for channel in self._channels:
                 try:

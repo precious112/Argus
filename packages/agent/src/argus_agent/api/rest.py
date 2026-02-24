@@ -75,41 +75,14 @@ async def list_alerts(
     status: str | None = None,
 ) -> dict[str, Any]:
     """List alerts, optionally filtering by resolved status, severity, and state."""
-    from argus_agent.main import _get_alert_engine
+    try:
+        from argus_agent.storage.alert_history import AlertHistoryService
 
-    engine = _get_alert_engine()
-    if engine is None:
+        svc = AlertHistoryService()
+        items = await svc.list_alerts(resolved=resolved, severity=severity, status=status)
+        return {"alerts": items, "count": len(items)}
+    except RuntimeError:
         return {"alerts": [], "count": 0}
-
-    include_resolved = resolved is True if resolved is not None else False
-    show_all = include_resolved or resolved is None or status is not None
-    alerts = engine.get_active_alerts(include_resolved=show_all)
-
-    items = []
-    for a in alerts:
-        if resolved is not None and a.resolved != resolved:
-            continue
-        if severity and str(a.severity) != severity.upper():
-            continue
-        if status and str(a.status) != status.lower():
-            continue
-        items.append({
-            "id": a.id,
-            "rule_id": a.rule_id,
-            "rule_name": a.rule_name,
-            "severity": str(a.severity),
-            "message": a.event.message,
-            "source": str(a.event.source),
-            "event_type": str(a.event.type),
-            "timestamp": a.timestamp.isoformat(),
-            "resolved": a.resolved,
-            "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
-            "status": str(a.status),
-            "acknowledged_at": a.acknowledged_at.isoformat() if a.acknowledged_at else None,
-            "acknowledged_by": a.acknowledged_by or None,
-        })
-
-    return {"alerts": items, "count": len(items)}
 
 
 @router.post("/alerts/{alert_id}/resolve")
@@ -124,6 +97,19 @@ async def resolve_alert(alert_id: str) -> dict[str, Any]:
     success = engine.resolve_alert(alert_id)
     if not success:
         raise HTTPException(status_code=404, detail="Alert not found or already resolved")
+
+    # Persist to DB
+    try:
+        from argus_agent.storage.alert_history import AlertHistoryService
+
+        await AlertHistoryService().update_status(
+            alert_id,
+            status="resolved",
+            resolved=True,
+            resolved_at=datetime.now(UTC),
+        )
+    except Exception:
+        pass  # Don't break the endpoint if DB write fails
 
     return {"status": "resolved", "alert_id": alert_id}
 
@@ -148,7 +134,7 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
     if not success:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    # Persist to DB
+    # Persist suppression to DB
     alert = next((a for a in engine._active_alerts if a.id == alert_id), None)
     if alert:
         dedup_key = f"{alert.event.source}:{alert.rule_id}"
@@ -161,6 +147,19 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
             reason=reason,
             expires_at=expires_at,
         )
+
+    # Persist alert status to DB
+    try:
+        from argus_agent.storage.alert_history import AlertHistoryService
+
+        await AlertHistoryService().update_status(
+            alert_id,
+            status="acknowledged",
+            acknowledged_at=datetime.now(UTC),
+            acknowledged_by="user",
+        )
+    except Exception:
+        pass
 
     return {"status": "acknowledged", "alert_id": alert_id}
 
@@ -182,11 +181,24 @@ async def unacknowledge_alert(alert_id: str) -> dict[str, Any]:
     if not success:
         raise HTTPException(status_code=404, detail="Alert not found or not acknowledged")
 
-    # Remove from DB
+    # Remove suppression from DB
     if alert:
         dedup_key = f"{alert.event.source}:{alert.rule_id}"
         svc = SuppressionService()
         await svc.unacknowledge(dedup_key)
+
+    # Persist alert status to DB
+    try:
+        from argus_agent.storage.alert_history import AlertHistoryService
+
+        await AlertHistoryService().update_status(
+            alert_id,
+            status="active",
+            acknowledged_at=None,
+            acknowledged_by="",
+        )
+    except Exception:
+        pass
 
     return {"status": "active", "alert_id": alert_id}
 

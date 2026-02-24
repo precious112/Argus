@@ -77,9 +77,14 @@ class AlertHistory(Base):
     __tablename__ = "alert_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alert_id: Mapped[str] = mapped_column(String(36), index=True, default="")
+    rule_id: Mapped[str] = mapped_column(String(100), default="")
+    rule_name: Mapped[str] = mapped_column(String(255), default="")
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     severity: Mapped[str] = mapped_column(String(20))  # CRITICAL, WARNING, INFO
     title: Mapped[str] = mapped_column(String(255))
+    message: Mapped[str] = mapped_column(Text, default="")
+    event_type: Mapped[str] = mapped_column(String(50), default="")
     summary: Mapped[str] = mapped_column(Text, default="")
     source: Mapped[str] = mapped_column(String(100), default="")
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
