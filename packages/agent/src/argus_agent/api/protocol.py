@@ -41,6 +41,7 @@ class ServerMessageType(StrEnum):
     ACTION_EXECUTING = "action_executing"
     ACTION_COMPLETE = "action_complete"
     ALERT = "alert"
+    ALERT_STATE_CHANGE = "alert_state_change"
     INVESTIGATION_START = "investigation_start"
     INVESTIGATION_UPDATE = "investigation_update"
     INVESTIGATION_END = "investigation_end"
@@ -91,3 +92,5 @@ class AlertMessage(BaseModel):
     source: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     investigation_thread_id: str | None = None
+    status: str | None = None  # active, acknowledged, resolved
+    rule_id: str | None = None

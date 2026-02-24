@@ -33,6 +33,7 @@ export type ServerMessageType =
   | "action_executing"
   | "action_complete"
   | "alert"
+  | "alert_state_change"
   | "investigation_start"
   | "investigation_update"
   | "investigation_end"
@@ -75,6 +76,8 @@ export interface AlertData {
   source: string;
   timestamp: string;
   investigation_thread_id?: string;
+  status?: string;
+  rule_id?: string;
 }
 
 export interface BudgetStatus {

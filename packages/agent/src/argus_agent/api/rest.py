@@ -72,8 +72,9 @@ async def system_status() -> dict[str, Any]:
 async def list_alerts(
     resolved: bool | None = None,
     severity: str | None = None,
+    status: str | None = None,
 ) -> dict[str, Any]:
-    """List alerts, optionally filtering by resolved status and severity."""
+    """List alerts, optionally filtering by resolved status, severity, and state."""
     from argus_agent.main import _get_alert_engine
 
     engine = _get_alert_engine()
@@ -81,13 +82,16 @@ async def list_alerts(
         return {"alerts": [], "count": 0}
 
     include_resolved = resolved is True if resolved is not None else False
-    alerts = engine.get_active_alerts(include_resolved=include_resolved or resolved is None)
+    show_all = include_resolved or resolved is None or status is not None
+    alerts = engine.get_active_alerts(include_resolved=show_all)
 
     items = []
     for a in alerts:
         if resolved is not None and a.resolved != resolved:
             continue
         if severity and str(a.severity) != severity.upper():
+            continue
+        if status and str(a.status) != status.lower():
             continue
         items.append({
             "id": a.id,
@@ -100,6 +104,9 @@ async def list_alerts(
             "timestamp": a.timestamp.isoformat(),
             "resolved": a.resolved,
             "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
+            "status": str(a.status),
+            "acknowledged_at": a.acknowledged_at.isoformat() if a.acknowledged_at else None,
+            "acknowledged_by": a.acknowledged_by or None,
         })
 
     return {"alerts": items, "count": len(items)}
@@ -119,6 +126,173 @@ async def resolve_alert(alert_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Alert not found or already resolved")
 
     return {"status": "resolved", "alert_id": alert_id}
+
+
+@router.post("/alerts/{alert_id}/acknowledge")
+async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Acknowledge an alert and suppress its dedup_key."""
+    from argus_agent.alerting.suppression import SuppressionService
+    from argus_agent.main import _get_alert_engine
+
+    engine = _get_alert_engine()
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Alert engine not initialized")
+
+    body = body or {}
+    expires_hours = body.get("expires_hours")
+    reason = body.get("reason", "")
+
+    expires_at = None
+    if expires_hours is not None:
+        expires_at = datetime.now(UTC) + timedelta(hours=float(expires_hours))
+
+    success = engine.acknowledge_alert(alert_id, acknowledged_by="user", expires_at=expires_at)
+    if not success:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    # Persist to DB
+    alert = next((a for a in engine._active_alerts if a.id == alert_id), None)
+    if alert:
+        dedup_key = f"{alert.event.source}:{alert.rule_id}"
+        svc = SuppressionService()
+        await svc.acknowledge(
+            dedup_key=dedup_key,
+            rule_id=alert.rule_id,
+            source=str(alert.event.source),
+            acknowledged_by="user",
+            reason=reason,
+            expires_at=expires_at,
+        )
+
+    return {"status": "acknowledged", "alert_id": alert_id}
+
+
+@router.post("/alerts/{alert_id}/unacknowledge")
+async def unacknowledge_alert(alert_id: str) -> dict[str, Any]:
+    """Remove acknowledgment from an alert."""
+    from argus_agent.alerting.suppression import SuppressionService
+    from argus_agent.main import _get_alert_engine
+
+    engine = _get_alert_engine()
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Alert engine not initialized")
+
+    # Get dedup_key before removing from engine
+    alert = next((a for a in engine._active_alerts if a.id == alert_id), None)
+
+    success = engine.unacknowledge_alert(alert_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Alert not found or not acknowledged")
+
+    # Remove from DB
+    if alert:
+        dedup_key = f"{alert.event.source}:{alert.rule_id}"
+        svc = SuppressionService()
+        await svc.unacknowledge(dedup_key)
+
+    return {"status": "active", "alert_id": alert_id}
+
+
+@router.post("/rules/{rule_id}/mute")
+async def mute_rule(rule_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Mute a rule for N hours (default 24, max 168)."""
+    from argus_agent.alerting.suppression import SuppressionService
+    from argus_agent.main import _get_alert_engine
+
+    engine = _get_alert_engine()
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Alert engine not initialized")
+
+    body = body or {}
+    duration_hours = min(float(body.get("duration_hours", 24)), 168)
+    reason = body.get("reason", "")
+
+    expires_at = datetime.now(UTC) + timedelta(hours=duration_hours)
+
+    success = engine.mute_rule(rule_id, expires_at)
+    if not success:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    # Persist to DB
+    svc = SuppressionService()
+    await svc.mute_rule(
+        rule_id=rule_id,
+        muted_by="user",
+        reason=reason,
+        expires_at=expires_at,
+    )
+
+    return {"status": "muted", "rule_id": rule_id, "expires_at": expires_at.isoformat()}
+
+
+@router.post("/rules/{rule_id}/unmute")
+async def unmute_rule(rule_id: str) -> dict[str, Any]:
+    """Unmute a rule."""
+    from argus_agent.alerting.suppression import SuppressionService
+    from argus_agent.main import _get_alert_engine
+
+    engine = _get_alert_engine()
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Alert engine not initialized")
+
+    engine.unmute_rule(rule_id)
+
+    svc = SuppressionService()
+    await svc.unmute_rule(rule_id)
+
+    return {"status": "unmuted", "rule_id": rule_id}
+
+
+@router.get("/rules")
+async def list_rules() -> dict[str, Any]:
+    """List all alert rules with mute status."""
+    from argus_agent.main import _get_alert_engine
+
+    engine = _get_alert_engine()
+    if engine is None:
+        return {"rules": [], "count": 0}
+
+    rules = engine.get_rules()
+    muted = engine.get_muted_rules()
+
+    items = []
+    for rule in rules.values():
+        mute_expires = muted.get(rule.id)
+        items.append({
+            "id": rule.id,
+            "name": rule.name,
+            "event_types": rule.event_types,
+            "min_severity": str(rule.min_severity),
+            "max_severity": str(rule.max_severity) if rule.max_severity else None,
+            "cooldown_seconds": rule.cooldown_seconds,
+            "auto_investigate": rule.auto_investigate,
+            "muted": rule.id in muted,
+            "mute_expires_at": mute_expires.isoformat() if mute_expires else None,
+        })
+
+    return {"rules": items, "count": len(items)}
+
+
+@router.get("/alerts/suppression")
+async def get_suppression_status() -> dict[str, Any]:
+    """Return current acknowledged keys and muted rules."""
+    from argus_agent.main import _get_alert_engine
+
+    engine = _get_alert_engine()
+    if engine is None:
+        return {"acknowledged_keys": {}, "muted_rules": {}}
+
+    ack_keys = engine.get_acknowledged_keys()
+    muted = engine.get_muted_rules()
+
+    return {
+        "acknowledged_keys": {
+            k: v.isoformat() if v else None for k, v in ack_keys.items()
+        },
+        "muted_rules": {
+            k: v.isoformat() for k, v in muted.items()
+        },
+    }
 
 
 @router.get("/budget")

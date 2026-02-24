@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from argus_agent.agent.investigator import InvestigationRequest, InvestigationStatus
@@ -16,6 +17,12 @@ from argus_agent.events.types import Event, EventSeverity, EventType
 logger = logging.getLogger("argus.alerting.engine")
 
 InvestigateCallback = Callable[[InvestigationRequest], InvestigationStatus]
+
+
+class AlertState(StrEnum):
+    ACTIVE = "active"
+    ACKNOWLEDGED = "acknowledged"
+    RESOLVED = "resolved"
 
 
 @dataclass
@@ -44,6 +51,9 @@ class ActiveAlert:
     timestamp: datetime
     resolved: bool = False
     resolved_at: datetime | None = None
+    status: AlertState = AlertState.ACTIVE
+    acknowledged_at: datetime | None = None
+    acknowledged_by: str = ""
 
 
 # Default rules
@@ -170,6 +180,7 @@ class AlertEngine:
     - Deduplication with configurable cooldown per rule
     - Routes alerts to notification channels
     - Optional auto-investigation callback for urgent events
+    - Suppression via acknowledgment (dedup_key level) and muting (rule level)
     """
 
     def __init__(
@@ -186,6 +197,10 @@ class AlertEngine:
         self._active_alerts: list[ActiveAlert] = []
         self._last_fired: dict[str, datetime] = {}  # dedup_key -> last fire time
         self._last_investigated: dict[str, datetime] = {}  # dedup_key -> last investigation time
+        # Suppression state
+        # dedup_key -> expires_at (None = permanent)
+        self._acknowledged_keys: dict[str, datetime | None] = {}
+        self._muted_rules: dict[str, datetime] = {}  # rule_id -> expires_at
 
     def set_channels(self, channels: list[Any]) -> None:
         self._channels = channels
@@ -206,15 +221,45 @@ class AlertEngine:
         )
         logger.info("Alert engine started with %d rules", len(self._rules))
 
+    def _is_suppressed(self, dedup_key: str, rule_id: str) -> bool:
+        """Check if an alert should be suppressed via mute or acknowledgment."""
+        now = datetime.now(UTC)
+
+        # Check rule-level mute first
+        if rule_id in self._muted_rules:
+            expires = self._muted_rules[rule_id]
+            if now < expires:
+                return True
+            # Expired — clean up
+            del self._muted_rules[rule_id]
+
+        # Check dedup_key acknowledgment
+        if dedup_key in self._acknowledged_keys:
+            expires = self._acknowledged_keys[dedup_key]
+            if expires is None:
+                return True  # Permanent acknowledgment
+            if now < expires:
+                return True
+            # Expired — clean up
+            del self._acknowledged_keys[dedup_key]
+
+        return False
+
     async def _handle_event(self, event: Event) -> None:
         """Evaluate all rules against an incoming event."""
         for rule in self._rules.values():
             if not self._matches(rule, event):
                 continue
 
-            # Dedup / cooldown
             now = datetime.now(UTC)
             dedup_key = f"{event.source}:{rule.id}"
+
+            # Suppression check — before cooldown to short-circuit early
+            if self._is_suppressed(dedup_key, rule.id):
+                logger.debug("Alert suppressed for %s (acknowledged/muted)", dedup_key)
+                continue
+
+            # Dedup / cooldown
             last = self._last_fired.get(dedup_key)
             if last and (now - last).total_seconds() < rule.cooldown_seconds:
                 continue
@@ -248,10 +293,12 @@ class AlertEngine:
                     logger.exception("Formatter submit error")
 
             # Auto-investigate urgent events (with separate investigation cooldown)
+            # Also gated behind suppression check
             if (
                 rule.auto_investigate
                 and event.severity == EventSeverity.URGENT
                 and self._on_investigate
+                and not self._is_suppressed(dedup_key, rule.id)
             ):
                 invest_last = self._last_investigated.get(dedup_key)
                 if (
@@ -292,10 +339,81 @@ class AlertEngine:
             return list(self._active_alerts)
         return [a for a in self._active_alerts if not a.resolved]
 
+    def get_rules(self) -> dict[str, AlertRule]:
+        """Return all alert rules."""
+        return dict(self._rules)
+
     def resolve_alert(self, alert_id: str) -> bool:
         for alert in self._active_alerts:
             if alert.id == alert_id and not alert.resolved:
                 alert.resolved = True
                 alert.resolved_at = datetime.now(UTC)
+                alert.status = AlertState.RESOLVED
+                # Clear acknowledgment for this alert's dedup_key
+                dedup_key = f"{alert.event.source}:{alert.rule_id}"
+                self._acknowledged_keys.pop(dedup_key, None)
                 return True
         return False
+
+    def acknowledge_alert(
+        self,
+        alert_id: str,
+        *,
+        acknowledged_by: str = "user",
+        expires_at: datetime | None = None,
+    ) -> bool:
+        """Acknowledge an alert and suppress its dedup_key."""
+        for alert in self._active_alerts:
+            if alert.id == alert_id:
+                now = datetime.now(UTC)
+                alert.status = AlertState.ACKNOWLEDGED
+                alert.acknowledged_at = now
+                alert.acknowledged_by = acknowledged_by
+                dedup_key = f"{alert.event.source}:{alert.rule_id}"
+                self._acknowledged_keys[dedup_key] = expires_at
+                return True
+        return False
+
+    def unacknowledge_alert(self, alert_id: str) -> bool:
+        """Remove acknowledgment from an alert."""
+        for alert in self._active_alerts:
+            if alert.id == alert_id and alert.status == AlertState.ACKNOWLEDGED:
+                alert.status = AlertState.ACTIVE
+                alert.acknowledged_at = None
+                alert.acknowledged_by = ""
+                dedup_key = f"{alert.event.source}:{alert.rule_id}"
+                self._acknowledged_keys.pop(dedup_key, None)
+                return True
+        return False
+
+    def mute_rule(self, rule_id: str, expires_at: datetime) -> bool:
+        """Mute a rule until expires_at."""
+        if rule_id not in self._rules:
+            return False
+        self._muted_rules[rule_id] = expires_at
+        logger.info("Rule %s muted until %s", rule_id, expires_at.isoformat())
+        return True
+
+    def unmute_rule(self, rule_id: str) -> bool:
+        """Unmute a rule."""
+        if rule_id in self._muted_rules:
+            del self._muted_rules[rule_id]
+            logger.info("Rule %s unmuted", rule_id)
+            return True
+        return False
+
+    def get_muted_rules(self) -> dict[str, datetime]:
+        """Return currently muted rules (auto-expires stale entries)."""
+        now = datetime.now(UTC)
+        expired = [k for k, v in self._muted_rules.items() if now >= v]
+        for k in expired:
+            del self._muted_rules[k]
+        return dict(self._muted_rules)
+
+    def get_acknowledged_keys(self) -> dict[str, datetime | None]:
+        """Return currently acknowledged dedup keys (auto-expires stale entries)."""
+        now = datetime.now(UTC)
+        expired = [k for k, v in self._acknowledged_keys.items() if v is not None and now >= v]
+        for k in expired:
+            del self._acknowledged_keys[k]
+        return dict(self._acknowledged_keys)

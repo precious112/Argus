@@ -50,6 +50,26 @@ export function useChat() {
     setAlerts((prev) => prev.filter((a) => a.id !== alertId));
   }, []);
 
+  const acknowledgeAlert = useCallback(async (alertId: string) => {
+    const apiBase =
+      process.env.NEXT_PUBLIC_ARGUS_URL || "http://localhost:7600";
+    try {
+      await fetch(`${apiBase}/api/v1/alerts/${alertId}/acknowledge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      // Update local state
+      setAlerts((prev) =>
+        prev.map((a) =>
+          a.id === alertId ? { ...a, status: "acknowledged" } : a,
+        ),
+      );
+    } catch {
+      // ignore
+    }
+  }, []);
+
   /** Flush any accumulated text into a text segment. */
   const finalizeTextSegment = useCallback(() => {
     if (currentTextRef.current.trim()) {
@@ -501,6 +521,18 @@ export function useChat() {
           break;
         }
 
+        case "alert_state_change": {
+          const stateData = msg.data as { id: string; status: string };
+          setAlerts((prev) =>
+            prev.map((a) =>
+              a.id === stateData.id
+                ? { ...a, status: stateData.status }
+                : a,
+            ),
+          );
+          break;
+        }
+
         case "budget_update":
           setBudgetStatus(msg.data as unknown as BudgetStatus);
           break;
@@ -583,6 +615,7 @@ export function useChat() {
     alerts,
     budgetStatus,
     dismissAlert,
+    acknowledgeAlert,
     handleServerMessage,
     addUserMessage,
   };
