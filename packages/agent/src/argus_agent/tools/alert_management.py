@@ -23,7 +23,8 @@ class AcknowledgeAlertTool(Tool):
         return (
             "Acknowledge an alert by ID. This marks the alert as acknowledged and "
             "suppresses future alerts for the same condition (dedup key). "
-            "Optionally set an expiry in hours (default: permanent)."
+            "Optionally set an expiry in hours (default: 24h). "
+            "Ack auto-clears if the condition resolves and a new incident starts."
         )
 
     @property
@@ -41,7 +42,7 @@ class AcknowledgeAlertTool(Tool):
                 },
                 "expires_hours": {
                     "type": "number",
-                    "description": "Hours until acknowledgment expires (omit for permanent)",
+                    "description": "Hours until acknowledgment expires (default: 24)",
                 },
                 "reason": {
                     "type": "string",
@@ -60,12 +61,10 @@ class AcknowledgeAlertTool(Tool):
             return {"error": "Alert engine not initialized"}
 
         alert_id = kwargs["alert_id"]
-        expires_hours = kwargs.get("expires_hours")
+        expires_hours = float(kwargs.get("expires_hours", 24))
         reason = kwargs.get("reason", "")
 
-        expires_at = None
-        if expires_hours is not None:
-            expires_at = datetime.now(UTC) + timedelta(hours=float(expires_hours))
+        expires_at = datetime.now(UTC) + timedelta(hours=expires_hours)
 
         success = engine.acknowledge_alert(
             alert_id, acknowledged_by="ai", expires_at=expires_at,
@@ -90,7 +89,7 @@ class AcknowledgeAlertTool(Tool):
         return {
             "status": "acknowledged",
             "alert_id": alert_id,
-            "expires_at": expires_at.isoformat() if expires_at else "permanent",
+            "expires_at": expires_at.isoformat(),
         }
 
 

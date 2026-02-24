@@ -197,9 +197,9 @@ class AlertEngine:
         self._active_alerts: list[ActiveAlert] = []
         self._last_fired: dict[str, datetime] = {}  # dedup_key -> last fire time
         self._last_investigated: dict[str, datetime] = {}  # dedup_key -> last investigation time
+        self._last_event_seen: dict[str, datetime] = {}  # dedup_key -> last matching event time
         # Suppression state
-        # dedup_key -> expires_at (None = permanent)
-        self._acknowledged_keys: dict[str, datetime | None] = {}
+        self._acknowledged_keys: dict[str, datetime] = {}  # dedup_key -> expires_at
         self._muted_rules: dict[str, datetime] = {}  # rule_id -> expires_at
 
     def set_channels(self, channels: list[Any]) -> None:
@@ -221,9 +221,21 @@ class AlertEngine:
         )
         logger.info("Alert engine started with %d rules", len(self._rules))
 
-    def _is_suppressed(self, dedup_key: str, rule_id: str) -> bool:
-        """Check if an alert should be suppressed via mute or acknowledgment."""
-        now = datetime.now(UTC)
+    def _is_suppressed(
+        self,
+        dedup_key: str,
+        rule_id: str,
+        *,
+        previous_seen: datetime | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Check if an alert should be suppressed via mute or acknowledgment.
+
+        If *previous_seen* is provided and the gap since that timestamp exceeds
+        the rule's cooldown, any acknowledgment for this dedup_key is auto-cleared
+        (the condition resolved and a new incident started).
+        """
+        now = now or datetime.now(UTC)
 
         # Check rule-level mute first
         if rule_id in self._muted_rules:
@@ -233,15 +245,28 @@ class AlertEngine:
             # Expired — clean up
             del self._muted_rules[rule_id]
 
-        # Check dedup_key acknowledgment
+        # Check dedup_key acknowledgment with gap detection
         if dedup_key in self._acknowledged_keys:
-            expires = self._acknowledged_keys[dedup_key]
-            if expires is None:
-                return True  # Permanent acknowledgment
-            if now < expires:
-                return True
-            # Expired — clean up
-            del self._acknowledged_keys[dedup_key]
+            # If there's a gap in events longer than the rule's cooldown,
+            # the condition resolved — clear ack, this is a new incident
+            if previous_seen is not None:
+                rule = self._rules.get(rule_id)
+                gap_threshold = rule.cooldown_seconds if rule else 300
+                gap = (now - previous_seen).total_seconds()
+                if gap > gap_threshold:
+                    del self._acknowledged_keys[dedup_key]
+                    logger.info(
+                        "Ack auto-cleared for %s (event gap %.0fs > cooldown %ds)",
+                        dedup_key, gap, gap_threshold,
+                    )
+                    return False
+
+            # No gap (or first event) — check expiry
+            ack_expires = self._acknowledged_keys[dedup_key]
+            if now >= ack_expires:
+                del self._acknowledged_keys[dedup_key]
+                return False
+            return True
 
         return False
 
@@ -254,8 +279,12 @@ class AlertEngine:
             now = datetime.now(UTC)
             dedup_key = f"{event.source}:{rule.id}"
 
+            # Track when we last saw a matching event (even if suppressed)
+            previous_seen = self._last_event_seen.get(dedup_key)
+            self._last_event_seen[dedup_key] = now
+
             # Suppression check — before cooldown to short-circuit early
-            if self._is_suppressed(dedup_key, rule.id):
+            if self._is_suppressed(dedup_key, rule.id, previous_seen=previous_seen, now=now):
                 logger.debug("Alert suppressed for %s (acknowledged/muted)", dedup_key)
                 continue
 
@@ -298,7 +327,7 @@ class AlertEngine:
                 rule.auto_investigate
                 and event.severity == EventSeverity.URGENT
                 and self._on_investigate
-                and not self._is_suppressed(dedup_key, rule.id)
+                and not self._is_suppressed(dedup_key, rule.id, now=now)
             ):
                 invest_last = self._last_investigated.get(dedup_key)
                 if (
@@ -362,7 +391,14 @@ class AlertEngine:
         acknowledged_by: str = "user",
         expires_at: datetime | None = None,
     ) -> bool:
-        """Acknowledge an alert and suppress its dedup_key."""
+        """Acknowledge an alert and suppress its dedup_key.
+
+        *expires_at* defaults to 24h from now as a safety cap.  Gap detection
+        in ``_is_suppressed`` handles the normal "condition resolved" case;
+        the 24h cap covers edge cases where events never resume.
+        """
+        from datetime import timedelta
+
         for alert in self._active_alerts:
             if alert.id == alert_id:
                 now = datetime.now(UTC)
@@ -370,6 +406,9 @@ class AlertEngine:
                 alert.acknowledged_at = now
                 alert.acknowledged_by = acknowledged_by
                 dedup_key = f"{alert.event.source}:{alert.rule_id}"
+                # Always enforce a maximum expiry (24h safety cap)
+                if expires_at is None:
+                    expires_at = now + timedelta(hours=24)
                 self._acknowledged_keys[dedup_key] = expires_at
                 return True
         return False
@@ -410,10 +449,10 @@ class AlertEngine:
             del self._muted_rules[k]
         return dict(self._muted_rules)
 
-    def get_acknowledged_keys(self) -> dict[str, datetime | None]:
+    def get_acknowledged_keys(self) -> dict[str, datetime]:
         """Return currently acknowledged dedup keys (auto-expires stale entries)."""
         now = datetime.now(UTC)
-        expired = [k for k, v in self._acknowledged_keys.items() if v is not None and now >= v]
+        expired = [k for k, v in self._acknowledged_keys.items() if now >= v]
         for k in expired:
             del self._acknowledged_keys[k]
         return dict(self._acknowledged_keys)

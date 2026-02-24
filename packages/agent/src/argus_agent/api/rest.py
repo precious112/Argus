@@ -139,12 +139,10 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
         raise HTTPException(status_code=503, detail="Alert engine not initialized")
 
     body = body or {}
-    expires_hours = body.get("expires_hours")
+    expires_hours = float(body.get("expires_hours", 24))
     reason = body.get("reason", "")
 
-    expires_at = None
-    if expires_hours is not None:
-        expires_at = datetime.now(UTC) + timedelta(hours=float(expires_hours))
+    expires_at = datetime.now(UTC) + timedelta(hours=expires_hours)
 
     success = engine.acknowledge_alert(alert_id, acknowledged_by="user", expires_at=expires_at)
     if not success:
@@ -287,7 +285,7 @@ async def get_suppression_status() -> dict[str, Any]:
 
     return {
         "acknowledged_keys": {
-            k: v.isoformat() if v else None for k, v in ack_keys.items()
+            k: v.isoformat() for k, v in ack_keys.items()
         },
         "muted_rules": {
             k: v.isoformat() for k, v in muted.items()
