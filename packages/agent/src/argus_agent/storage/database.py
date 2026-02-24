@@ -74,7 +74,10 @@ async def init_db(db_path: str) -> None:
     _session_factory = sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
     async with _engine.begin() as conn:
-        await conn.run_sync(_migrate_missing_columns)
+        try:
+            await conn.run_sync(_migrate_missing_columns)
+        except Exception:
+            logger.exception("Column migration failed (non-fatal)")
         await conn.run_sync(Base.metadata.create_all)
 
     logger.info("SQLite database initialized at %s", db_path)

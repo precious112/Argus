@@ -75,14 +75,51 @@ async def list_alerts(
     status: str | None = None,
 ) -> dict[str, Any]:
     """List alerts, optionally filtering by resolved status, severity, and state."""
+    # Try DB first
     try:
         from argus_agent.storage.alert_history import AlertHistoryService
 
         svc = AlertHistoryService()
         items = await svc.list_alerts(resolved=resolved, severity=severity, status=status)
-        return {"alerts": items, "count": len(items)}
-    except RuntimeError:
+        if items:
+            return {"alerts": items, "count": len(items)}
+    except Exception:
+        pass
+
+    # Fall back to in-memory alerts
+    from argus_agent.main import _get_alert_engine
+
+    engine = _get_alert_engine()
+    if engine is None:
         return {"alerts": [], "count": 0}
+
+    include_resolved = resolved is None or resolved
+    alerts = engine.get_active_alerts(include_resolved=include_resolved)
+
+    items = []
+    for a in alerts:
+        if severity and str(a.severity) != severity:
+            continue
+        a_status = "resolved" if a.resolved else ("acknowledged" if a.acknowledged_at else "active")
+        if status and a_status != status:
+            continue
+        items.append({
+            "id": a.id,
+            "rule_id": a.rule_id,
+            "rule_name": a.rule_name,
+            "severity": str(a.severity),
+            "message": a.event.message,
+            "source": str(a.event.source),
+            "event_type": str(a.event.event_type),
+            "timestamp": a.timestamp.isoformat(),
+            "resolved": a.resolved,
+            "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
+            "status": a_status,
+            "acknowledged_at": a.acknowledged_at.isoformat() if a.acknowledged_at else None,
+            "acknowledged_by": a.acknowledged_by,
+        })
+
+    return {"alerts": items, "count": len(items)}
 
 
 @router.post("/alerts/{alert_id}/resolve")

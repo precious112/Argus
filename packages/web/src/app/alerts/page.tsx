@@ -31,7 +31,7 @@ interface RuleItem {
 }
 
 const API_BASE =
-  process.env.NEXT_PUBLIC_ARGUS_URL || "http://localhost:7600";
+  process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:7600/api/v1";
 
 export default function AlertsPage() {
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
@@ -47,7 +47,7 @@ export default function AlertsPage() {
       const params = new URLSearchParams();
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (severityFilter !== "all") params.set("severity", severityFilter);
-      const res = await fetch(`${API_BASE}/api/v1/alerts?${params}`);
+      const res = await fetch(`${API_BASE}/alerts?${params}`);
       const data = await res.json();
       setAlerts(data.alerts || []);
     } catch {
@@ -57,7 +57,7 @@ export default function AlertsPage() {
 
   const fetchRules = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/v1/rules`);
+      const res = await fetch(`${API_BASE}/rules`);
       const data = await res.json();
       setRules(data.rules || []);
     } catch {
@@ -79,7 +79,7 @@ export default function AlertsPage() {
   }, [fetchAlerts, fetchRules]);
 
   const acknowledgeAlert = async (alertId: string) => {
-    await fetch(`${API_BASE}/api/v1/alerts/${alertId}/acknowledge`, {
+    await fetch(`${API_BASE}/alerts/${alertId}/acknowledge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -88,14 +88,14 @@ export default function AlertsPage() {
   };
 
   const resolveAlert = async (alertId: string) => {
-    await fetch(`${API_BASE}/api/v1/alerts/${alertId}/resolve`, {
+    await fetch(`${API_BASE}/alerts/${alertId}/resolve`, {
       method: "POST",
     });
     fetchAlerts();
   };
 
   const muteRule = async (ruleId: string, hours: number) => {
-    await fetch(`${API_BASE}/api/v1/rules/${ruleId}/mute`, {
+    await fetch(`${API_BASE}/rules/${ruleId}/mute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ duration_hours: hours }),
@@ -105,7 +105,7 @@ export default function AlertsPage() {
   };
 
   const unmuteRule = async (ruleId: string) => {
-    await fetch(`${API_BASE}/api/v1/rules/${ruleId}/unmute`, {
+    await fetch(`${API_BASE}/rules/${ruleId}/unmute`, {
       method: "POST",
     });
     fetchRules();
