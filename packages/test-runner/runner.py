@@ -358,22 +358,39 @@ class MemoryPressure(Scenario):
 
 
 class SuspiciousActivity(Scenario):
-    """Create a suspicious process name and a temp executable artifact."""
+    """Create a suspicious process name and a temp executable artifact.
+
+    Runs only once — spawning repeated xmrig processes would just flood
+    the alerts page and make it impossible to test acknowledgment.
+    """
 
     name = "suspicious_activity"
+    _has_run = False
 
     async def run(self, targets: list[AppTarget]) -> None:
+        if SuspiciousActivity._has_run:
+            logger.info("=== Scenario: Suspicious Activity (already ran — skipping) ===")
+            return
+        SuspiciousActivity._has_run = True
+
         logger.info("=== Scenario: Suspicious Activity ===")
+
+        # Keep artifacts alive long enough for the security scanner to detect
+        # them.  The scanner runs every 300s so we wait 360s to guarantee at
+        # least one full scan cycle while the process / file exists.
+        keep_alive = 360
 
         # 1. Run a process with a suspicious name (like a crypto miner)
         fake_name = "xmrig"
         logger.info("Spawning suspicious process: %s", fake_name)
+        proc = None
+        tmp_dir = None
+        exe_path = None
         try:
-            # Create a temp script with suspicious name
             tmp_dir = tempfile.mkdtemp()
             script_path = os.path.join(tmp_dir, fake_name)
             with open(script_path, "w") as f:
-                f.write("#!/bin/sh\nsleep 330\n")
+                f.write("#!/bin/sh\nsleep %d\n" % (keep_alive + 30))
             os.chmod(script_path, stat.S_IRWXU)
             proc = subprocess.Popen(
                 [script_path],
@@ -381,9 +398,6 @@ class SuspiciousActivity(Scenario):
                 stderr=subprocess.DEVNULL,
             )
             logger.info("Suspicious process PID: %d", proc.pid)
-            await asyncio.sleep(330)
-            proc.terminate()
-            proc.wait(timeout=5)
         except Exception as exc:
             logger.warning("Suspicious process scenario error: %s", exc)
 
@@ -395,11 +409,26 @@ class SuspiciousActivity(Scenario):
             os.close(fd)
             os.chmod(exe_path, stat.S_IRWXU)
             logger.info("Temp executable at: %s", exe_path)
-            await asyncio.sleep(330)
-            os.unlink(exe_path)
-            logger.info("Temp executable removed")
         except Exception as exc:
             logger.warning("Executable artifact scenario error: %s", exc)
+            exe_path = None
+
+        # Wait once for both artifacts to be detected
+        await asyncio.sleep(keep_alive)
+
+        # Cleanup
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+        if exe_path:
+            try:
+                os.unlink(exe_path)
+                logger.info("Temp executable removed")
+            except OSError:
+                pass
 
         logger.info("=== Suspicious Activity complete ===")
 

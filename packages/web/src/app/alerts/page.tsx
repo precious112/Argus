@@ -39,21 +39,29 @@ export default function AlertsPage() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [severityFilter, setSeverityFilter] = useState<string>("all");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
   const [muteModal, setMuteModal] = useState<{ ruleId: string; ruleName: string } | null>(null);
   const [muteDuration, setMuteDuration] = useState(24);
+  const PAGE_SIZE = 50;
 
   const fetchAlerts = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (severityFilter !== "all") params.set("severity", severityFilter);
+      params.set("page", String(page));
+      params.set("page_size", String(PAGE_SIZE));
       const res = await fetch(`${API_BASE}/alerts?${params}`);
       const data = await res.json();
       setAlerts(data.alerts || []);
+      setTotal(data.total ?? data.count ?? 0);
+      setTotalPages(data.total_pages ?? 1);
     } catch {
       // ignore
     }
-  }, [statusFilter, severityFilter]);
+  }, [statusFilter, severityFilter, page]);
 
   const fetchRules = useCallback(async () => {
     try {
@@ -128,7 +136,7 @@ export default function AlertsPage() {
           <div className="flex items-center gap-3">
             <select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
               className="rounded border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-sm text-[var(--foreground)]"
             >
               <option value="all">All Status</option>
@@ -138,7 +146,7 @@ export default function AlertsPage() {
             </select>
             <select
               value={severityFilter}
-              onChange={(e) => setSeverityFilter(e.target.value)}
+              onChange={(e) => { setSeverityFilter(e.target.value); setPage(1); }}
               className="rounded border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-sm text-[var(--foreground)]"
             >
               <option value="all">All Severity</option>
@@ -146,7 +154,9 @@ export default function AlertsPage() {
               <option value="URGENT">Urgent</option>
             </select>
             <span className="text-sm text-[var(--muted)]">
-              {alerts.length} alert{alerts.length !== 1 ? "s" : ""}
+              {total > 0
+                ? `${(page - 1) * PAGE_SIZE + 1}\u2013${Math.min(page * PAGE_SIZE, total)} of ${total} alert${total !== 1 ? "s" : ""}`
+                : "0 alerts"}
             </span>
           </div>
         </div>
@@ -156,6 +166,7 @@ export default function AlertsPage() {
             No alerts found
           </div>
         ) : (
+          <>
           <div className="overflow-hidden rounded-lg border border-[var(--border)]">
             <table className="w-full text-sm">
               <thead>
@@ -233,6 +244,32 @@ export default function AlertsPage() {
               </tbody>
             </table>
           </div>
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="mt-3 flex items-center justify-between text-sm">
+              <span className="text-[var(--muted)]">
+                Page {page} of {totalPages}
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page <= 1}
+                  className="rounded border border-[var(--border)] px-3 py-1 text-[var(--foreground)] hover:bg-[var(--card)] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Prev
+                </button>
+                <button
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page >= totalPages}
+                  className="rounded border border-[var(--border)] px-3 py-1 text-[var(--foreground)] hover:bg-[var(--card)] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+          </>
         )}
       </div>
 

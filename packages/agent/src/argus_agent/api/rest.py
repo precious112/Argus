@@ -73,16 +73,33 @@ async def list_alerts(
     resolved: bool | None = None,
     severity: str | None = None,
     status: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
 ) -> dict[str, Any]:
-    """List alerts, optionally filtering by resolved status, severity, and state."""
+    """List alerts with pagination, optionally filtering by resolved status, severity, and state."""
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    offset = (page - 1) * page_size
+
     # Try DB first
     try:
         from argus_agent.storage.alert_history import AlertHistoryService
 
         svc = AlertHistoryService()
-        items = await svc.list_alerts(resolved=resolved, severity=severity, status=status)
-        if items:
-            return {"alerts": items, "count": len(items)}
+        items, total = await svc.list_alerts(
+            resolved=resolved, severity=severity, status=status,
+            limit=page_size, offset=offset,
+        )
+        if items or total > 0:
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            return {
+                "alerts": items,
+                "count": len(items),
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+            }
     except Exception:
         pass
 
@@ -91,19 +108,22 @@ async def list_alerts(
 
     engine = _get_alert_engine()
     if engine is None:
-        return {"alerts": [], "count": 0}
+        return {
+            "alerts": [], "count": 0, "total": 0,
+            "page": 1, "page_size": page_size, "total_pages": 1,
+        }
 
     include_resolved = resolved is None or resolved
     alerts = engine.get_active_alerts(include_resolved=include_resolved)
 
-    items = []
+    all_items = []
     for a in alerts:
         if severity and str(a.severity) != severity:
             continue
         a_status = "resolved" if a.resolved else ("acknowledged" if a.acknowledged_at else "active")
         if status and a_status != status:
             continue
-        items.append({
+        all_items.append({
             "id": a.id,
             "rule_id": a.rule_id,
             "rule_name": a.rule_name,
@@ -119,7 +139,18 @@ async def list_alerts(
             "acknowledged_by": a.acknowledged_by,
         })
 
-    return {"alerts": items, "count": len(items)}
+    total = len(all_items)
+    items = all_items[offset : offset + page_size]
+    total_pages = max(1, (total + page_size - 1) // page_size)
+
+    return {
+        "alerts": items,
+        "count": len(items),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
 
 
 @router.post("/alerts/{alert_id}/resolve")

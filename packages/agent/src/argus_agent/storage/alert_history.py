@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from argus_agent.storage.database import get_session
 from argus_agent.storage.models import AlertHistory
@@ -88,25 +88,39 @@ class AlertHistoryService:
         resolved: bool | None = None,
         severity: str | None = None,
         status: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Query AlertHistory with optional filters.
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Query AlertHistory with optional filters and pagination.
 
-        Returns list of dicts matching the frontend AlertItem shape.
+        Returns a tuple of (items, total_count).
         """
         async with get_session() as session:
-            stmt = select(AlertHistory).order_by(AlertHistory.timestamp.desc())
-
+            # Build base filter conditions
+            conditions = []
             if resolved is not None:
-                stmt = stmt.where(AlertHistory.resolved == resolved)
+                conditions.append(AlertHistory.resolved == resolved)
             if severity:
-                stmt = stmt.where(AlertHistory.severity == severity.upper())
+                conditions.append(AlertHistory.severity == severity.upper())
             if status:
-                stmt = stmt.where(AlertHistory.status == status.lower())
+                conditions.append(AlertHistory.status == status.lower())
+
+            # Count query
+            count_stmt = select(func.count(AlertHistory.id))
+            for cond in conditions:
+                count_stmt = count_stmt.where(cond)
+            total = (await session.execute(count_stmt)).scalar() or 0
+
+            # Data query with pagination
+            stmt = select(AlertHistory).order_by(AlertHistory.timestamp.desc())
+            for cond in conditions:
+                stmt = stmt.where(cond)
+            stmt = stmt.limit(limit).offset(offset)
 
             result = await session.execute(stmt)
             rows = result.scalars().all()
 
-            return [
+            items = [
                 {
                     "id": row.alert_id,
                     "rule_id": row.rule_id,
@@ -126,3 +140,4 @@ class AlertHistoryService:
                 }
                 for row in rows
             ]
+            return items, total
