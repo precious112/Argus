@@ -205,7 +205,7 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
     # Persist suppression to DB
     alert = next((a for a in engine._active_alerts if a.id == alert_id), None)
     if alert:
-        dedup_key = f"{alert.event.source}:{alert.rule_id}"
+        dedup_key = alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
         svc = SuppressionService()
         await svc.acknowledge(
             dedup_key=dedup_key,
@@ -251,7 +251,7 @@ async def unacknowledge_alert(alert_id: str) -> dict[str, Any]:
 
     # Remove suppression from DB
     if alert:
-        dedup_key = f"{alert.event.source}:{alert.rule_id}"
+        dedup_key = alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
         svc = SuppressionService()
         await svc.unacknowledge(dedup_key)
 

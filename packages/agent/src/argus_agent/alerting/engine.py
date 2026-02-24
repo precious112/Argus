@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -49,11 +50,136 @@ class ActiveAlert:
     event: Event
     severity: EventSeverity
     timestamp: datetime
+    dedup_key: str = ""
     resolved: bool = False
     resolved_at: datetime | None = None
     status: AlertState = AlertState.ACTIVE
     acknowledged_at: datetime | None = None
     acknowledged_by: str = ""
+
+
+def build_dedup_key(event: Event, rule_id: str) -> str:
+    """Build a context-aware dedup key from the finest distinguishing identity in each event.
+
+    Instead of grouping all alerts of the same type under one key, this uses
+    the most specific data available: error message for exceptions, name+pid
+    for processes, ip/port for network events, service for SDK aggregates, etc.
+    """
+    data = event.data or {}
+    msg = event.message or ""
+    etype = event.type
+
+    # --- Error / exception events ---
+    # SDK error_burst: service + error message
+    if etype == EventType.ERROR_BURST and event.source == "sdk_telemetry":
+        service = data.get("service", "unknown")
+        error_msg = data.get("message", msg).strip()
+        return f"sdk_telemetry:error_burst:{service}:{error_msg}"
+
+    # Log watcher error_burst: file + last error line
+    if etype == EventType.ERROR_BURST:
+        log_file = data.get("file", "unknown")
+        last_error = data.get("last_error", msg).strip()
+        return f"{event.source}:error_burst:{log_file}:{last_error}"
+
+    # --- Security events ---
+    if etype == EventType.SUSPICIOUS_PROCESS:
+        name = data.get("name", "")
+        pid = data.get("pid", "")
+        if not name:
+            m = re.search(r":\s*(\S+)", msg)
+            name = m.group(1) if m else "unknown"
+        if not pid:
+            m = re.search(r"PID\s*(\d+)", msg)
+            pid = m.group(1) if m else "unknown"
+        return f"{event.source}:security_event:{name}:{pid}"
+
+    if etype == EventType.BRUTE_FORCE:
+        ip = data.get("ip", "")
+        if not ip:
+            m = re.search(r"from\s+(\S+)", msg)
+            ip = m.group(1) if m else "unknown"
+        return f"{event.source}:security_event:{ip}"
+
+    if etype == EventType.SUSPICIOUS_OUTBOUND:
+        ip = data.get("ip", "")
+        port = data.get("port", "")
+        if not ip:
+            m = re.search(r"(\d+\.\d+\.\d+\.\d+)", msg)
+            ip = m.group(1) if m else "unknown"
+        if not port:
+            m = re.search(r":(\d+)", msg)
+            port = m.group(1) if m else "unknown"
+        return f"{event.source}:security_event:{ip}:{port}"
+
+    if etype == EventType.NEW_EXECUTABLE:
+        path = data.get("path", "")
+        if not path:
+            m = re.search(r":\s*(.+)", msg)
+            path = m.group(1).strip() if m else "unknown"
+        return f"{event.source}:security_event:{path}"
+
+    if etype == EventType.NEW_OPEN_PORT:
+        port = data.get("port", "")
+        if not port:
+            m = re.search(r"(\d+)", msg)
+            port = m.group(1) if m else "unknown"
+        return f"{event.source}:security_event:{port}"
+
+    if etype == EventType.PERMISSION_RISK:
+        path = data.get("path", "")
+        if not path:
+            m = re.search(r":\s*(\S+)", msg)
+            path = m.group(1) if m else "unknown"
+        return f"{event.source}:security_event:{path}"
+
+    # --- Process events ---
+    if etype in (EventType.PROCESS_CRASHED, EventType.PROCESS_OOM_KILLED):
+        name = data.get("name", data.get("process_name", "unknown"))
+        pid = data.get("pid", "unknown")
+        return f"{event.source}:process_crash:{name}:{pid}"
+
+    if etype == EventType.PROCESS_RESTART_LOOP:
+        name = data.get("name", data.get("process_name", "unknown"))
+        return f"{event.source}:process_crash:{name}"
+
+    # --- Anomaly ---
+    if etype == EventType.ANOMALY_DETECTED:
+        metric = data.get("metric", "unknown")
+        return f"{event.source}:anomaly_detected:{metric}"
+
+    # --- SDK aggregate metric events (service is the lowest grain) ---
+    if etype == EventType.SDK_ERROR_SPIKE:
+        service = data.get("service", "unknown")
+        return f"{event.source}:sdk_error_spike:{service}"
+
+    if etype == EventType.SDK_LATENCY_DEGRADATION:
+        service = data.get("service", "unknown")
+        return f"{event.source}:sdk_latency:{service}"
+
+    if etype == EventType.SDK_SERVICE_SILENT:
+        service = data.get("service", "unknown")
+        return f"{event.source}:sdk_service_silent:{service}"
+
+    if etype == EventType.SDK_TRAFFIC_BURST:
+        service = data.get("service", "unknown")
+        return f"{event.source}:sdk_traffic_burst:{service}"
+
+    if etype == EventType.SDK_METRIC_ANOMALY:
+        service = data.get("service", "unknown")
+        metric_name = data.get("metric_name", "unknown")
+        return f"{event.source}:sdk_metric_anomaly:{service}:{metric_name}"
+
+    if etype == EventType.SDK_COLD_START_SPIKE:
+        service = data.get("service", "unknown")
+        return f"{event.source}:sdk_cold_start:{service}"
+
+    # --- System-wide metrics (no finer grain) ---
+    if etype in (EventType.CPU_HIGH, EventType.MEMORY_HIGH, EventType.DISK_HIGH):
+        return f"{event.source}:{rule_id}"
+
+    # Fallback: source + rule_id (preserves old behavior for unknown types)
+    return f"{event.source}:{rule_id}"
 
 
 # Default rules
@@ -277,7 +403,7 @@ class AlertEngine:
                 continue
 
             now = datetime.now(UTC)
-            dedup_key = f"{event.source}:{rule.id}"
+            dedup_key = build_dedup_key(event, rule.id)
 
             # Track when we last saw a matching event (even if suppressed)
             previous_seen = self._last_event_seen.get(dedup_key)
@@ -302,6 +428,7 @@ class AlertEngine:
                 event=event,
                 severity=event.severity,
                 timestamp=now,
+                dedup_key=dedup_key,
             )
             self._active_alerts.append(alert)
             logger.info("Alert fired: %s [%s] %s", rule.name, event.severity, event.message)
@@ -387,7 +514,7 @@ class AlertEngine:
                 alert.resolved_at = datetime.now(UTC)
                 alert.status = AlertState.RESOLVED
                 # Clear acknowledgment for this alert's dedup_key
-                dedup_key = f"{alert.event.source}:{alert.rule_id}"
+                dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
                 self._acknowledged_keys.pop(dedup_key, None)
                 return True
         return False
@@ -413,7 +540,7 @@ class AlertEngine:
                 alert.status = AlertState.ACKNOWLEDGED
                 alert.acknowledged_at = now
                 alert.acknowledged_by = acknowledged_by
-                dedup_key = f"{alert.event.source}:{alert.rule_id}"
+                dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
                 # Always enforce a maximum expiry (24h safety cap)
                 if expires_at is None:
                     expires_at = now + timedelta(hours=24)
@@ -428,7 +555,7 @@ class AlertEngine:
                 alert.status = AlertState.ACTIVE
                 alert.acknowledged_at = None
                 alert.acknowledged_by = ""
-                dedup_key = f"{alert.event.source}:{alert.rule_id}"
+                dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
                 self._acknowledged_keys.pop(dedup_key, None)
                 return True
         return False
