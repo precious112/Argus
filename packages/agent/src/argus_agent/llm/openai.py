@@ -15,9 +15,16 @@ logger = logging.getLogger("argus.llm.openai")
 _MODEL_CONTEXT: dict[str, int] = {
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
+    "gpt-4.1": 1_047_576,
+    "gpt-4.1-mini": 1_047_576,
     "gpt-4-turbo": 128_000,
     "gpt-4": 8_192,
     "gpt-3.5-turbo": 16_385,
+    "gpt-5": 128_000,
+    "gpt-5-mini": 128_000,
+    "o1": 200_000,
+    "o3": 200_000,
+    "o4-mini": 200_000,
 }
 
 # Models that only accept temperature=1 (the default); omit the param entirely.
