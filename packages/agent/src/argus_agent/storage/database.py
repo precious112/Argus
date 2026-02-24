@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -15,6 +15,41 @@ logger = logging.getLogger("argus.storage")
 
 _engine: AsyncEngine | None = None
 _session_factory: sessionmaker | None = None
+
+
+def _migrate_missing_columns(connection) -> None:  # type: ignore[no-untyped-def]
+    """Add columns defined in ORM models but missing from existing tables.
+
+    SQLAlchemy's ``create_all`` only creates new tables — it never alters
+    existing ones.  This helper inspects each table and issues ``ALTER TABLE
+    ADD COLUMN`` for any column the ORM declares but the database lacks.
+    """
+    insp = inspect(connection)
+    for table in Base.metadata.sorted_tables:
+        if not insp.has_table(table.name):
+            continue  # will be created by create_all
+        existing = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name not in existing:
+                col_type = col.type.compile(dialect=connection.dialect)
+                default = ""
+                if col.default is not None and col.default.is_scalar:
+                    val = col.default.arg
+                    if isinstance(val, str):
+                        default = f" DEFAULT '{val}'"
+                    elif isinstance(val, bool):
+                        default = f" DEFAULT {int(val)}"
+                    elif isinstance(val, (int, float)):
+                        default = f" DEFAULT {val}"
+                elif not col.nullable:
+                    default = " DEFAULT ''"
+                nullable = "" if col.nullable else " NOT NULL"
+                stmt = (
+                    f"ALTER TABLE {table.name} "
+                    f"ADD COLUMN {col.name} {col_type}{nullable}{default}"
+                )
+                connection.execute(text(stmt))
+                logger.info("Migrated: %s.%s (%s)", table.name, col.name, col_type)
 
 
 async def init_db(db_path: str) -> None:
@@ -39,6 +74,7 @@ async def init_db(db_path: str) -> None:
     _session_factory = sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
     async with _engine.begin() as conn:
+        await conn.run_sync(_migrate_missing_columns)
         await conn.run_sync(Base.metadata.create_all)
 
     logger.info("SQLite database initialized at %s", db_path)
