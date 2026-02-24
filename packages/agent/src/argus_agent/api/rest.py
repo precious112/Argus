@@ -162,9 +162,26 @@ async def resolve_alert(alert_id: str) -> dict[str, Any]:
     if engine is None:
         raise HTTPException(status_code=503, detail="Alert engine not initialized")
 
+    # Try in-memory first
     success = engine.resolve_alert(alert_id)
+
     if not success:
-        raise HTTPException(status_code=404, detail="Alert not found or already resolved")
+        # Fall back to DB-only resolve
+        from argus_agent.storage.alert_history import AlertHistoryService
+
+        svc = AlertHistoryService()
+        db_alert = await svc.get_by_alert_id(alert_id)
+        if db_alert is None or db_alert.get("resolved"):
+            raise HTTPException(status_code=404, detail="Alert not found or already resolved")
+        success = await svc.update_status(
+            alert_id,
+            status="resolved",
+            resolved=True,
+            resolved_at=datetime.now(UTC),
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="Alert not found or already resolved")
+        return {"status": "resolved", "alert_id": alert_id}
 
     # Persist to DB
     try:
@@ -198,23 +215,43 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
 
     expires_at = datetime.now(UTC) + timedelta(hours=expires_hours)
 
+    # Try in-memory first
     success = engine.acknowledge_alert(alert_id, acknowledged_by="user", expires_at=expires_at)
-    if not success:
-        raise HTTPException(status_code=404, detail="Alert not found")
 
-    # Persist suppression to DB
-    alert = next((a for a in engine._active_alerts if a.id == alert_id), None)
-    if alert:
-        dedup_key = alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
+    if success:
+        # Found in memory — persist suppression and status to DB
+        alert = next((a for a in engine._active_alerts if a.id == alert_id), None)
+        if alert:
+            dedup_key = alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
+            svc = SuppressionService()
+            await svc.acknowledge(
+                dedup_key=dedup_key,
+                rule_id=alert.rule_id,
+                source=str(alert.event.source),
+                acknowledged_by="user",
+                reason=reason,
+                expires_at=expires_at,
+            )
+    else:
+        # Fall back to DB-only acknowledge
+        from argus_agent.storage.alert_history import AlertHistoryService
+
+        db_alert = await AlertHistoryService().get_by_alert_id(alert_id)
+        if db_alert is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        dedup_key = f"{db_alert['source']}:{db_alert['rule_id']}"
         svc = SuppressionService()
         await svc.acknowledge(
             dedup_key=dedup_key,
-            rule_id=alert.rule_id,
-            source=str(alert.event.source),
+            rule_id=db_alert["rule_id"],
+            source=db_alert["source"],
             acknowledged_by="user",
             reason=reason,
             expires_at=expires_at,
         )
+        # Also load this ack into the in-memory engine so future events are suppressed
+        engine._acknowledged_keys[dedup_key] = expires_at
 
     # Persist alert status to DB
     try:
@@ -245,15 +282,28 @@ async def unacknowledge_alert(alert_id: str) -> dict[str, Any]:
     # Get dedup_key before removing from engine
     alert = next((a for a in engine._active_alerts if a.id == alert_id), None)
 
+    # Try in-memory first
     success = engine.unacknowledge_alert(alert_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Alert not found or not acknowledged")
 
-    # Remove suppression from DB
-    if alert:
-        dedup_key = alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
+    if success:
+        # Found in memory — remove suppression from DB
+        if alert:
+            dedup_key = alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
+            svc = SuppressionService()
+            await svc.unacknowledge(dedup_key)
+    else:
+        # Fall back to DB-only unacknowledge
+        from argus_agent.storage.alert_history import AlertHistoryService
+
+        db_alert = await AlertHistoryService().get_by_alert_id(alert_id)
+        if db_alert is None or db_alert.get("status") != "acknowledged":
+            raise HTTPException(status_code=404, detail="Alert not found or not acknowledged")
+
+        dedup_key = f"{db_alert['source']}:{db_alert['rule_id']}"
         svc = SuppressionService()
         await svc.unacknowledge(dedup_key)
+        # Also remove from in-memory engine
+        engine._acknowledged_keys.pop(dedup_key, None)
 
     # Persist alert status to DB
     try:

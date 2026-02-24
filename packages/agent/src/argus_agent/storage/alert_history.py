@@ -82,6 +82,32 @@ class AlertHistoryService:
             await session.commit()
             return (result.rowcount or 0) > 0
 
+    async def get_by_alert_id(self, alert_id: str) -> dict[str, Any] | None:
+        """Look up a single alert by its alert_id. Returns None if not found."""
+        async with get_session() as session:
+            stmt = select(AlertHistory).where(AlertHistory.alert_id == alert_id)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            return {
+                "id": row.alert_id,
+                "rule_id": row.rule_id,
+                "rule_name": row.rule_name,
+                "severity": row.severity,
+                "message": row.message,
+                "source": row.source,
+                "event_type": row.event_type,
+                "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                "resolved": row.resolved,
+                "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+                "status": row.status,
+                "acknowledged_at": (
+                    row.acknowledged_at.isoformat() if row.acknowledged_at else None
+                ),
+                "acknowledged_by": row.acknowledged_by or None,
+            }
+
     async def list_alerts(
         self,
         *,
