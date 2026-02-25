@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/api";
 
 interface MetricBucket {
   bucket: string;
@@ -40,7 +41,7 @@ export function ServiceMetricsPanel({
   useEffect(() => {
     async function fetchData() {
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `${apiBase}/api/v1/services/${encodeURIComponent(service)}/metrics?since_minutes=60`,
         );
         const data = await res.json();

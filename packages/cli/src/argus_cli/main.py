@@ -209,6 +209,40 @@ def ask(
         api.close()
 
 
+@app.command(name="login")
+def login_cmd(
+    server: str = typer.Option(_DEFAULT_SERVER, help="Argus server URL"),
+    username: str = typer.Option("", "-u", "--username", help="Username"),
+    password: str = typer.Option("", "-p", "--password", help="Password"),
+) -> None:
+    """Authenticate with the Argus server."""
+    from argus_cli.auth import login
+
+    if not username:
+        username = Prompt.ask("Username")
+    if not password:
+        import getpass
+        password = getpass.getpass("Password: ")
+
+    try:
+        login(server, username, password)
+        typer.echo("Login successful. Session token saved.")
+    except Exception as e:
+        typer.echo(f"Login failed: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command(name="logout")
+def logout_cmd(
+    server: str = typer.Option(_DEFAULT_SERVER, help="Argus server URL"),
+) -> None:
+    """Clear stored session token."""
+    from argus_cli.auth import clear_token
+
+    clear_token(server)
+    typer.echo("Logged out. Session token cleared.")
+
+
 config_app = typer.Typer(help="View and update LLM configuration.")
 app.add_typer(config_app, name="config")
 

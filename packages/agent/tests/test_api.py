@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from argus_agent.auth.jwt import create_access_token
 from argus_agent.config import reset_settings
 from argus_agent.main import create_app
 
@@ -25,8 +26,13 @@ def app():
 
 @pytest.fixture
 async def client(app):
+    token = create_access_token("test-user-id", "test")
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={"argus_token": token},
+    ) as c:
         yield c
 
 

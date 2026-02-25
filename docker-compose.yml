@@ -33,6 +33,7 @@ services:
       args:
         NEXT_PUBLIC_AGENT_WS_URL: ws://${ARGUS_HOST:-localhost}:7600/api/v1/ws
         NEXT_PUBLIC_AGENT_API_URL: http://${ARGUS_HOST:-localhost}:7600/api/v1
+        NEXT_PUBLIC_ARGUS_URL: http://${ARGUS_HOST:-localhost}:7600
     ports:
       - "3000:3000"
     restart: unless-stopped

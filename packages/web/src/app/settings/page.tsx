@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { apiFetch } from "@/lib/api";
 
 const API =
   process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:7600/api/v1";
@@ -86,7 +87,7 @@ function LLMSection({
     setSaving(true);
     setFeedback(null);
     try {
-      const r = await fetch(`${API}/settings/llm`, {
+      const r = await apiFetch(`${API}/settings/llm`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider, model, api_key: apiKey || "••••••••" }),
@@ -198,7 +199,7 @@ function BudgetSection({
     setSaving(true);
     setFeedback(null);
     try {
-      const r = await fetch(`${API}/settings/budget`, {
+      const r = await apiFetch(`${API}/settings/budget`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -358,7 +359,7 @@ function SlackSection({
     setFeedback(null);
     try {
       // Save token first so backend can use it
-      await fetch(`${API}/notifications/settings/slack`, {
+      await apiFetch(`${API}/notifications/settings/slack`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -370,7 +371,7 @@ function SlackSection({
           },
         }),
       });
-      const r = await fetch(`${API}/notifications/slack/channels`);
+      const r = await apiFetch(`${API}/notifications/slack/channels`);
       if (!r.ok) throw new Error(await r.text());
       const data = await r.json();
       setChannels(data.channels ?? []);
@@ -388,7 +389,7 @@ function SlackSection({
     setSaving(true);
     setFeedback(null);
     try {
-      const r = await fetch(`${API}/notifications/settings/slack`, {
+      const r = await apiFetch(`${API}/notifications/settings/slack`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -418,7 +419,7 @@ function SlackSection({
     setTesting(true);
     setFeedback(null);
     try {
-      const r = await fetch(`${API}/notifications/test/slack`, {
+      const r = await apiFetch(`${API}/notifications/test/slack`, {
         method: "POST",
       });
       if (!r.ok) throw new Error(await r.text());
@@ -556,7 +557,7 @@ function EmailSection({
     setSaving(true);
     setFeedback(null);
     try {
-      const r = await fetch(`${API}/notifications/settings/email`, {
+      const r = await apiFetch(`${API}/notifications/settings/email`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -593,7 +594,7 @@ function EmailSection({
     setTesting(true);
     setFeedback(null);
     try {
-      const r = await fetch(`${API}/notifications/test/email`, {
+      const r = await apiFetch(`${API}/notifications/test/email`, {
         method: "POST",
       });
       if (!r.ok) throw new Error(await r.text());
@@ -720,7 +721,7 @@ export default function SettingsPage() {
 
   const loadSettings = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/settings`);
+      const r = await apiFetch(`${API}/settings`);
       const data = await r.json();
       setSettings(data);
       setNotifConfigs(data.notifications ?? []);
@@ -735,7 +736,7 @@ export default function SettingsPage() {
 
   const reloadNotifs = async () => {
     try {
-      const r = await fetch(`${API}/notifications/settings`);
+      const r = await apiFetch(`${API}/notifications/settings`);
       const data = await r.json();
       setNotifConfigs(data.channels ?? []);
     } catch {

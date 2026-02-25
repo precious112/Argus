@@ -12,10 +12,14 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
+from argus_agent.api.auth import router as auth_router
 from argus_agent.api.ingest import router as ingest_router
 from argus_agent.api.rest import router as rest_router
 from argus_agent.api.ws import router as ws_router
+from argus_agent.auth.jwt import decode_access_token
 from argus_agent.config import get_settings
 from argus_agent.storage.database import close_db, init_db
 from argus_agent.storage.timeseries import close_timeseries, init_timeseries
@@ -373,7 +377,39 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Auth middleware — protect /api/ routes (except exempt paths)
+    auth_exempt = {
+        "/health",
+        "/api/v1/health",
+        "/api/v1/auth/login",
+        "/api/v1/auth/logout",
+    }
+    auth_exempt_prefixes = (
+        "/api/v1/ingest",
+    )
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        path = request.url.path
+        if (
+            path in auth_exempt
+            or path.startswith(auth_exempt_prefixes)
+            or not path.startswith("/api/")
+        ):
+            return await call_next(request)
+        token = request.cookies.get("argus_token", "")
+        if not token:
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        try:
+            decode_access_token(token)
+        except Exception:
+            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+        return await call_next(request)
+
     # API routes
+    app.include_router(auth_router, prefix="/api/v1")
     app.include_router(rest_router, prefix="/api/v1")
     app.include_router(ws_router, prefix="/api/v1")
     app.include_router(ingest_router, prefix="/api/v1")

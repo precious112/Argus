@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { apiFetch } from "@/lib/api";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:7600/api/v1";
@@ -43,7 +44,7 @@ export default function HistoryPage() {
       if (resolvedFilter) params.set("resolved", resolvedFilter);
       params.set("page", String(page));
       params.set("page_size", String(PAGE_SIZE));
-      const resp = await fetch(`${API_BASE}/alerts?${params}`);
+      const resp = await apiFetch(`${API_BASE}/alerts?${params}`);
       const data = await resp.json();
       setAlerts(data.alerts || []);
       setTotal(data.total ?? data.count ?? 0);
@@ -55,7 +56,7 @@ export default function HistoryPage() {
 
   const fetchInvestigations = useCallback(async () => {
     try {
-      const resp = await fetch(`${API_BASE}/investigations`);
+      const resp = await apiFetch(`${API_BASE}/investigations`);
       const data = await resp.json();
       setInvestigations(data.investigations || []);
     } catch {

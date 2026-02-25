@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from typing import Any
 
 from prompt_toolkit import PromptSession
@@ -109,6 +108,32 @@ def _render_status_line(snapshot: dict[str, Any], mode: str = "") -> None:
     )
 
 
+def _ensure_token(server_url: str) -> str | None:
+    """Ensure we have a valid auth token, prompting for login if needed."""
+    from argus_cli.auth import clear_token, load_token, login
+
+    token = load_token(server_url)
+    if token:
+        return token
+
+    console.print("[yellow]Authentication required.[/yellow]")
+    try:
+        username = input("  Username: ").strip()
+        import getpass
+        password = getpass.getpass("  Password: ")
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]Login cancelled.[/dim]")
+        return None
+
+    try:
+        token = login(server_url, username, password)
+        console.print("[green]Login successful.[/green]")
+        return token
+    except Exception as e:
+        console.print(f"[red]Login failed: {e}[/red]")
+        return None
+
+
 async def start_chat(server_url: str) -> None:
     """Connect to Argus WebSocket and run an interactive chat loop."""
     try:
@@ -150,10 +175,22 @@ async def start_chat(server_url: str) -> None:
         subtitle="Ctrl+C to quit",
         border_style="cyan",
     ))
+
+    # Authenticate before connecting
+    token = _ensure_token(server_url)
+    if not token:
+        return
+
     console.print(f"[dim]Connecting to {server_url}...[/dim]")
 
     try:
-        async with websockets.connect(ws_url) as ws:
+        extra_headers = {"Cookie": f"argus_token={token}"}
+        async with websockets.connect(
+            ws_url,
+            additional_headers=extra_headers,
+            ping_interval=30,
+            ping_timeout=120,
+        ) as ws:
             # Read the connected message
             raw = await ws.recv()
             msg = json.loads(raw)
@@ -210,19 +247,32 @@ async def start_chat(server_url: str) -> None:
                 await _stream_response(ws, server_url)
 
     except Exception as e:
-        console.print(f"[red]Connection failed: {e}[/red]")
+        err_str = str(e)
+        if "403" in err_str or "4001" in err_str or "Authentication" in err_str:
+            from argus_cli.auth import clear_token
+
+            clear_token(server_url)
+            console.print("[yellow]Session expired or invalid. Please log in again.[/yellow]")
+            token = _ensure_token(server_url)
+            if token:
+                console.print("[dim]Reconnecting...[/dim]")
+                await start_chat(server_url)
+        else:
+            console.print(f"[red]Connection failed: {e}[/red]")
 
 
 async def _stream_response(ws: Any, server_url: str) -> None:
-    """Stream and render the agent response."""
-    full_content = ""
+    """Stream and render the agent response with live markdown."""
+    segment_content = ""  # Current text segment (reset on tool interruptions)
     done = False
+    streaming = False
 
-    # Show spinner while waiting for first content
-    spinner = Spinner("dots", text="Thinking...")
-    live = Live(spinner, console=console, refresh_per_second=10)
+    def _new_live(renderable: Any = None) -> Live:
+        r = renderable or Spinner("dots", text="Thinking...")
+        return Live(r, console=console, refresh_per_second=8, transient=False)
+
+    live = _new_live()
     live.start()
-    first_content = True
 
     while not done:
         try:
@@ -233,38 +283,21 @@ async def _stream_response(ws: Any, server_url: str) -> None:
             if msg_type == "assistant_message_delta":
                 content = msg.get("data", {}).get("content", "")
                 if content:
-                    if first_content:
-                        live.stop()
-                        first_content = False
-                    full_content += content
-                    # Write raw text as it streams
-                    sys.stdout.write(content)
-                    sys.stdout.flush()
+                    streaming = True
+                    segment_content += content
+                    live.update(Markdown(segment_content))
 
             elif msg_type == "assistant_message_end":
-                if first_content:
-                    live.stop()
-                    first_content = False
-                # Re-render the full response as markdown
-                if full_content.strip():
-                    # Move to new line, then render formatted version
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                    # Clear streamed text and replace with rich markdown
-                    console.print(Panel(
-                        Markdown(full_content),
-                        title="Argus",
-                        border_style="cyan",
-                        padding=(0, 1),
-                    ))
                 done = True
 
             elif msg_type == "tool_call":
-                if first_content:
-                    live.update(Spinner("dots", text="Thinking..."))
                 name = msg.get("data", {}).get("name", "")
-                if not first_content:
-                    console.print(f"\n  [dim]> Calling tool: {name}[/dim]")
+                if streaming:
+                    live.stop()
+                    segment_content = ""
+                    streaming = False
+                    live = _new_live(Spinner("dots", text=f"Calling {name}..."))
+                    live.start()
                 else:
                     live.update(Spinner("dots", text=f"Calling {name}..."))
 
@@ -274,15 +307,17 @@ async def _stream_response(ws: Any, server_url: str) -> None:
                 name = data.get("name", "")
                 result = data.get("result", {})
 
-                if not first_content:
-                    _render_tool_result(name, result, display_type)
-                else:
-                    live.update(Spinner("dots", text="Processing results..."))
+                live.stop()
+                _render_tool_result(name, result, display_type)
+                segment_content = ""
+                streaming = False
+                live = _new_live(Spinner("dots", text="Processing..."))
+                live.start()
 
             elif msg_type == "action_request":
-                if first_content:
-                    live.stop()
-                    first_content = False
+                live.stop()
+                segment_content = ""
+                streaming = False
 
                 data = msg.get("data", {})
                 risk = data.get("risk_level", "")
@@ -311,30 +346,34 @@ async def _stream_response(ws: Any, server_url: str) -> None:
                     },
                 }))
 
+                live = _new_live(Spinner("dots", text="Executing..."))
+                live.start()
+
             elif msg_type == "action_complete":
+                live.stop()
                 ec = msg.get("data", {}).get("exit_code", "")
                 console.print(f"  [dim]Action complete (exit code: {ec})[/dim]")
+                live = _new_live(Spinner("dots", text="Processing..."))
+                live.start()
 
             elif msg_type == "error":
-                if first_content:
-                    live.stop()
-                    first_content = False
+                live.stop()
                 err = msg.get("data", {}).get("message", "")
                 console.print(f"\n[red]Error: {err}[/red]")
-                done = True
+                return
 
             elif msg_type in ("thinking_start", "thinking_end", "pong",
                               "assistant_message_start", "system_status"):
                 pass  # ignore
 
         except asyncio.TimeoutError:
-            if first_content:
-                live.stop()
+            live.stop()
             console.print("\n[yellow]Response timed out[/yellow]")
-            done = True
+            return
 
-    if first_content:
-        live.stop()
+    # Stop live — the last frame (rendered markdown) stays on screen
+    live.stop()
+    console.print()
 
 
 def _render_tool_result(name: str, result: dict[str, Any], display_type: str) -> None:

@@ -79,7 +79,7 @@ class ActionEngine:
                 action_id=action_id,
                 approved=False,
                 executed=False,
-                error="Command not in allowlist",
+                error="Command blocked by safety filter",
             )
 
         # Auto-approve READ_ONLY
