@@ -185,7 +185,12 @@ async def start_chat(server_url: str) -> None:
 
     try:
         extra_headers = {"Cookie": f"argus_token={token}"}
-        async with websockets.connect(ws_url, additional_headers=extra_headers) as ws:
+        async with websockets.connect(
+            ws_url,
+            additional_headers=extra_headers,
+            ping_interval=30,
+            ping_timeout=120,
+        ) as ws:
             # Read the connected message
             raw = await ws.recv()
             msg = json.loads(raw)
