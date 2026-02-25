@@ -31,7 +31,7 @@ class TestActionEngine:
         result = await self.engine.propose_action(["rm", "-rf", "/"])
         assert result.approved is False
         assert result.executed is False
-        assert "not in allowlist" in result.error
+        assert "blocked" in result.error.lower()
 
     @pytest.mark.asyncio
     async def test_auto_approve_read_only(self):
