@@ -5,14 +5,20 @@ import type { AlertData } from "@/lib/protocol";
 interface AlertBannerProps {
   alerts: AlertData[];
   onDismiss: (alertId: string) => void;
+  onAcknowledge?: (alertId: string) => void;
 }
 
-export function AlertBanner({ alerts, onDismiss }: AlertBannerProps) {
-  if (alerts.length === 0) return null;
+export function AlertBanner({ alerts, onDismiss, onAcknowledge }: AlertBannerProps) {
+  // Filter out acknowledged/resolved alerts from display
+  const visibleAlerts = alerts.filter(
+    (a) => !a.status || a.status === "active",
+  );
+
+  if (visibleAlerts.length === 0) return null;
 
   return (
     <div className="space-y-1 px-4 py-2">
-      {alerts.slice(0, 5).map((alert) => (
+      {visibleAlerts.slice(0, 5).map((alert) => (
         <div
           key={alert.id}
           className={`flex items-start justify-between rounded-lg px-4 py-2 text-sm ${
@@ -37,18 +43,29 @@ export function AlertBanner({ alerts, onDismiss }: AlertBannerProps) {
             </div>
             <p className="mt-0.5 text-xs opacity-80">{alert.summary}</p>
           </div>
-          <button
-            onClick={() => onDismiss(alert.id)}
-            className="ml-3 shrink-0 rounded px-1.5 py-0.5 text-xs opacity-60 hover:opacity-100 transition-opacity"
-            aria-label="Dismiss alert"
-          >
-            &times;
-          </button>
+          <div className="ml-3 flex shrink-0 items-center gap-1">
+            {onAcknowledge && (
+              <button
+                onClick={() => onAcknowledge(alert.id)}
+                className="rounded px-1.5 py-0.5 text-xs opacity-60 hover:opacity-100 transition-opacity hover:bg-white/10"
+                aria-label="Acknowledge alert"
+              >
+                Ack
+              </button>
+            )}
+            <button
+              onClick={() => onDismiss(alert.id)}
+              className="rounded px-1.5 py-0.5 text-xs opacity-60 hover:opacity-100 transition-opacity"
+              aria-label="Dismiss alert"
+            >
+              &times;
+            </button>
+          </div>
         </div>
       ))}
-      {alerts.length > 5 && (
+      {visibleAlerts.length > 5 && (
         <div className="text-center text-xs text-[var(--muted)]">
-          +{alerts.length - 5} more alert{alerts.length - 5 !== 1 ? "s" : ""}
+          +{visibleAlerts.length - 5} more alert{visibleAlerts.length - 5 !== 1 ? "s" : ""}
         </div>
       )}
     </div>

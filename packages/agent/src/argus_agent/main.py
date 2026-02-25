@@ -161,6 +161,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _alert_formatter.start()
     await _alert_engine.start()
 
+    # Load persisted acknowledgments and mutes into the alert engine
+    from argus_agent.alerting.suppression import SuppressionService
+
+    await SuppressionService().load_into_engine(_alert_engine)
+
     is_sdk_only = settings.mode == "sdk_only"
 
     # Start host-level collectors only in full mode
@@ -338,6 +343,11 @@ def _register_all_tools(*, is_sdk_only: bool = False) -> None:
         register_dependency_tools()
         register_deploy_tools()
         register_behavior_tools()
+
+        # Alert management tools — always registered
+        from argus_agent.tools.alert_management import register_alert_management_tools
+
+        register_alert_management_tools()
 
 
 def create_app() -> FastAPI:

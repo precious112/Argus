@@ -28,6 +28,9 @@ export default function RootLayout({
               <a href="/" className="hover:text-[var(--foreground)]">
                 Chat
               </a>
+              <a href="/alerts" className="hover:text-[var(--foreground)]">
+                Alerts
+              </a>
               <a href="/services" className="hover:text-[var(--foreground)]">
                 Services
               </a>

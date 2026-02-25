@@ -14,20 +14,43 @@ from argus_agent.storage.models import TokenUsage
 logger = logging.getLogger("argus.storage.token_usage")
 
 # Approximate cost per 1K tokens (input, output) for known models.
-# Fallback: use _default for unknown models.
+# Rates derived from official per-MTok pricing ÷ 1000.
+# Fallback: use _default for unknown models; prefix matching handles variants.
 _COST_PER_1K: dict[str, tuple[float, float]] = {
-    "gpt-4o": (0.0025, 0.01),
-    "gpt-4o-mini": (0.00015, 0.0006),
-    "gpt-4-turbo": (0.01, 0.03),
-    "gpt-4": (0.03, 0.06),
-    "gpt-3.5-turbo": (0.0005, 0.0015),
-    "claude-sonnet-4-20250514": (0.003, 0.015),
-    "claude-3-5-sonnet-20241022": (0.003, 0.015),
-    "claude-3-haiku-20240307": (0.00025, 0.00125),
-    "claude-3-opus-20240229": (0.015, 0.075),
-    "gemini-1.5-pro": (0.00125, 0.005),
-    "gemini-1.5-flash": (0.000075, 0.0003),
-    "gemini-2.0-flash": (0.000075, 0.0003),
+    # OpenAI — https://developers.openai.com/api/docs/pricing
+    "gpt-4o": (0.0025, 0.01),            # $2.50/$10 per MTok
+    "gpt-4o-mini": (0.00015, 0.0006),     # $0.15/$0.60 per MTok
+    "gpt-4.1": (0.002, 0.008),            # $2/$8 per MTok
+    "gpt-4.1-mini": (0.0004, 0.0016),     # $0.40/$1.60 per MTok
+    "gpt-4-turbo": (0.01, 0.03),          # $10/$30 per MTok (legacy)
+    "gpt-4": (0.03, 0.06),                # $30/$60 per MTok (legacy)
+    "gpt-3.5-turbo": (0.0005, 0.0015),    # $0.50/$1.50 per MTok (legacy)
+    "gpt-5": (0.00125, 0.01),             # $1.25/$10 per MTok
+    "gpt-5.1": (0.00125, 0.01),           # $1.25/$10 per MTok
+    "gpt-5.2": (0.00175, 0.014),          # $1.75/$14 per MTok
+    "gpt-5-mini": (0.00025, 0.002),       # $0.25/$2 per MTok
+    "gpt-5-nano": (0.00005, 0.0004),      # $0.05/$0.40 per MTok
+    "o1": (0.015, 0.06),                  # $15/$60 per MTok
+    "o3": (0.002, 0.008),                 # $2/$8 per MTok
+    "o4-mini": (0.0011, 0.0044),          # $1.10/$4.40 per MTok
+    # Anthropic — https://platform.claude.com/docs/en/about-claude/pricing
+    "claude-opus-4-6-20260204": (0.005, 0.025),    # $5/$25 per MTok
+    "claude-opus-4-5-20250520": (0.005, 0.025),    # $5/$25 per MTok
+    "claude-sonnet-4-5-20250929": (0.003, 0.015),  # $3/$15 per MTok
+    "claude-sonnet-4-20250514": (0.003, 0.015),    # $3/$15 per MTok
+    "claude-haiku-4-5-20251001": (0.001, 0.005),   # $1/$5 per MTok
+    "claude-3-5-sonnet-20241022": (0.003, 0.015),  # $3/$15 per MTok (legacy)
+    "claude-3-haiku-20240307": (0.00025, 0.00125), # $0.25/$1.25 per MTok (legacy)
+    "claude-3-opus-20240229": (0.015, 0.075),      # $15/$75 per MTok (legacy)
+    # Google Gemini — https://ai.google.dev/gemini-api/docs/pricing
+    "gemini-2.5-pro": (0.00125, 0.01),    # $1.25/$10 per MTok (≤200k input)
+    "gemini-2.5-flash": (0.0003, 0.0025), # $0.30/$2.50 per MTok
+    "gemini-2.5-flash-lite": (0.0001, 0.0004),  # $0.10/$0.40 per MTok
+    "gemini-2.0-flash": (0.0001, 0.0004), # $0.10/$0.40 per MTok
+    "gemini-2.0-flash-lite": (0.000075, 0.0003), # $0.075/$0.30 per MTok
+    "gemini-1.5-pro": (0.00125, 0.005),   # $1.25/$5 per MTok
+    "gemini-1.5-flash": (0.000075, 0.0003), # $0.075/$0.30 per MTok
+    # Fallback for unknown models
     "_default": (0.002, 0.008),
 }
 
@@ -40,7 +63,14 @@ _STRFTIME_FORMATS: dict[str, str] = {
 
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    rates = _COST_PER_1K.get(model, _COST_PER_1K["_default"])
+    rates = _COST_PER_1K.get(model)
+    if rates is None:
+        # Try prefix match: longest matching key wins
+        best = ""
+        for key in _COST_PER_1K:
+            if key != "_default" and model.startswith(key) and len(key) > len(best):
+                best = key
+        rates = _COST_PER_1K[best] if best else _COST_PER_1K["_default"]
     return (prompt_tokens / 1000) * rates[0] + (completion_tokens / 1000) * rates[1]
 
 

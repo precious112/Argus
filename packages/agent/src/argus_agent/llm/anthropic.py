@@ -13,7 +13,11 @@ from argus_agent.llm.base import LLMError, LLMMessage, LLMProvider, LLMResponse,
 logger = logging.getLogger("argus.llm.anthropic")
 
 _MODEL_CONTEXT: dict[str, int] = {
+    "claude-opus-4-6-20260204": 200_000,
+    "claude-opus-4-5-20250520": 200_000,
+    "claude-sonnet-4-5-20250929": 200_000,
     "claude-sonnet-4-20250514": 200_000,
+    "claude-haiku-4-5-20251001": 200_000,
     "claude-3-5-sonnet-20241022": 200_000,
     "claude-3-haiku-20240307": 200_000,
     "claude-3-opus-20240229": 200_000,

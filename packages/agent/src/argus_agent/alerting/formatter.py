@@ -208,29 +208,17 @@ def format_event(event: Event) -> str:
 # ---------------------------------------------------------------------------
 
 def _grouping_key(alert: Any, event: Event) -> str:
-    """Compute a grouping key for digest batching."""
-    etype = event.type
+    """Compute a grouping key for digest batching.
 
-    if etype == EventType.SUSPICIOUS_OUTBOUND:
-        ip_match = re.search(r"(\d+\.\d+\.\d+\.\d+)", event.message or "")
-        ip = ip_match.group(1) if ip_match else "unknown"
-        return f"suspicious_outbound:{ip}"
+    Reuses the alert engine's context-aware dedup key so that digest
+    batching groups alerts by the same identity as alert deduplication.
+    """
+    from argus_agent.alerting.engine import build_dedup_key
 
-    if etype == EventType.ANOMALY_DETECTED:
-        metric = (event.data or {}).get("metric", "unknown")
-        return f"anomaly:{metric}"
-
-    if etype in (
-        EventType.SDK_ERROR_SPIKE,
-        EventType.SDK_LATENCY_DEGRADATION,
-        EventType.SDK_COLD_START_SPIKE,
-        EventType.SDK_SERVICE_SILENT,
-        EventType.SDK_TRAFFIC_BURST,
-    ):
-        svc = (event.data or {}).get("service", "unknown")
-        return f"{etype}:{svc}"
-
-    return f"{alert.rule_id}:{etype}"
+    # Prefer the stored dedup_key if available on the alert
+    if hasattr(alert, "dedup_key") and alert.dedup_key:
+        return alert.dedup_key
+    return build_dedup_key(event, getattr(alert, "rule_id", "unknown"))
 
 
 # ---------------------------------------------------------------------------

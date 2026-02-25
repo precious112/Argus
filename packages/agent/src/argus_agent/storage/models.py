@@ -77,14 +77,22 @@ class AlertHistory(Base):
     __tablename__ = "alert_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alert_id: Mapped[str] = mapped_column(String(36), index=True, default="")
+    rule_id: Mapped[str] = mapped_column(String(100), default="")
+    rule_name: Mapped[str] = mapped_column(String(255), default="")
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     severity: Mapped[str] = mapped_column(String(20))  # CRITICAL, WARNING, INFO
     title: Mapped[str] = mapped_column(String(255))
+    message: Mapped[str] = mapped_column(Text, default="")
+    event_type: Mapped[str] = mapped_column(String(50), default="")
     summary: Mapped[str] = mapped_column(Text, default="")
     source: Mapped[str] = mapped_column(String(100), default="")
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     investigation_id: Mapped[str] = mapped_column(String(36), default="")
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    acknowledged_by: Mapped[str] = mapped_column(String(100), default="")
 
 
 class Investigation(Base):
@@ -138,3 +146,35 @@ class TokenUsage(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     source: Mapped[str] = mapped_column(String(50), default="")  # user_chat, periodic, event
     conversation_id: Mapped[str] = mapped_column(String(36), default="")
+
+
+class AlertAcknowledgment(Base):
+    """Tracks acknowledged alert conditions at the dedup_key level."""
+
+    __tablename__ = "alert_acknowledgments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dedup_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    rule_id: Mapped[str] = mapped_column(String(100))
+    source: Mapped[str] = mapped_column(String(100), default="")
+    acknowledged_by: Mapped[str] = mapped_column(String(100), default="user")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class AlertRuleMute(Base):
+    """Tracks temporarily muted alert rules."""
+
+    __tablename__ = "alert_rule_mutes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[str] = mapped_column(String(100), index=True)
+    muted_by: Mapped[str] = mapped_column(String(100), default="user")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
