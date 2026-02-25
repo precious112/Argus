@@ -64,8 +64,8 @@ def create_user(username: str, password: str) -> None:
 
         conn.execute(
             text(
-                "INSERT INTO users (id, username, password_hash, is_active) "
-                "VALUES (:id, :username, :password_hash, 1)"
+                "INSERT INTO users (id, username, password_hash, is_active, created_at) "
+                "VALUES (:id, :username, :password_hash, 1, CURRENT_TIMESTAMP)"
             ),
             {"id": user_id, "username": username, "password_hash": pw_hash},
         )
