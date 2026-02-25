@@ -8,6 +8,7 @@ COPY packages/web/ ./
 
 ARG NEXT_PUBLIC_AGENT_WS_URL=ws://localhost:7600/api/v1/ws
 ARG NEXT_PUBLIC_AGENT_API_URL=http://localhost:7600/api/v1
+ARG NEXT_PUBLIC_ARGUS_URL=http://localhost:7600
 
 RUN npm run build
 RUN mkdir -p /app/public
