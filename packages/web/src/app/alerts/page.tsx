@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { apiFetch } from "@/lib/api";
 
 interface AlertItem {
   id: string;
@@ -53,7 +54,7 @@ export default function AlertsPage() {
       if (severityFilter !== "all") params.set("severity", severityFilter);
       params.set("page", String(page));
       params.set("page_size", String(PAGE_SIZE));
-      const res = await fetch(`${API_BASE}/alerts?${params}`);
+      const res = await apiFetch(`${API_BASE}/alerts?${params}`);
       const data = await res.json();
       setAlerts(data.alerts || []);
       setTotal(data.total ?? data.count ?? 0);
@@ -65,7 +66,7 @@ export default function AlertsPage() {
 
   const fetchRules = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/rules`);
+      const res = await apiFetch(`${API_BASE}/rules`);
       const data = await res.json();
       setRules(data.rules || []);
     } catch {
@@ -87,7 +88,7 @@ export default function AlertsPage() {
   }, [fetchAlerts, fetchRules]);
 
   const acknowledgeAlert = async (alertId: string) => {
-    await fetch(`${API_BASE}/alerts/${alertId}/acknowledge`, {
+    await apiFetch(`${API_BASE}/alerts/${alertId}/acknowledge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -96,14 +97,14 @@ export default function AlertsPage() {
   };
 
   const resolveAlert = async (alertId: string) => {
-    await fetch(`${API_BASE}/alerts/${alertId}/resolve`, {
+    await apiFetch(`${API_BASE}/alerts/${alertId}/resolve`, {
       method: "POST",
     });
     fetchAlerts();
   };
 
   const muteRule = async (ruleId: string, hours: number) => {
-    await fetch(`${API_BASE}/rules/${ruleId}/mute`, {
+    await apiFetch(`${API_BASE}/rules/${ruleId}/mute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ duration_hours: hours }),
@@ -113,7 +114,7 @@ export default function AlertsPage() {
   };
 
   const unmuteRule = async (ruleId: string) => {
-    await fetch(`${API_BASE}/rules/${ruleId}/unmute`, {
+    await apiFetch(`${API_BASE}/rules/${ruleId}/unmute`, {
       method: "POST",
     });
     fetchRules();

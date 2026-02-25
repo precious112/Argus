@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/api";
 import { ServiceCard } from "@/components/services/ServiceCard";
 import { ServiceMetricsPanel } from "@/components/services/ServiceMetricsPanel";
 
@@ -25,7 +26,7 @@ export default function ServicesPage() {
   useEffect(() => {
     async function fetchServices() {
       try {
-        const res = await fetch(`${API_BASE}/api/v1/services`);
+        const res = await apiFetch(`${API_BASE}/api/v1/services`);
         const data = await res.json();
         setServices(data.services || []);
       } catch {

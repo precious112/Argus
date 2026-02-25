@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { apiFetch } from "@/lib/api";
 import {
   Area,
   AreaChart,
@@ -107,13 +108,13 @@ export default function AnalyticsPage() {
       const gran = granularityForRange(rangeHours);
       const [summaryRes, usageRes, providerRes, modelRes, sourceRes, dailyRes, budgetRes] =
         await Promise.all([
-          fetch(`${API}/analytics/summary`),
-          fetch(`${API}/analytics/usage?granularity=${gran}&since_hours=${rangeHours}`),
-          fetch(`${API}/analytics/breakdown?group_by=provider&since_hours=${rangeHours}`),
-          fetch(`${API}/analytics/breakdown?group_by=model&since_hours=${rangeHours}`),
-          fetch(`${API}/analytics/breakdown?group_by=source&since_hours=${rangeHours}`),
-          fetch(`${API}/analytics/usage?granularity=day&since_hours=720`),
-          fetch(`${API}/budget`),
+          apiFetch(`${API}/analytics/summary`),
+          apiFetch(`${API}/analytics/usage?granularity=${gran}&since_hours=${rangeHours}`),
+          apiFetch(`${API}/analytics/breakdown?group_by=provider&since_hours=${rangeHours}`),
+          apiFetch(`${API}/analytics/breakdown?group_by=model&since_hours=${rangeHours}`),
+          apiFetch(`${API}/analytics/breakdown?group_by=source&since_hours=${rangeHours}`),
+          apiFetch(`${API}/analytics/usage?granularity=day&since_hours=720`),
+          apiFetch(`${API}/budget`),
         ]);
 
       const [summaryJ, usageJ, providerJ, modelJ, sourceJ, dailyJ, budgetJ] =

@@ -9,6 +9,7 @@ import type {
   ServerMessage,
 } from "@/lib/protocol";
 import type { Message, ResponseSegment } from "@/components/chat/MessageBubble";
+import { apiFetch } from "@/lib/api";
 import { generateId } from "@/lib/utils";
 
 interface ToolCall {
@@ -54,7 +55,7 @@ export function useChat() {
     const apiBase =
       process.env.NEXT_PUBLIC_ARGUS_URL || "http://localhost:7600";
     try {
-      await fetch(`${apiBase}/api/v1/alerts/${alertId}/acknowledge`, {
+      await apiFetch(`${apiBase}/api/v1/alerts/${alertId}/acknowledge`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),

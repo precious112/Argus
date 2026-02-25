@@ -64,6 +64,20 @@ def _get_provider():  # type: ignore[no-untyped-def]
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, client: str = "web") -> None:
     """Main WebSocket endpoint for chat communication."""
+    # Verify JWT from cookie before accepting the connection
+    token = websocket.cookies.get("argus_token", "")
+    if token:
+        try:
+            from argus_agent.auth.jwt import decode_access_token
+
+            decode_access_token(token)
+        except Exception:
+            await websocket.close(code=4001, reason="Invalid or expired token")
+            return
+    else:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
     await manager.connect(websocket)
     client_type = client if client in ("cli", "web") else "web"
 

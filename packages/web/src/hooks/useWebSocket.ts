@@ -46,9 +46,14 @@ export function useWebSocket({ url, onMessage }: UseWebSocketOptions) {
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setIsConnected(false);
         if (pingRef.current) clearInterval(pingRef.current);
+        // Auth rejection — redirect to login instead of reconnecting
+        if (event.code === 4001) {
+          window.location.href = "/login";
+          return;
+        }
         // Auto-reconnect
         reconnectRef.current = setTimeout(connect, RECONNECT_DELAY);
       };
