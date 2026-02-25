@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from typing import Any
 
 from prompt_toolkit import PromptSession
@@ -258,15 +257,17 @@ async def start_chat(server_url: str) -> None:
 
 
 async def _stream_response(ws: Any, server_url: str) -> None:
-    """Stream and render the agent response."""
-    full_content = ""
+    """Stream and render the agent response with live markdown."""
+    segment_content = ""  # Current text segment (reset on tool interruptions)
     done = False
+    streaming = False
 
-    # Show spinner while waiting for first content
-    spinner = Spinner("dots", text="Thinking...")
-    live = Live(spinner, console=console, refresh_per_second=10)
+    def _new_live(renderable: Any = None) -> Live:
+        r = renderable or Spinner("dots", text="Thinking...")
+        return Live(r, console=console, refresh_per_second=8, transient=False)
+
+    live = _new_live()
     live.start()
-    first_content = True
 
     while not done:
         try:
@@ -277,38 +278,21 @@ async def _stream_response(ws: Any, server_url: str) -> None:
             if msg_type == "assistant_message_delta":
                 content = msg.get("data", {}).get("content", "")
                 if content:
-                    if first_content:
-                        live.stop()
-                        first_content = False
-                    full_content += content
-                    # Write raw text as it streams
-                    sys.stdout.write(content)
-                    sys.stdout.flush()
+                    streaming = True
+                    segment_content += content
+                    live.update(Markdown(segment_content))
 
             elif msg_type == "assistant_message_end":
-                if first_content:
-                    live.stop()
-                    first_content = False
-                # Re-render the full response as markdown
-                if full_content.strip():
-                    # Move to new line, then render formatted version
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                    # Clear streamed text and replace with rich markdown
-                    console.print(Panel(
-                        Markdown(full_content),
-                        title="Argus",
-                        border_style="cyan",
-                        padding=(0, 1),
-                    ))
                 done = True
 
             elif msg_type == "tool_call":
-                if first_content:
-                    live.update(Spinner("dots", text="Thinking..."))
                 name = msg.get("data", {}).get("name", "")
-                if not first_content:
-                    console.print(f"\n  [dim]> Calling tool: {name}[/dim]")
+                if streaming:
+                    live.stop()
+                    segment_content = ""
+                    streaming = False
+                    live = _new_live(Spinner("dots", text=f"Calling {name}..."))
+                    live.start()
                 else:
                     live.update(Spinner("dots", text=f"Calling {name}..."))
 
@@ -318,15 +302,17 @@ async def _stream_response(ws: Any, server_url: str) -> None:
                 name = data.get("name", "")
                 result = data.get("result", {})
 
-                if not first_content:
-                    _render_tool_result(name, result, display_type)
-                else:
-                    live.update(Spinner("dots", text="Processing results..."))
+                live.stop()
+                _render_tool_result(name, result, display_type)
+                segment_content = ""
+                streaming = False
+                live = _new_live(Spinner("dots", text="Processing..."))
+                live.start()
 
             elif msg_type == "action_request":
-                if first_content:
-                    live.stop()
-                    first_content = False
+                live.stop()
+                segment_content = ""
+                streaming = False
 
                 data = msg.get("data", {})
                 risk = data.get("risk_level", "")
@@ -355,30 +341,34 @@ async def _stream_response(ws: Any, server_url: str) -> None:
                     },
                 }))
 
+                live = _new_live(Spinner("dots", text="Executing..."))
+                live.start()
+
             elif msg_type == "action_complete":
+                live.stop()
                 ec = msg.get("data", {}).get("exit_code", "")
                 console.print(f"  [dim]Action complete (exit code: {ec})[/dim]")
+                live = _new_live(Spinner("dots", text="Processing..."))
+                live.start()
 
             elif msg_type == "error":
-                if first_content:
-                    live.stop()
-                    first_content = False
+                live.stop()
                 err = msg.get("data", {}).get("message", "")
                 console.print(f"\n[red]Error: {err}[/red]")
-                done = True
+                return
 
             elif msg_type in ("thinking_start", "thinking_end", "pong",
                               "assistant_message_start", "system_status"):
                 pass  # ignore
 
         except asyncio.TimeoutError:
-            if first_content:
-                live.stop()
+            live.stop()
             console.print("\n[yellow]Response timed out[/yellow]")
-            done = True
+            return
 
-    if first_content:
-        live.stop()
+    # Stop live — the last frame (rendered markdown) stays on screen
+    live.stop()
+    console.print()
 
 
 def _render_tool_result(name: str, result: dict[str, Any], display_type: str) -> None:
