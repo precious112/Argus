@@ -12,7 +12,18 @@ class ArgusAPI:
 
     def __init__(self, base_url: str = "http://localhost:7600") -> None:
         self._base = base_url.rstrip("/")
-        self._client = httpx.Client(base_url=f"{self._base}/api/v1", timeout=15)
+        cookies = {}
+        try:
+            from argus_cli.auth import load_token
+
+            token = load_token(self._base)
+            if token:
+                cookies["argus_token"] = token
+        except Exception:
+            pass
+        self._client = httpx.Client(
+            base_url=f"{self._base}/api/v1", timeout=15, cookies=cookies,
+        )
 
     def health(self) -> dict[str, Any]:
         return self._client.get("/health").json()

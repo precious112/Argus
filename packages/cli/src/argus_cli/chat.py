@@ -109,6 +109,32 @@ def _render_status_line(snapshot: dict[str, Any], mode: str = "") -> None:
     )
 
 
+def _ensure_token(server_url: str) -> str | None:
+    """Ensure we have a valid auth token, prompting for login if needed."""
+    from argus_cli.auth import clear_token, load_token, login
+
+    token = load_token(server_url)
+    if token:
+        return token
+
+    console.print("[yellow]Authentication required.[/yellow]")
+    try:
+        username = input("  Username: ").strip()
+        import getpass
+        password = getpass.getpass("  Password: ")
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]Login cancelled.[/dim]")
+        return None
+
+    try:
+        token = login(server_url, username, password)
+        console.print("[green]Login successful.[/green]")
+        return token
+    except Exception as e:
+        console.print(f"[red]Login failed: {e}[/red]")
+        return None
+
+
 async def start_chat(server_url: str) -> None:
     """Connect to Argus WebSocket and run an interactive chat loop."""
     try:
@@ -150,10 +176,17 @@ async def start_chat(server_url: str) -> None:
         subtitle="Ctrl+C to quit",
         border_style="cyan",
     ))
+
+    # Authenticate before connecting
+    token = _ensure_token(server_url)
+    if not token:
+        return
+
     console.print(f"[dim]Connecting to {server_url}...[/dim]")
 
     try:
-        async with websockets.connect(ws_url) as ws:
+        extra_headers = {"Cookie": f"argus_token={token}"}
+        async with websockets.connect(ws_url, additional_headers=extra_headers) as ws:
             # Read the connected message
             raw = await ws.recv()
             msg = json.loads(raw)
@@ -210,7 +243,18 @@ async def start_chat(server_url: str) -> None:
                 await _stream_response(ws, server_url)
 
     except Exception as e:
-        console.print(f"[red]Connection failed: {e}[/red]")
+        err_str = str(e)
+        if "403" in err_str or "4001" in err_str or "Authentication" in err_str:
+            from argus_cli.auth import clear_token
+
+            clear_token(server_url)
+            console.print("[yellow]Session expired or invalid. Please log in again.[/yellow]")
+            token = _ensure_token(server_url)
+            if token:
+                console.print("[dim]Reconnecting...[/dim]")
+                await start_chat(server_url)
+        else:
+            console.print(f"[red]Connection failed: {e}[/red]")
 
 
 async def _stream_response(ws: Any, server_url: str) -> None:
