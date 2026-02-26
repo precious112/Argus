@@ -8,7 +8,7 @@ set -euo pipefail
 # --- Optional runtime URL rewrite --------------------------
 # If ARGUS_PUBLIC_URL is set, replace the baked-in localhost
 # URLs in the Next.js JS bundles so the UI can reach the
-# agent on a remote host.
+# agent on a remote host, and auto-configure CORS.
 if [ -n "${ARGUS_PUBLIC_URL:-}" ]; then
     ARGUS_PUBLIC_URL="${ARGUS_PUBLIC_URL%/}"  # strip trailing slash
     WS_URL=$(echo "$ARGUS_PUBLIC_URL" | sed 's|^http|ws|')
@@ -18,6 +18,13 @@ if [ -n "${ARGUS_PUBLIC_URL:-}" ]; then
         -e "s|http://localhost:7600|${ARGUS_PUBLIC_URL}|g" \
         -e "s|ws://localhost:7600|${WS_URL}|g" \
         {} +
+
+    # Derive the web origin (same host, port 3000) for CORS
+    WEB_ORIGIN=$(echo "$ARGUS_PUBLIC_URL" | sed 's|:[0-9]*$||'):3000
+    if [ -z "${ARGUS_CORS_ORIGINS:-}" ]; then
+        export ARGUS_CORS_ORIGINS="http://localhost:3000,${WEB_ORIGIN}"
+        echo "[argus] Auto-set CORS origins → ${ARGUS_CORS_ORIGINS}"
+    fi
 fi
 
 # --- Graceful shutdown -------------------------------------
