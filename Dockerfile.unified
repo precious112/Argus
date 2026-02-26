@@ -30,10 +30,16 @@ FROM python:3.12-slim AS agent-builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
+
+# Agent server
 COPY packages/agent/pyproject.toml packages/agent/README.md ./
 COPY packages/agent/src/ ./src/
-
 RUN uv pip install --system --no-cache-dir ".[all-providers]"
+
+# CLI / TUI client
+COPY packages/cli/pyproject.toml packages/cli/README.md /cli/
+COPY packages/cli/src/ /cli/src/
+RUN uv pip install --system --no-cache-dir /cli
 
 # ----------------------------------------------------------
 # Stage 3: Minimal runtime — Python + Node in one image
@@ -52,6 +58,7 @@ COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=agent-builder /usr/local/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/
 COPY --from=agent-builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn
 COPY --from=agent-builder /usr/local/bin/argus-server /usr/local/bin/argus-server
+COPY --from=agent-builder /usr/local/bin/argus /usr/local/bin/argus
 
 # Next.js standalone app
 WORKDIR /app/web
