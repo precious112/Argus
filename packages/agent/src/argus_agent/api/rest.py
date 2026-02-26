@@ -15,11 +15,23 @@ router = APIRouter(tags=["api"])
 @router.get("/health")
 async def health_check() -> dict[str, Any]:
     """Health check endpoint."""
+    from argus_agent.licensing import get_license_manager
+
+    mgr = get_license_manager()
     return {
         "status": "healthy",
         "version": __version__,
+        "edition": mgr.edition.value,
         "timestamp": datetime.now(UTC).isoformat(),
     }
+
+
+@router.get("/license")
+async def license_info() -> dict[str, Any]:
+    """Return current license edition, features, and metadata."""
+    from argus_agent.licensing import get_license_manager
+
+    return get_license_manager().to_dict()
 
 
 @router.get("/status")

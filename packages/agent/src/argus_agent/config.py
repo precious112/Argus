@@ -74,6 +74,12 @@ class SecurityConfig(BaseModel):
     lockout_minutes: int = 15
 
 
+class LicenseConfig(BaseModel):
+    """License key configuration for open-core feature gating."""
+
+    key: str = ""
+
+
 class AlertConfig(BaseModel):
     """Alerting configuration."""
 
@@ -104,6 +110,7 @@ class Settings(BaseSettings):
     collector: CollectorConfig = Field(default_factory=CollectorConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     alerting: AlertConfig = Field(default_factory=AlertConfig)
+    license: LicenseConfig = Field(default_factory=LicenseConfig)
 
     debug: bool = False
     host_root: str = ""

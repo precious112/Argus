@@ -99,6 +99,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Auto-generate JWT secret key if still using the default
     ensure_secret_key(settings)
 
+    # Initialize license manager
+    from argus_agent.licensing import init_license_manager
+
+    lm = init_license_manager(settings.license.key)
+    logger.info(
+        "Argus edition: %s (%d features enabled)",
+        lm.edition.value,
+        len(lm.get_enabled_features()),
+    )
+
     # Initialize databases
     await init_db(settings.storage.sqlite_path)
     init_timeseries(settings.storage.duckdb_path)
@@ -356,6 +366,18 @@ def _register_all_tools(*, is_sdk_only: bool = False) -> None:
 
         register_alert_management_tools()
 
+        # Pro tools — only when licensed
+        try:
+            from argus_agent.licensing import has_feature
+            from argus_agent.licensing.editions import Feature
+
+            if has_feature(Feature.ADVANCED_INTEGRATIONS):
+                from argus_agent.pro.tools import register_pro_tools
+
+                register_pro_tools()
+        except ImportError:
+            pass
+
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -384,6 +406,7 @@ def create_app() -> FastAPI:
     auth_exempt = {
         "/health",
         "/api/v1/health",
+        "/api/v1/license",
         "/api/v1/auth/login",
         "/api/v1/auth/logout",
     }
