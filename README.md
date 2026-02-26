@@ -100,6 +100,68 @@ docker compose -f docker/docker-compose.unified.yml up -d
 | `ARGUS_PUBLIC_URL` | — | Set for remote access, e.g. `http://192.168.1.50:7600` |
 | `ARGUS_CORS_ORIGINS` | auto | Custom CORS origins (auto-set when `ARGUS_PUBLIC_URL` is used) |
 
+### User Management
+
+After starting Argus, create your first user account:
+
+```bash
+docker exec -it argus python -m argus_agent.auth.cli create-user
+```
+
+This will prompt for a username and password. Or pass them directly:
+
+```bash
+docker exec -it argus python -m argus_agent.auth.cli create-user --username admin --password your-password
+```
+
+### CLI
+
+The Argus CLI is bundled in the Docker image. Use it to chat with the AI agent, check status, view alerts, and more — all from the terminal.
+
+```bash
+# Login (interactive prompt for username/password)
+docker exec -it argus argus login
+
+# Start an interactive chat session with the AI agent
+docker exec -it argus argus
+
+# One-off question
+docker exec -it argus argus ask "What's using the most CPU right now?"
+
+# System status
+docker exec -it argus argus status
+
+# View alerts
+docker exec -it argus argus alerts
+
+# View logs
+docker exec -it argus argus logs -n 100
+
+# List monitored processes
+docker exec -it argus argus ps
+
+# List SDK-instrumented services
+docker exec -it argus argus services
+
+# View/update LLM config
+docker exec -it argus argus config
+docker exec -it argus argus config set
+
+# Logout
+docker exec -it argus argus logout
+```
+
+If running the CLI outside the container, set the server URL:
+
+```bash
+pip install argus-cli
+argus --server http://your-server-ip:7600
+```
+
+### Alerting (Slack, Email, Webhooks)
+
+Argus supports Slack (Bot API), email (SMTP), and generic webhooks (auto-detects Slack/Discord webhook URLs). Configure all channels from the **Settings** page in the Web UI — add your credentials, pick a channel, and hit test to verify.
+
 ### Multi-Container Setup
 
 Alternatively, run agent and web as separate containers:
