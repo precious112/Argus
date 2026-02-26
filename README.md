@@ -75,6 +75,25 @@ export ARGUS_LLM_API_KEY=your-api-key-here
 docker compose -f docker/docker-compose.unified.yml up -d
 ```
 
+**Remote access** — if accessing from another machine, set `ARGUS_PUBLIC_URL` to the host's address. CORS is auto-configured:
+
+```bash
+docker run -d --name argus \
+  -p 7600:7600 -p 3000:3000 \
+  -e ARGUS_LLM__API_KEY=your-api-key-here \
+  -e ARGUS_PUBLIC_URL=http://your-server-ip:7600 \
+  -v argus_data:/data \
+  ghcr.io/precious112/argus:latest
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARGUS_LLM__PROVIDER` | `openai` | LLM provider: `openai`, `anthropic`, `gemini` |
+| `ARGUS_LLM__API_KEY` | — | **Required.** API key for your LLM provider |
+| `ARGUS_LLM__MODEL` | `gpt-4o` | Model name |
+| `ARGUS_PUBLIC_URL` | — | Set for remote access, e.g. `http://192.168.1.50:7600` |
+| `ARGUS_CORS_ORIGINS` | auto | Custom CORS origins (auto-set when `ARGUS_PUBLIC_URL` is used) |
+
 ### Multi-Container Setup
 
 Alternatively, run agent and web as separate containers:
