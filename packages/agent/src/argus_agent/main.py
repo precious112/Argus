@@ -20,7 +20,7 @@ from argus_agent.api.ingest import router as ingest_router
 from argus_agent.api.rest import router as rest_router
 from argus_agent.api.ws import router as ws_router
 from argus_agent.auth.jwt import decode_access_token
-from argus_agent.config import get_settings
+from argus_agent.config import ensure_secret_key, get_settings
 from argus_agent.storage.database import close_db, init_db
 from argus_agent.storage.timeseries import close_timeseries, init_timeseries
 
@@ -95,6 +95,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Ensure data directory exists
     Path(settings.storage.data_dir).mkdir(parents=True, exist_ok=True)
+
+    # Auto-generate JWT secret key if still using the default
+    ensure_secret_key(settings)
 
     # Initialize databases
     await init_db(settings.storage.sqlite_path)

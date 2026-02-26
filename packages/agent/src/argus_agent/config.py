@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -155,3 +157,30 @@ def reset_settings() -> None:
     """Reset settings singleton (for testing)."""
     global _settings
     _settings = None
+
+
+_DEFAULT_SECRET = "change-me-on-first-run"
+_logger = logging.getLogger("argus")
+
+
+def ensure_secret_key(settings: Settings) -> None:
+    """Auto-generate a JWT secret key on first run if the user hasn't set one.
+
+    The generated key is persisted to ``{data_dir}/.secret_key`` so it
+    survives restarts.  Users who explicitly set ``ARGUS_SECURITY__SECRET_KEY``
+    or provide a value in ``argus.yaml`` keep full control.
+    """
+    if settings.security.secret_key != _DEFAULT_SECRET:
+        return  # user provided their own key
+
+    secret_file = Path(settings.storage.data_dir) / ".secret_key"
+
+    if secret_file.exists():
+        settings.security.secret_key = secret_file.read_text().strip()
+        _logger.info("Loaded secret key from %s", secret_file)
+    else:
+        key = secrets.token_urlsafe(32)
+        secret_file.write_text(key)
+        secret_file.chmod(0o600)
+        settings.security.secret_key = key
+        _logger.info("Generated new secret key and saved to %s", secret_file)
