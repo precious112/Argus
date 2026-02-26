@@ -63,35 +63,6 @@ docker run -d --name argus \
   -e ARGUS_LLM__PROVIDER=openai \
   -e ARGUS_LLM__API_KEY=your-api-key-here \
   -e ARGUS_LLM__MODEL=gpt-4o \
-  -e ARGUS_HOST_ROOT=/host \
-  -v argus_data:/data \
-  -v /proc:/host/proc:ro \
-  -v /sys:/host/sys:ro \
-  -v /var/log:/host/var/log:ro \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  --pid=host \
-  --privileged \
-  --restart unless-stopped \
-  ghcr.io/precious112/argus:latest
-```
-
-Open **http://localhost:3000** — agent API is at **http://localhost:7600**.
-
-For host monitoring with Docker Compose:
-
-```bash
-export ARGUS_LLM_API_KEY=your-api-key-here
-docker compose -f docker/docker-compose.unified.yml up -d
-```
-
-**Remote access** — if accessing from another machine, set `ARGUS_PUBLIC_URL` to the host's address. CORS is auto-configured:
-
-```bash
-docker run -d --name argus \
-  -p 7600:7600 -p 3000:3000 \
-  -e ARGUS_LLM__PROVIDER=openai \
-  -e ARGUS_LLM__API_KEY=your-api-key-here \
-  -e ARGUS_LLM__MODEL=gpt-4o \
   -e ARGUS_PUBLIC_URL=http://your-server-ip:7600 \
   -e ARGUS_HOST_ROOT=/host \
   -v argus_data:/data \
@@ -103,6 +74,22 @@ docker run -d --name argus \
   --privileged \
   --restart unless-stopped \
   ghcr.io/precious112/argus:latest
+```
+
+Replace `your-server-ip` with your server's external IP address (e.g. `104.198.209.149`).
+
+> **Firewall / VPC:** Make sure ports **3000** and **7600** are open for TCP ingress in your cloud provider's firewall or VPC security group settings (e.g. GCP firewall rules, AWS security groups, Azure NSGs) — otherwise you won't be able to reach the UI or API from your browser.
+
+- **Web UI:** open `http://your-server-ip:3000` in your browser
+- **Agent API:** `http://your-server-ip:7600` from your browser
+
+> **Note:** If you only need to interact with the API from within the server itself (e.g. `curl`, scripts, SDK calls), you can use `http://localhost:7600` directly — no firewall changes or `ARGUS_PUBLIC_URL` needed for that.
+
+For Docker Compose (reads from `.env` file automatically):
+
+```bash
+export ARGUS_LLM_API_KEY=your-api-key-here
+docker compose -f docker/docker-compose.unified.yml up -d
 ```
 
 | Variable | Default | Description |
