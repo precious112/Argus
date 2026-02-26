@@ -62,7 +62,16 @@ docker run -d --name argus \
   -p 7600:7600 -p 3000:3000 \
   -e ARGUS_LLM__PROVIDER=openai \
   -e ARGUS_LLM__API_KEY=your-api-key-here \
+  -e ARGUS_LLM__MODEL=gpt-4o \
+  -e ARGUS_HOST_ROOT=/host \
   -v argus_data:/data \
+  -v /proc:/host/proc:ro \
+  -v /sys:/host/sys:ro \
+  -v /var/log:/host/var/log:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --pid=host \
+  --privileged \
+  --restart unless-stopped \
   ghcr.io/precious112/argus:latest
 ```
 
@@ -80,9 +89,19 @@ docker compose -f docker/docker-compose.unified.yml up -d
 ```bash
 docker run -d --name argus \
   -p 7600:7600 -p 3000:3000 \
+  -e ARGUS_LLM__PROVIDER=openai \
   -e ARGUS_LLM__API_KEY=your-api-key-here \
+  -e ARGUS_LLM__MODEL=gpt-4o \
   -e ARGUS_PUBLIC_URL=http://your-server-ip:7600 \
+  -e ARGUS_HOST_ROOT=/host \
   -v argus_data:/data \
+  -v /proc:/host/proc:ro \
+  -v /sys:/host/sys:ro \
+  -v /var/log:/host/var/log:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --pid=host \
+  --privileged \
+  --restart unless-stopped \
   ghcr.io/precious112/argus:latest
 ```
 
