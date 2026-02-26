@@ -1,0 +1,38 @@
+services:
+  argus:
+    build:
+      context: ..
+      dockerfile: Dockerfile.unified
+    ports:
+      - "7600:7600"
+      - "3000:3000"
+    volumes:
+      # Host system access (read-only)
+      - /var/log:/host/var/log:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      # Docker API access
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent data
+      - argus_data:/data
+    pid: "host"
+    privileged: true
+    environment:
+      - ARGUS_MODE=${ARGUS_MODE:-full}
+      - ARGUS_HOST_ROOT=/host
+      - ARGUS_DEBUG=false
+      - ARGUS_LLM__PROVIDER=${ARGUS_LLM_PROVIDER:-openai}
+      - ARGUS_LLM__API_KEY=${ARGUS_LLM_API_KEY:-}
+      - ARGUS_LLM__MODEL=${ARGUS_LLM_MODEL:-gpt-4o}
+      - ARGUS_CORS_ORIGINS=http://localhost:3000
+      - ARGUS_PUBLIC_URL=${ARGUS_PUBLIC_URL:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7600/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  argus_data:

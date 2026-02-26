@@ -53,7 +53,31 @@ Daily and hourly token limits, priority reserves for critical investigations, an
 
 ## Quick Start
 
-### Docker (Recommended)
+### Single Image (Recommended)
+
+A single unified image bundles the agent server and web UI together:
+
+```bash
+docker run -d --name argus \
+  -p 7600:7600 -p 3000:3000 \
+  -e ARGUS_LLM__PROVIDER=openai \
+  -e ARGUS_LLM__API_KEY=your-api-key-here \
+  -v argus_data:/data \
+  ghcr.io/precious112/argus:latest
+```
+
+Open **http://localhost:3000** — agent API is at **http://localhost:7600**.
+
+For host monitoring with Docker Compose:
+
+```bash
+export ARGUS_LLM_API_KEY=your-api-key-here
+docker compose -f docker/docker-compose.unified.yml up -d
+```
+
+### Multi-Container Setup
+
+Alternatively, run agent and web as separate containers:
 
 ```bash
 # Set your LLM API key

@@ -1,0 +1,75 @@
+# ============================================================
+# Argus Unified Image — agent (Python) + web UI (Next.js)
+# 3-stage multi-stage build
+# ============================================================
+
+# ----------------------------------------------------------
+# Stage 1: Build Next.js web UI
+# ----------------------------------------------------------
+FROM node:22-slim AS web-builder
+
+WORKDIR /app
+COPY packages/web/package.json packages/web/package-lock.json* ./
+RUN npm install --frozen-lockfile 2>/dev/null || npm install
+
+COPY packages/web/ ./
+
+# Build-time URLs baked into JS bundles (overridable at runtime via ARGUS_PUBLIC_URL)
+ARG NEXT_PUBLIC_AGENT_WS_URL=ws://localhost:7600/api/v1/ws
+ARG NEXT_PUBLIC_AGENT_API_URL=http://localhost:7600/api/v1
+ARG NEXT_PUBLIC_ARGUS_URL=http://localhost:7600
+
+RUN npm run build
+RUN mkdir -p /app/public
+
+# ----------------------------------------------------------
+# Stage 2: Build Python agent + install all LLM providers
+# ----------------------------------------------------------
+FROM python:3.12-slim AS agent-builder
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+COPY packages/agent/pyproject.toml packages/agent/README.md ./
+COPY packages/agent/src/ ./src/
+
+RUN uv pip install --system --no-cache-dir ".[all-providers]"
+
+# ----------------------------------------------------------
+# Stage 3: Minimal runtime — Python + Node in one image
+# ----------------------------------------------------------
+FROM python:3.12-slim AS runtime
+
+# System dependencies for monitoring + tini as PID 1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    procps iproute2 curl util-linux tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js binary from the same glibc-based slim image
+COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node
+
+# Python packages + CLI entrypoints from agent-builder
+COPY --from=agent-builder /usr/local/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/
+COPY --from=agent-builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn
+COPY --from=agent-builder /usr/local/bin/argus-server /usr/local/bin/argus-server
+
+# Next.js standalone app
+WORKDIR /app/web
+COPY --from=web-builder /app/.next/standalone ./
+COPY --from=web-builder /app/.next/static ./.next/static
+COPY --from=web-builder /app/public ./public
+
+# Entrypoint script
+WORKDIR /app
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Data directory
+RUN mkdir -p /data
+
+ENV ARGUS_STORAGE__DATA_DIR=/data
+
+EXPOSE 7600 3000
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/app/entrypoint.sh"]
