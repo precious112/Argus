@@ -31,7 +31,9 @@ collector:
     - "/var/log/auth.log"
 
 security:
-  secret_key: "change-me-on-first-run"
+  # secret_key is auto-generated on first run and saved to {data_dir}/.secret_key.
+  # Set ARGUS_SECURITY__SECRET_KEY or uncomment below to use your own:
+  # secret_key: "your-custom-secret-here"
   session_expiry_hours: 24
   max_login_attempts: 10
   lockout_minutes: 15
