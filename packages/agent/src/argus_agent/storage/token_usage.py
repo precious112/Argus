@@ -8,8 +8,8 @@ from typing import Any
 
 from sqlalchemy import func, select, text
 
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import TokenUsage
+from argus_agent.storage.repositories import get_session
 
 logger = logging.getLogger("argus.storage.token_usage")
 

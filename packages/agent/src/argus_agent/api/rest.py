@@ -491,9 +491,11 @@ async def get_logs(
 ) -> dict[str, Any]:
     """Get recent log entries from DuckDB."""
     try:
-        from argus_agent.storage.timeseries import query_log_entries
+        from argus_agent.storage.repositories import get_metrics_repository
 
-        entries = query_log_entries(severity=severity, limit=min(limit, 200))
+        entries = get_metrics_repository().query_log_entries(
+            severity=severity, limit=min(limit, 200),
+        )
         return {"entries": entries, "count": len(entries)}
     except RuntimeError:
         return {"entries": [], "count": 0, "error": "Storage not initialized"}
@@ -542,9 +544,9 @@ async def ask_question(
 async def list_services() -> dict[str, Any]:
     """List all services sending SDK telemetry with health summary."""
     try:
-        from argus_agent.storage.timeseries import query_service_summary
+        from argus_agent.storage.repositories import get_metrics_repository
 
-        summaries = query_service_summary(since_minutes=1440)
+        summaries = get_metrics_repository().query_service_summary(since_minutes=1440)
         return {"services": summaries, "count": len(summaries)}
     except RuntimeError:
         return {"services": [], "count": 0, "error": "Storage not initialized"}
@@ -558,17 +560,15 @@ async def service_metrics(
 ) -> dict[str, Any]:
     """Get aggregated metrics for a specific service."""
     try:
-        from argus_agent.storage.timeseries import (
-            query_error_groups,
-            query_function_metrics,
-        )
+        from argus_agent.storage.repositories import get_metrics_repository
 
-        buckets = query_function_metrics(
+        repo = get_metrics_repository()
+        buckets = repo.query_function_metrics(
             service=service,
             since_minutes=since_minutes,
             interval_minutes=interval_minutes,
         )
-        errors = query_error_groups(service=service, since_minutes=since_minutes)
+        errors = repo.query_error_groups(service=service, since_minutes=since_minutes)
 
         return {
             "service": service,

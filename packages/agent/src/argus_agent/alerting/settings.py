@@ -10,8 +10,8 @@ from typing import Any
 from sqlalchemy import select
 
 from argus_agent.config import AlertConfig
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import NotificationChannelConfig
+from argus_agent.storage.repositories import get_session
 
 logger = logging.getLogger("argus.alerting.settings")
 

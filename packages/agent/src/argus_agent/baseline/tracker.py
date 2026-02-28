@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from argus_agent.storage.timeseries import get_connection
+from argus_agent.storage.repositories import get_metrics_repository
 
 logger = logging.getLogger("argus.baseline.tracker")
 
@@ -42,10 +42,10 @@ class BaselineTracker:
 
     def update_baselines(self) -> None:
         """Recompute baselines from the last 7 days of system_metrics data."""
-        conn = get_connection()
+        repo = get_metrics_repository()
         since = datetime.now(UTC) - timedelta(days=7)
 
-        rows = conn.execute(
+        rows = repo.execute_raw(
             """
             SELECT
                 metric_name,
@@ -63,7 +63,7 @@ class BaselineTracker:
             HAVING COUNT(*) >= 10
             """,
             [since],
-        ).fetchall()
+        )
 
         updated: dict[str, MetricBaseline] = {}
         for row in rows:
@@ -82,20 +82,20 @@ class BaselineTracker:
 
         self._baselines = updated
 
-        # Persist to DuckDB for other consumers
-        self._persist(conn, updated)
+        # Persist to metrics store for other consumers
+        self._persist(repo, updated)
 
         logger.info("Baselines updated for %d system metrics", len(updated))
 
     def update_sdk_baselines(self) -> None:
         """Compute baselines from SDK runtime metrics and span durations."""
-        conn = get_connection()
+        repo = get_metrics_repository()
         since = datetime.now(UTC) - timedelta(days=7)
 
         updated: dict[str, MetricBaseline] = {}
 
         # 1. SDK runtime metrics from sdk_metrics table
-        sdk_rows = conn.execute(
+        sdk_rows = repo.execute_raw(
             """
             SELECT
                 'sdk.' || service || '.' || metric_name AS metric_key,
@@ -113,7 +113,7 @@ class BaselineTracker:
             HAVING COUNT(*) >= 10
             """,
             [since],
-        ).fetchall()
+        )
 
         for row in sdk_rows:
             bl = MetricBaseline(
@@ -130,7 +130,7 @@ class BaselineTracker:
             updated[bl.metric_name] = bl
 
         # 2. Span durations grouped by service + name
-        span_rows = conn.execute(
+        span_rows = repo.execute_raw(
             """
             SELECT
                 'sdk.' || service || '.span.' || name AS metric_key,
@@ -148,7 +148,7 @@ class BaselineTracker:
             HAVING COUNT(*) >= 10
             """,
             [since],
-        ).fetchall()
+        )
 
         for row in span_rows:
             bl = MetricBaseline(
@@ -165,7 +165,7 @@ class BaselineTracker:
             updated[bl.metric_name] = bl
 
         # 3. Traffic request counts per service (5-min buckets over 7 days)
-        traffic_rows = conn.execute(
+        traffic_rows = repo.execute_raw(
             """
             SELECT
                 'traffic.' || service || '.request_count_5m' AS metric_key,
@@ -190,7 +190,7 @@ class BaselineTracker:
             HAVING COUNT(*) >= 10
             """,
             [since],
-        ).fetchall()
+        )
 
         for row in traffic_rows:
             bl = MetricBaseline(
@@ -210,7 +210,7 @@ class BaselineTracker:
         self._baselines.update(updated)
 
         # Persist all baselines
-        self._persist(conn, self._baselines)
+        self._persist(repo, self._baselines)
 
         logger.info("SDK baselines updated for %d metrics", len(updated))
 
@@ -233,12 +233,12 @@ class BaselineTracker:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _persist(conn: Any, baselines: dict[str, MetricBaseline]) -> None:
-        """Write baselines to the metric_baselines DuckDB table."""
+    def _persist(repo: Any, baselines: dict[str, MetricBaseline]) -> None:
+        """Write baselines to the metric_baselines table."""
         now = datetime.now(UTC)
-        conn.execute("DELETE FROM metric_baselines")
+        repo.execute_raw("DELETE FROM metric_baselines")
         for bl in baselines.values():
-            conn.execute(
+            repo.execute_raw(
                 "INSERT INTO metric_baselines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     now,

@@ -114,13 +114,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     # Initialize databases via repository pattern
-    operational_repo = SQLiteOperationalRepository()
-    await operational_repo.init(settings.storage.sqlite_path)
-    set_operational_repository(operational_repo)
+    if settings.deployment.mode == "saas":
+        # PostgreSQL + TimescaleDB + Redis
+        from argus_agent.auth.key_cache import init_key_cache
+        from argus_agent.storage.postgres_operational import PostgresOperationalRepository
+        from argus_agent.storage.timescaledb_metrics import TimescaleDBMetricsRepository
 
-    metrics_repo = DuckDBMetricsRepository()
-    metrics_repo.init(settings.storage.duckdb_path)
-    set_metrics_repository(metrics_repo)
+        operational_repo = PostgresOperationalRepository()
+        await operational_repo.init(settings.deployment.postgres_url)
+        set_operational_repository(operational_repo)
+
+        metrics_repo = TimescaleDBMetricsRepository()
+        metrics_repo.init(settings.deployment.timescale_url)
+        set_metrics_repository(metrics_repo)
+
+        await init_key_cache(settings.deployment.redis_url)
+        logger.info("SaaS mode: PostgreSQL + TimescaleDB + Redis initialized")
+    else:
+        # Self-hosted: SQLite + DuckDB (unchanged)
+        operational_repo = SQLiteOperationalRepository()
+        await operational_repo.init(settings.storage.sqlite_path)
+        set_operational_repository(operational_repo)
+
+        metrics_repo = DuckDBMetricsRepository()
+        metrics_repo.init(settings.storage.duckdb_path)
+        set_metrics_repository(metrics_repo)
 
     # Apply DB-persisted LLM settings (overrides env/YAML defaults)
     from argus_agent.llm.settings import LLMSettingsService
@@ -304,6 +322,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _process_monitor.stop()
     if _metrics_collector:
         await _metrics_collector.stop()
+
+    # Clean up Redis in SaaS mode
+    if settings.deployment.mode == "saas":
+        from argus_agent.auth.key_cache import close_key_cache
+
+        await close_key_cache()
 
     await operational_repo.close()
     metrics_repo.close()

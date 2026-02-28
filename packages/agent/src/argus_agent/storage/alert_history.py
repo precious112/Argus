@@ -7,8 +7,8 @@ from typing import Any
 
 from sqlalchemy import func, select, update
 
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import AlertHistory
+from argus_agent.storage.repositories import get_session
 
 logger = logging.getLogger("argus.storage.alert_history")
 

@@ -193,9 +193,9 @@ The user is connected via the web dashboard. You can use rich formatting:
 def _get_sdk_services_text() -> str:
     """Get active SDK services for the prompt."""
     try:
-        from argus_agent.storage.timeseries import query_service_summary
+        from argus_agent.storage.repositories import get_metrics_repository
 
-        summaries = query_service_summary()
+        summaries = get_metrics_repository().query_service_summary()
         if not summaries:
             return ""
         lines = []

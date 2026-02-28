@@ -12,7 +12,7 @@ import psutil
 from argus_agent.events.bus import get_event_bus
 from argus_agent.events.classifier import EventClassifier
 from argus_agent.events.types import Event, EventSeverity, EventSource, EventType
-from argus_agent.storage.timeseries import query_metrics, query_metrics_summary
+from argus_agent.storage.repositories import get_metrics_repository
 
 logger = logging.getLogger("argus.scheduler.tasks")
 
@@ -99,13 +99,14 @@ async def trend_analysis() -> None:
     bus = get_event_bus()
     now = datetime.now(UTC)
     findings: list[dict[str, Any]] = []
+    repo = get_metrics_repository()
 
     key_metrics = ["cpu_percent", "memory_percent", "disk_percent"]
     for metric_name in key_metrics:
         # 24h baseline
-        baseline = query_metrics_summary(metric_name, since=now - timedelta(hours=24))
+        baseline = repo.query_metrics_summary(metric_name, since=now - timedelta(hours=24))
         # Last 30 min
-        recent = query_metrics_summary(metric_name, since=now - timedelta(minutes=30))
+        recent = repo.query_metrics_summary(metric_name, since=now - timedelta(minutes=30))
 
         if baseline.get("count", 0) < 10 or recent.get("count", 0) < 2:
             continue
@@ -129,7 +130,7 @@ async def trend_analysis() -> None:
             )
 
     # Check for rapid disk usage growth
-    disk_data = query_metrics(
+    disk_data = repo.query_metrics(
         "disk_percent",
         since=now - timedelta(hours=6),
         limit=500,

@@ -12,8 +12,8 @@ from argus_agent.auth.dependencies import get_current_user
 from argus_agent.auth.jwt import create_access_token
 from argus_agent.auth.password import verify_password
 from argus_agent.config import get_settings
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import User
+from argus_agent.storage.repositories import get_session
 
 logger = logging.getLogger("argus.auth")
 

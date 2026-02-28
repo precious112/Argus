@@ -331,3 +331,8 @@ def get_operational_repository() -> OperationalRepository:
     if _operational_repo is None:
         raise RuntimeError("Operational repository not initialized.")
     return _operational_repo
+
+
+def get_session() -> AsyncSession:
+    """Convenience: get session from the global operational repository."""
+    return get_operational_repository().get_session()

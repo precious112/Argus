@@ -34,12 +34,50 @@ class IngestBatch(BaseModel):
     service: str = ""
 
 
+async def _validate_ingest_key(x_argus_key: str | None) -> None:
+    """Validate the API key in SaaS mode. No-op in self-hosted mode."""
+    from argus_agent.config import get_settings
+
+    settings = get_settings()
+    if settings.deployment.mode != "saas":
+        return  # Self-hosted: no key validation
+
+    if not x_argus_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    from argus_agent.auth.api_keys import hash_api_key, validate_api_key
+    from argus_agent.auth.key_cache import cache_key_result, get_cached_key
+    from argus_agent.tenancy.context import set_tenant_id
+
+    key_hash = hash_api_key(x_argus_key)
+
+    # Try cache first
+    cached = await get_cached_key(key_hash)
+    if cached is not None:
+        if cached.get("_invalid"):
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        set_tenant_id(cached["tenant_id"])
+        return
+
+    # Cache miss — check DB
+    result = await validate_api_key(x_argus_key)
+    await cache_key_result(key_hash, result)
+
+    if result is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    set_tenant_id(result["tenant_id"])
+
+
 @router.post("/ingest")
 async def ingest_telemetry(
     batch: IngestBatch,
     x_argus_key: str | None = Header(None),
 ) -> dict[str, Any]:
     """Receive batched telemetry events from SDKs."""
+    # Validate API key in SaaS mode (sets tenant context)
+    await _validate_ingest_key(x_argus_key)
+
     if len(batch.events) > MAX_EVENTS_PER_BATCH:
         raise HTTPException(
             status_code=400,
