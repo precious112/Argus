@@ -63,9 +63,9 @@ class DependencyAnalysisTool(Tool):
             kwargs.get("since_minutes", 60), kwargs.get("since"), kwargs.get("until"),
         )
         try:
-            from argus_agent.storage.timeseries import query_dependency_summary
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            summary = query_dependency_summary(
+            summary = get_metrics_repository().query_dependency_summary(
                 service=kwargs.get("service", ""),
                 since_minutes=kwargs.get("since_minutes", 60),
                 since_dt=since_dt,
@@ -126,9 +126,9 @@ class DependencyMapTool(Tool):
             kwargs.get("since_minutes", 60), kwargs.get("since"), kwargs.get("until"),
         )
         try:
-            from argus_agent.storage.timeseries import query_dependency_map
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            edges = query_dependency_map(
+            edges = get_metrics_repository().query_dependency_map(
                 since_minutes=kwargs.get("since_minutes", 60),
                 since_dt=since_dt,
                 until_dt=until_dt,

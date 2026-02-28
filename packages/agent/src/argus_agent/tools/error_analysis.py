@@ -70,9 +70,10 @@ class ErrorAnalysisTool(Tool):
         )
 
         try:
-            from argus_agent.storage.timeseries import query_error_groups
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            groups = query_error_groups(
+            repo = get_metrics_repository()
+            groups = repo.query_error_groups(
                 service=service,
                 since_minutes=since_minutes,
                 limit=limit,
@@ -147,9 +148,9 @@ class ErrorCorrelationTool(Tool):
         since_minutes = kwargs.get("since_minutes", 60)
 
         try:
-            from argus_agent.storage.timeseries import get_connection
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            conn = get_connection()
+            repo = get_metrics_repository()
         except RuntimeError:
             return {"error": "Time-series store not initialized"}
 
@@ -171,11 +172,11 @@ class ErrorCorrelationTool(Tool):
             params.append(error_type)
 
         where = " AND ".join(conditions)
-        errors = conn.execute(
+        errors = repo.execute_raw(
             f"SELECT timestamp, service, data FROM sdk_events "  # noqa: S608
             f"WHERE {where} ORDER BY timestamp DESC LIMIT 10",
             params,
-        ).fetchall()
+        )
 
         error_list = []
         trace_ids: set[str] = set()
@@ -198,11 +199,11 @@ class ErrorCorrelationTool(Tool):
         # 2. Find related traces
         related_traces = []
         for tid in list(trace_ids)[:5]:
-            trace_spans = conn.execute(
+            trace_spans = repo.execute_raw(
                 "SELECT name, kind, duration_ms, status, error_type "
                 "FROM spans WHERE trace_id = ? ORDER BY timestamp LIMIT 10",
                 [tid],
-            ).fetchall()
+            )
             related_traces.append({
                 "trace_id": tid,
                 "span_count": len(trace_spans),
@@ -224,14 +225,14 @@ class ErrorCorrelationTool(Tool):
             dep_params.append(service)
         dep_where = " AND ".join(dep_conditions)
 
-        dep_failures = conn.execute(
+        dep_failures = repo.execute_raw(
             f"SELECT dep_type, target, operation, error_message, "  # noqa: S608
             f"COUNT(*) AS cnt "
             f"FROM dependency_calls WHERE {dep_where} "
             f"GROUP BY dep_type, target, operation, error_message "
             f"ORDER BY cnt DESC LIMIT 10",
             dep_params,
-        ).fetchall()
+        )
 
         dep_list = [
             {"dep_type": r[0], "target": r[1], "operation": r[2],
@@ -250,12 +251,12 @@ class ErrorCorrelationTool(Tool):
             deploy_params.append(service)
         deploy_where = " AND ".join(deploy_conditions)
 
-        deploys = conn.execute(
+        deploys = repo.execute_raw(
             f"SELECT timestamp, service, version, git_sha "  # noqa: S608
             f"FROM deploy_events WHERE {deploy_where} "
             f"ORDER BY timestamp DESC LIMIT 5",
             deploy_params,
-        ).fetchall()
+        )
 
         deploy_list = [
             {"timestamp": r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0]),

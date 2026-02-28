@@ -65,9 +65,10 @@ class DeployHistoryTool(Tool):
             kwargs.get("since_minutes", 10080), kwargs.get("since"), kwargs.get("until"),
         )
         try:
-            from argus_agent.storage.timeseries import query_deploy_history
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            deploys = query_deploy_history(
+            repo = get_metrics_repository()
+            deploys = repo.query_deploy_history(
                 service=kwargs.get("service", ""),
                 since_minutes=kwargs.get("since_minutes", 10080),
                 limit=min(kwargs.get("limit", 20), 50),
@@ -131,12 +132,9 @@ class DeployImpactTool(Tool):
         window = kwargs.get("window_minutes", 30)
 
         try:
-            from argus_agent.storage.timeseries import (
-                get_connection,
-                query_deploy_history,
-            )
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            conn = get_connection()
+            repo = get_metrics_repository()
         except RuntimeError:
             return {"error": "Time-series store not initialized"}
 
@@ -146,7 +144,7 @@ class DeployImpactTool(Tool):
             deploy_ts = datetime.fromisoformat(deploy_ts_str)
         else:
             # Use most recent deploy for this service
-            deploys = query_deploy_history(service=service, limit=1)
+            deploys = repo.query_deploy_history(service=service, limit=1)
             if not deploys:
                 return {"error": f"No deploys found for service '{service}'"}
             deploy_ts = datetime.fromisoformat(deploys[0]["timestamp"])
@@ -160,7 +158,7 @@ class DeployImpactTool(Tool):
             ("before", before_start, deploy_ts),
             ("after", deploy_ts, after_end),
         ]:
-            result = conn.execute(
+            rows = repo.execute_raw(
                 "SELECT COUNT(*), "
                 "COUNT(*) FILTER (WHERE status != 'ok'), "
                 "AVG(duration_ms), "
@@ -168,7 +166,8 @@ class DeployImpactTool(Tool):
                 "FROM spans WHERE service = ? AND timestamp >= ? AND timestamp < ? "
                 "AND duration_ms IS NOT NULL",
                 [service, start, end],
-            ).fetchone()
+            )
+            result = rows[0] if rows else None
 
             total = result[0] if result else 0
             errors = result[1] if result else 0

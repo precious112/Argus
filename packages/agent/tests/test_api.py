@@ -58,8 +58,13 @@ async def test_system_status(client):
 
 @pytest.mark.asyncio
 async def test_ingest_endpoint(client):
-    mock_conn = MagicMock()
-    mock_conn.execute = MagicMock()
+    mock_repo = MagicMock()
+    mock_repo.insert_sdk_event = MagicMock()
+    mock_repo.insert_span = MagicMock()
+    mock_repo.insert_dependency_call = MagicMock()
+    mock_repo.insert_sdk_metric = MagicMock()
+    mock_repo.insert_deploy_event = MagicMock()
+    mock_repo.get_previous_deploy_version = MagicMock(return_value=None)
     payload = {
         "events": [
             {
@@ -71,7 +76,7 @@ async def test_ingest_endpoint(client):
         "sdk": "argus-python/0.1.0",
         "service": "test-app",
     }
-    with patch("argus_agent.storage.timeseries.get_connection", return_value=mock_conn):
+    with patch("argus_agent.storage.repositories.get_metrics_repository", return_value=mock_repo):
         resp = await client.post("/api/v1/ingest", json=payload)
     assert resp.status_code == 200
     data = resp.json()

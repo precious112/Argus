@@ -61,9 +61,9 @@ class BehaviorAnalysisTool(Tool):
         since_minutes = kwargs.get("since_minutes", 30)
 
         try:
-            from argus_agent.storage.timeseries import get_connection
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            conn = get_connection()
+            repo = get_metrics_repository()
         except RuntimeError:
             return {"error": "Time-series store not initialized"}
 
@@ -72,10 +72,10 @@ class BehaviorAnalysisTool(Tool):
         )
 
         # 1. Get current baselines
-        baselines = conn.execute(
+        baselines = repo.execute_raw(
             "SELECT metric_name, mean, stddev, p50, p95, p99, sample_count "
             "FROM metric_baselines WHERE metric_name LIKE 'sdk.%'"
-        ).fetchall()
+        )
 
         baseline_info = [
             {
@@ -102,12 +102,12 @@ class BehaviorAnalysisTool(Tool):
             rt_conditions.append("timestamp <= ?")
             rt_params.append(until_dt)
         rt_where = " AND ".join(rt_conditions)
-        anomalies = conn.execute(
+        anomalies = repo.execute_raw(
             f"SELECT timestamp, service, data FROM sdk_events "  # noqa: S608
             f"WHERE {rt_where} "
             f"ORDER BY timestamp DESC LIMIT 50",
             rt_params,
-        ).fetchall()
+        )
 
         # Check each against baselines for anomalies
         anomalous_metrics: list[dict[str, Any]] = []
@@ -142,12 +142,12 @@ class BehaviorAnalysisTool(Tool):
             deploy_conditions.append("service = ?")
             deploy_params.append(service)
 
-        deploys = conn.execute(
+        deploys = repo.execute_raw(
             f"SELECT timestamp, service, git_sha FROM deploy_events "  # noqa: S608
             f"WHERE {' AND '.join(deploy_conditions)} "
             f"ORDER BY timestamp DESC LIMIT 5",
             deploy_params,
-        ).fetchall()
+        )
 
         deploy_list = [
             {
@@ -168,11 +168,12 @@ class BehaviorAnalysisTool(Tool):
             health_conditions.append("service = ?")
             health_params.append(service)
         health_where = " AND ".join(health_conditions)
-        span_health = conn.execute(
+        span_health_rows = repo.execute_raw(
             f"SELECT COUNT(*), COUNT(*) FILTER (WHERE status != 'ok'), "  # noqa: S608
             f"AVG(duration_ms) FROM spans WHERE {health_where}",
             health_params,
-        ).fetchone()
+        )
+        span_health = span_health_rows[0] if span_health_rows else None
 
         health = {}
         if span_health and span_health[0] > 0:

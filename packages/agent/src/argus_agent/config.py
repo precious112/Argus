@@ -80,6 +80,20 @@ class LicenseConfig(BaseModel):
     key: str = ""
 
 
+class DeploymentConfig(BaseModel):
+    """Deployment mode configuration for SaaS vs self-hosted."""
+
+    mode: str = "self_hosted"  # "self_hosted" | "saas"
+    redis_url: str = ""
+    postgres_url: str = ""
+    timescale_url: str = ""
+    polar_access_token: str = ""
+    stripe_secret_key: str = ""
+    billing_provider: str = "polar"  # "polar" | "stripe"
+    smtp_url: str = ""
+    frontend_url: str = "http://localhost:3000"
+
+
 class AlertConfig(BaseModel):
     """Alerting configuration."""
 
@@ -111,6 +125,7 @@ class Settings(BaseSettings):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     alerting: AlertConfig = Field(default_factory=AlertConfig)
     license: LicenseConfig = Field(default_factory=LicenseConfig)
+    deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
 
     debug: bool = False
     host_root: str = ""

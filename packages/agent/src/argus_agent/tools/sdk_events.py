@@ -75,9 +75,9 @@ class SDKEventsTool(Tool):
         limit = min(kwargs.get("limit", 50), 200)
 
         try:
-            from argus_agent.storage.timeseries import get_connection
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            conn = get_connection()
+            repo = get_metrics_repository()
         except RuntimeError:
             return {"error": "Time-series store not initialized", "events": []}
 
@@ -105,11 +105,11 @@ class SDKEventsTool(Tool):
         where = " AND ".join(conditions)
         params.append(limit)
 
-        result = conn.execute(
+        result = repo.execute_raw(
             f"SELECT timestamp, service, event_type, data FROM sdk_events "  # noqa: S608
             f"WHERE {where} ORDER BY timestamp DESC LIMIT ?",
             params,
-        ).fetchall()
+        )
 
         events = []
         for row in result:

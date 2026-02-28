@@ -7,8 +7,8 @@ import logging
 import uuid
 
 from argus_agent.llm.base import LLMMessage
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import Conversation, Message
+from argus_agent.storage.repositories import get_operational_repository
 
 logger = logging.getLogger("argus.agent.memory")
 
@@ -30,7 +30,7 @@ class ConversationMemory:
         """Create conversation record in the database."""
         if self._persisted:
             return
-        async with get_session() as session:
+        async with get_operational_repository().get_session() as session:
             conv = Conversation(
                 id=self.conversation_id,
                 title=title or "New conversation",
@@ -50,7 +50,7 @@ class ConversationMemory:
     ) -> str:
         """Persist a single message to the database."""
         msg_id = str(uuid.uuid4())
-        async with get_session() as session:
+        async with get_operational_repository().get_session() as session:
             msg = Message(
                 id=msg_id,
                 conversation_id=self.conversation_id,

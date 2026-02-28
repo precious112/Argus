@@ -21,8 +21,12 @@ from argus_agent.api.rest import router as rest_router
 from argus_agent.api.ws import router as ws_router
 from argus_agent.auth.jwt import decode_access_token
 from argus_agent.config import ensure_secret_key, get_settings
-from argus_agent.storage.database import close_db, init_db
-from argus_agent.storage.timeseries import close_timeseries, init_timeseries
+from argus_agent.storage.duckdb_metrics import DuckDBMetricsRepository
+from argus_agent.storage.repositories import (
+    set_metrics_repository,
+    set_operational_repository,
+)
+from argus_agent.storage.sqlite_operational import SQLiteOperationalRepository
 
 logger = logging.getLogger("argus")
 
@@ -109,9 +113,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         len(lm.get_enabled_features()),
     )
 
-    # Initialize databases
-    await init_db(settings.storage.sqlite_path)
-    init_timeseries(settings.storage.duckdb_path)
+    # Initialize databases via repository pattern
+    operational_repo = SQLiteOperationalRepository()
+    await operational_repo.init(settings.storage.sqlite_path)
+    set_operational_repository(operational_repo)
+
+    metrics_repo = DuckDBMetricsRepository()
+    metrics_repo.init(settings.storage.duckdb_path)
+    set_metrics_repository(metrics_repo)
 
     # Apply DB-persisted LLM settings (overrides env/YAML defaults)
     from argus_agent.llm.settings import LLMSettingsService
@@ -296,8 +305,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if _metrics_collector:
         await _metrics_collector.stop()
 
-    await close_db()
-    close_timeseries()
+    await operational_repo.close()
+    metrics_repo.close()
     logger.info("Argus agent server stopped")
 
 
@@ -433,6 +442,15 @@ def create_app() -> FastAPI:
         except Exception:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
         return await call_next(request)
+
+    # Tenant context middleware
+    from argus_agent.tenancy.middleware import TenantMiddleware
+
+    settings = get_settings()
+    app.add_middleware(
+        TenantMiddleware,
+        is_saas=settings.deployment.mode == "saas",
+    )
 
     # API routes
     app.include_router(auth_router, prefix="/api/v1")

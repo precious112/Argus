@@ -50,20 +50,17 @@ async def ingest_telemetry(
     stored = 0
 
     try:
-        from argus_agent.storage.timeseries import get_connection
+        from argus_agent.storage.repositories import get_metrics_repository
 
-        conn = get_connection()
+        repo = get_metrics_repository()
         for ev in batch.events:
             ev_service = ev.service or service
 
             # Store in sdk_events for backward compatibility
-            conn.execute(
-                "INSERT INTO sdk_events VALUES (?, ?, ?, ?)",
-                [ev.timestamp, ev_service, ev.type, json.dumps(ev.data)],
-            )
+            repo.insert_sdk_event(ev.timestamp, ev_service, ev.type, json.dumps(ev.data))
 
             # Route to specialised Phase 1 tables
-            _route_event(conn, ev, ev_service)
+            _route_event(repo, ev, ev_service)
 
             stored += 1
     except RuntimeError:
@@ -107,7 +104,7 @@ async def ingest_telemetry(
 
 
 def _route_event(
-    conn: Any,
+    repo: Any,
     ev: TelemetryEvent,
     service: str,
 ) -> None:
@@ -115,71 +112,57 @@ def _route_event(
     d = ev.data
 
     if ev.type == "span":
-        conn.execute(
-            "INSERT INTO spans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                ev.timestamp,
-                d.get("trace_id", ""),
-                d.get("span_id", ""),
-                d.get("parent_span_id"),
-                service,
-                d.get("name", ""),
-                d.get("kind", "internal"),
-                d.get("duration_ms"),
-                d.get("status", "ok"),
-                d.get("error_type"),
-                d.get("error_message"),
-                json.dumps(d),
-            ],
+        repo.insert_span(
+            trace_id=d.get("trace_id", ""),
+            span_id=d.get("span_id", ""),
+            service=service,
+            name=d.get("name", ""),
+            kind=d.get("kind", "internal"),
+            parent_span_id=d.get("parent_span_id"),
+            duration_ms=d.get("duration_ms"),
+            status=d.get("status", "ok"),
+            error_type=d.get("error_type"),
+            error_message=d.get("error_message"),
+            data=d,
+            timestamp=ev.timestamp,
         )
 
     elif ev.type == "dependency":
-        conn.execute(
-            "INSERT INTO dependency_calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                ev.timestamp,
-                d.get("trace_id"),
-                d.get("span_id"),
-                d.get("parent_span_id"),
-                service,
-                d.get("dep_type", "unknown"),
-                d.get("target", ""),
-                d.get("operation", ""),
-                d.get("duration_ms"),
-                d.get("status", "ok"),
-                d.get("status_code"),
-                d.get("error_message"),
-                json.dumps(d),
-            ],
+        repo.insert_dependency_call(
+            service=service,
+            dep_type=d.get("dep_type", "unknown"),
+            target=d.get("target", ""),
+            trace_id=d.get("trace_id"),
+            span_id=d.get("span_id"),
+            parent_span_id=d.get("parent_span_id"),
+            operation=d.get("operation", ""),
+            duration_ms=d.get("duration_ms"),
+            status=d.get("status", "ok"),
+            status_code=d.get("status_code"),
+            error_message=d.get("error_message"),
+            data=d,
+            timestamp=ev.timestamp,
         )
 
     elif ev.type == "runtime_metric":
-        conn.execute(
-            "INSERT INTO sdk_metrics VALUES (?, ?, ?, ?, ?)",
-            [
-                ev.timestamp,
-                service,
-                d.get("metric_name", ""),
-                d.get("value", 0),
-                json.dumps(d.get("labels", {})),
-            ],
+        repo.insert_sdk_metric(
+            service=service,
+            metric_name=d.get("metric_name", ""),
+            value=d.get("value", 0),
+            labels=d.get("labels", {}),
+            timestamp=ev.timestamp,
         )
 
     elif ev.type == "deploy":
-        from argus_agent.storage.timeseries import get_previous_deploy_version
-
-        prev = get_previous_deploy_version(service)
-        conn.execute(
-            "INSERT INTO deploy_events VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                ev.timestamp,
-                service,
-                d.get("version", ""),
-                d.get("git_sha", ""),
-                d.get("environment", ""),
-                prev or "",
-                json.dumps(d),
-            ],
+        prev = repo.get_previous_deploy_version(service)
+        repo.insert_deploy_event(
+            service=service,
+            version=d.get("version", ""),
+            git_sha=d.get("git_sha", ""),
+            environment=d.get("environment", ""),
+            previous_version=prev or "",
+            data=d,
+            timestamp=ev.timestamp,
         )
 
 

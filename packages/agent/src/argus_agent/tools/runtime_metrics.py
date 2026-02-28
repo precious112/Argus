@@ -71,9 +71,9 @@ class RuntimeMetricsTool(Tool):
             kwargs.get("since_minutes", 60), kwargs.get("since"), kwargs.get("until"),
         )
         try:
-            from argus_agent.storage.timeseries import query_sdk_metrics
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            metrics = query_sdk_metrics(
+            metrics = get_metrics_repository().query_sdk_metrics(
                 service=kwargs.get("service", ""),
                 metric_name=kwargs.get("metric_name", ""),
                 since_minutes=kwargs.get("since_minutes", 60),
