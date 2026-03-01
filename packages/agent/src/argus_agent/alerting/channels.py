@@ -58,6 +58,8 @@ class WebSocketChannel(NotificationChannel):
 
     async def send(self, alert: Any, event: Any) -> bool:
         try:
+            from argus_agent.tenancy.context import get_tenant_id
+
             msg = ServerMessage(
                 type=ServerMessageType.ALERT,
                 data=AlertMessage(
@@ -69,7 +71,7 @@ class WebSocketChannel(NotificationChannel):
                     timestamp=alert.timestamp,
                 ).model_dump(mode="json"),
             )
-            await self._manager.broadcast(msg)
+            await self._manager.broadcast(msg, tenant_id=get_tenant_id())
             return True
         except Exception:
             logger.exception("WebSocket alert broadcast failed")

@@ -23,24 +23,29 @@ router = APIRouter(tags=["websocket"])
 
 
 class ConnectionManager:
-    """Manage active WebSocket connections."""
+    """Manage active WebSocket connections, keyed by tenant_id."""
 
     def __init__(self) -> None:
-        self.active_connections: list[WebSocket] = []
+        self.active_connections: dict[str, list[WebSocket]] = {}
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, tenant_id: str = "default") -> None:
         await websocket.accept()
-        self.active_connections.append(websocket)
+        if tenant_id not in self.active_connections:
+            self.active_connections[tenant_id] = []
+        self.active_connections[tenant_id].append(websocket)
 
-    def disconnect(self, websocket: WebSocket) -> None:
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
+    def disconnect(self, websocket: WebSocket, tenant_id: str = "default") -> None:
+        conns = self.active_connections.get(tenant_id, [])
+        if websocket in conns:
+            conns.remove(websocket)
+            if not conns:
+                self.active_connections.pop(tenant_id, None)
 
     async def send(self, websocket: WebSocket, message: ServerMessage) -> None:
         await websocket.send_json(message.model_dump(mode="json"))
 
-    async def broadcast(self, message: ServerMessage) -> None:
-        for connection in self.active_connections:
+    async def broadcast(self, message: ServerMessage, tenant_id: str = "default") -> None:
+        for connection in self.active_connections.get(tenant_id, []):
             try:
                 await connection.send_json(message.model_dump(mode="json"))
             except Exception:
@@ -70,7 +75,7 @@ async def websocket_endpoint(websocket: WebSocket, client: str = "web") -> None:
         try:
             from argus_agent.auth.jwt import decode_access_token
 
-            decode_access_token(token)
+            payload = decode_access_token(token)
         except Exception:
             await websocket.close(code=4001, reason="Invalid or expired token")
             return
@@ -78,7 +83,14 @@ async def websocket_endpoint(websocket: WebSocket, client: str = "web") -> None:
         await websocket.close(code=4001, reason="Authentication required")
         return
 
-    await manager.connect(websocket)
+    tenant_id = payload.get("tenant_id", "default")
+
+    # Set tenant context for this WebSocket connection
+    from argus_agent.tenancy.context import set_tenant_id
+
+    set_tenant_id(tenant_id)
+
+    await manager.connect(websocket, tenant_id)
     client_type = client if client in ("cli", "web") else "web"
 
     # Send connected message with initial system status
@@ -172,7 +184,7 @@ async def websocket_endpoint(websocket: WebSocket, client: str = "web") -> None:
     except WebSocketDisconnect:
         if agent_task and not agent_task.done():
             agent_task.cancel()
-        manager.disconnect(websocket)
+        manager.disconnect(websocket, tenant_id)
         logger.info("Client disconnected")
 
 

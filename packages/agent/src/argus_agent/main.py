@@ -442,6 +442,8 @@ def create_app() -> FastAPI:
         "/api/v1/license",
         "/api/v1/auth/login",
         "/api/v1/auth/logout",
+        "/api/v1/auth/register",
+        "/api/v1/auth/accept-invite",
     }
     auth_exempt_prefixes = (
         "/api/v1/ingest",
@@ -462,7 +464,8 @@ def create_app() -> FastAPI:
         if not token:
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
         try:
-            decode_access_token(token)
+            payload = decode_access_token(token)
+            request.state.user = payload
         except Exception:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
         return await call_next(request)
@@ -481,6 +484,22 @@ def create_app() -> FastAPI:
     app.include_router(rest_router, prefix="/api/v1")
     app.include_router(ws_router, prefix="/api/v1")
     app.include_router(ingest_router, prefix="/api/v1")
+
+    # SaaS-only routers
+    if settings.deployment.mode == "saas":
+        from argus_agent.api.keys import router as keys_router
+        from argus_agent.api.registration import router as reg_router
+        from argus_agent.api.team import (
+            accept_router,
+        )
+        from argus_agent.api.team import (
+            router as team_router,
+        )
+
+        app.include_router(reg_router, prefix="/api/v1")
+        app.include_router(team_router, prefix="/api/v1")
+        app.include_router(keys_router, prefix="/api/v1")
+        app.include_router(accept_router, prefix="/api/v1")
 
     # Serve static web UI in production
     static_dir = Path(__file__).parent / "static"

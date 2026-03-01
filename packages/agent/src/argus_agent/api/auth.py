@@ -41,8 +41,23 @@ async def login(body: LoginRequest, response: Response):
             media_type="application/json",
         )
 
-    token = create_access_token(user.id, user.username)
+    # In SaaS mode, look up tenant membership for JWT claims
+    tenant_id = "default"
+    role = "member"
     settings = get_settings()
+    if settings.deployment.mode == "saas":
+        async with get_session() as session:
+            from argus_agent.storage.saas_models import TeamMember
+
+            tm = await session.execute(
+                select(TeamMember).where(TeamMember.user_id == user.id)
+            )
+            member = tm.scalar_one_or_none()
+            if member:
+                tenant_id = member.tenant_id
+                role = member.role
+
+    token = create_access_token(user.id, user.username, tenant_id, role)
     max_age = settings.security.session_expiry_hours * 3600
 
     response = Response(
@@ -77,4 +92,6 @@ async def me(user: dict = Depends(get_current_user)):
     return {
         "user_id": user.get("sub"),
         "username": user.get("username"),
+        "tenant_id": user.get("tenant_id", "default"),
+        "role": user.get("role", "member"),
     }

@@ -9,6 +9,7 @@ import uuid
 from argus_agent.llm.base import LLMMessage
 from argus_agent.storage.models import Conversation, Message
 from argus_agent.storage.repositories import get_operational_repository
+from argus_agent.tenancy.context import get_tenant_id
 
 logger = logging.getLogger("argus.agent.memory")
 
@@ -35,6 +36,7 @@ class ConversationMemory:
                 id=self.conversation_id,
                 title=title or "New conversation",
                 source=self.source,
+                tenant_id=get_tenant_id(),
             )
             session.add(conv)
             await session.commit()
@@ -59,6 +61,7 @@ class ConversationMemory:
                 tool_calls=tool_calls,
                 tool_result=tool_result,
                 token_count=token_count,
+                tenant_id=get_tenant_id(),
             )
             session.add(msg)
             await session.commit()

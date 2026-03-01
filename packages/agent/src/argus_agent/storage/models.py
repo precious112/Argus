@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -49,10 +49,15 @@ class User(Base):
     """Authenticated user account."""
 
     __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "username", name="uq_user_tenant_username"),
+        {},
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(36), default="default", index=True)
-    username: Mapped[str] = mapped_column(String(150), unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(150), index=True)
+    email: Mapped[str] = mapped_column(String(255), default="", index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
