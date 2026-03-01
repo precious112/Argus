@@ -1,6 +1,7 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
+import { useDeployment } from "@/hooks/useDeployment";
 import { useLicense } from "@/hooks/useLicense";
 import { editionLabel } from "@/lib/license";
 
@@ -13,9 +14,10 @@ export function Header() {
   const pathname = usePathname();
   const router = useRouter();
   const { edition } = useLicense();
+  const { isSaaS } = useDeployment();
 
-  // Don't render header on the login page
-  if (pathname === "/login") return null;
+  // Don't render header on the login or register page
+  if (pathname === "/login" || pathname === "/register") return null;
 
   const apiBase =
     process.env.NEXT_PUBLIC_ARGUS_URL || "http://localhost:7600";
@@ -63,6 +65,19 @@ export function Header() {
         <a href="/settings" className="hover:text-[var(--foreground)]">
           Settings
         </a>
+        {isSaaS && (
+          <>
+            <a href="/team" className="hover:text-[var(--foreground)]">
+              Team
+            </a>
+            <a href="/keys" className="hover:text-[var(--foreground)]">
+              Keys
+            </a>
+            <a href="/billing" className="hover:text-[var(--foreground)]">
+              Billing
+            </a>
+          </>
+        )}
         <button
           onClick={handleLogout}
           className="rounded border border-[var(--border)] px-2 py-1 text-xs hover:bg-[var(--card)] hover:text-[var(--foreground)]"

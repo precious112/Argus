@@ -12,6 +12,20 @@ from argus_agent import __version__
 router = APIRouter(tags=["api"])
 
 
+@router.get("/deployment-info")
+async def deployment_info() -> dict[str, Any]:
+    """Return deployment mode info (auth-exempt, used by frontend)."""
+    from argus_agent.config import get_settings
+
+    settings = get_settings()
+    is_saas = settings.deployment.mode == "saas"
+    return {
+        "mode": settings.deployment.mode,
+        "billing_provider": settings.deployment.billing_provider if is_saas else None,
+        "registration_enabled": is_saas,
+    }
+
+
 @router.get("/health")
 async def health_check() -> dict[str, Any]:
     """Health check endpoint."""

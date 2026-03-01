@@ -26,6 +26,7 @@ dependencies = [
     "asyncpg>=0.29.0",
     "alembic>=1.13.0",
     "redis[hiredis]>=5.0.0",
+    "polar-sdk>=0.29.0",
 ]
 
 [project.optional-dependencies]

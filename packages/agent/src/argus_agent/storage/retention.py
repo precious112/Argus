@@ -9,15 +9,15 @@ logger = logging.getLogger("argus.storage.retention")
 # Default retention intervals by plan tier
 PLAN_RETENTION: dict[str, dict[str, str]] = {
     "free": {
-        "system_metrics": "7 days",
-        "log_index": "7 days",
-        "sdk_events": "7 days",
-        "spans": "7 days",
-        "dependency_calls": "7 days",
-        "sdk_metrics": "7 days",
-        "deploy_events": "30 days",
+        "system_metrics": "3 days",
+        "log_index": "3 days",
+        "sdk_events": "3 days",
+        "spans": "3 days",
+        "dependency_calls": "3 days",
+        "sdk_metrics": "3 days",
+        "deploy_events": "3 days",
     },
-    "pro": {
+    "teams": {
         "system_metrics": "30 days",
         "log_index": "30 days",
         "sdk_events": "30 days",
@@ -38,14 +38,14 @@ PLAN_RETENTION: dict[str, dict[str, str]] = {
 }
 
 
-async def apply_retention_policy(pool, plan: str = "pro") -> None:  # type: ignore[no-untyped-def]
+async def apply_retention_policy(pool, plan: str = "teams") -> None:  # type: ignore[no-untyped-def]
     """Apply retention policies based on the tenant's plan.
 
     Args:
         pool: asyncpg connection pool
-        plan: one of 'free', 'pro', 'enterprise'
+        plan: one of 'free', 'teams', 'enterprise'
     """
-    intervals = PLAN_RETENTION.get(plan, PLAN_RETENTION["pro"])
+    intervals = PLAN_RETENTION.get(plan, PLAN_RETENTION["teams"])
 
     async with pool.acquire() as conn:
         for table, interval in intervals.items():

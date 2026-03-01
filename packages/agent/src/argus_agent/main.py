@@ -440,10 +440,13 @@ def create_app() -> FastAPI:
         "/health",
         "/api/v1/health",
         "/api/v1/license",
+        "/api/v1/deployment-info",
         "/api/v1/auth/login",
         "/api/v1/auth/logout",
         "/api/v1/auth/register",
         "/api/v1/auth/accept-invite",
+        "/api/v1/billing/plans",
+        "/api/v1/webhooks/polar",
     }
     auth_exempt_prefixes = (
         "/api/v1/ingest",
@@ -487,6 +490,7 @@ def create_app() -> FastAPI:
 
     # SaaS-only routers
     if settings.deployment.mode == "saas":
+        from argus_agent.api.billing import router as billing_router
         from argus_agent.api.keys import router as keys_router
         from argus_agent.api.registration import router as reg_router
         from argus_agent.api.team import (
@@ -495,11 +499,14 @@ def create_app() -> FastAPI:
         from argus_agent.api.team import (
             router as team_router,
         )
+        from argus_agent.api.webhooks import router as webhooks_router
 
         app.include_router(reg_router, prefix="/api/v1")
         app.include_router(team_router, prefix="/api/v1")
         app.include_router(keys_router, prefix="/api/v1")
         app.include_router(accept_router, prefix="/api/v1")
+        app.include_router(billing_router, prefix="/api/v1")
+        app.include_router(webhooks_router, prefix="/api/v1")
 
     # Serve static web UI in production
     static_dir = Path(__file__).parent / "static"

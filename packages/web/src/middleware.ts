@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const PUBLIC_PATHS = ["/login"];
+const PUBLIC_PATHS = ["/login", "/register"];
 const PUBLIC_PREFIXES = ["/_next", "/favicon.ico", "/argus-logo.png"];
 
 export function middleware(request: NextRequest) {

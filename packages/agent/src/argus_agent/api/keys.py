@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -50,8 +50,16 @@ async def list_keys(user: dict = Depends(require_role("owner", "admin"))):
 
 
 @router.post("")
-async def create_key(body: CreateKeyRequest, user: dict = Depends(require_role("owner", "admin"))):
+async def create_key(
+    body: CreateKeyRequest,
+    request: Request,
+    user: dict = Depends(require_role("owner", "admin")),
+):
     """Create a new API key. The plain key is returned once."""
+    from argus_agent.billing.usage_guard import check_api_key_limit
+
+    await check_api_key_limit(request)
+
     tenant_id = user.get("tenant_id", "default")
 
     if body.environment not in ("production", "staging", "development"):

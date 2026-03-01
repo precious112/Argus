@@ -88,6 +88,8 @@ class DeploymentConfig(BaseModel):
     postgres_url: str = ""
     timescale_url: str = ""
     polar_access_token: str = ""
+    polar_webhook_secret: str = ""
+    polar_teams_product_id: str = ""
     stripe_secret_key: str = ""
     billing_provider: str = "polar"  # "polar" | "stripe"
     smtp_url: str = ""

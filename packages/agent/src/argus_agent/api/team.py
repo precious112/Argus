@@ -8,7 +8,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 
@@ -78,8 +78,16 @@ async def list_members(user: dict = Depends(require_role("owner", "admin"))):
 
 
 @router.post("/invite")
-async def invite_member(body: InviteRequest, user: dict = Depends(require_role("owner", "admin"))):
+async def invite_member(
+    body: InviteRequest,
+    request: Request,
+    user: dict = Depends(require_role("owner", "admin")),
+):
     """Create an invitation to join the tenant."""
+    from argus_agent.billing.usage_guard import check_team_member_limit
+
+    await check_team_member_limit(request)
+
     tenant_id = user.get("tenant_id", "default")
 
     if body.role not in ("member", "admin"):
