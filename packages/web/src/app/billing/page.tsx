@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 interface PlanInfo {
@@ -73,6 +73,20 @@ function XIcon() {
 }
 
 export default function BillingPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-full items-center justify-center p-8 text-[var(--muted)]">
+          Loading billing...
+        </div>
+      }
+    >
+      <BillingContent />
+    </Suspense>
+  );
+}
+
+function BillingContent() {
   const searchParams = useSearchParams();
   const upgraded = searchParams.get("upgraded") === "true";
 
