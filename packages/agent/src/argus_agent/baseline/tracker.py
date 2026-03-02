@@ -235,11 +235,25 @@ class BaselineTracker:
     @staticmethod
     def _persist(repo: Any, baselines: dict[str, MetricBaseline]) -> None:
         """Write baselines to the metric_baselines table."""
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         repo.execute_raw("DELETE FROM metric_baselines")
+
+        # DuckDB uses ``updated_at``; TimescaleDB uses ``timestamp``
+        from argus_agent.storage.timescaledb_metrics import (
+            TimescaleDBMetricsRepository,
+        )
+        ts_col = (
+            "timestamp"
+            if isinstance(repo, TimescaleDBMetricsRepository)
+            else "updated_at"
+        )
+
         for bl in baselines.values():
             repo.execute_raw(
-                "INSERT INTO metric_baselines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO metric_baselines "
+                f"({ts_col}, metric_name, mean, stddev, "
+                f"min_val, max_val, p50, p95, p99, sample_count) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     now,
                     bl.metric_name,

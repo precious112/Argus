@@ -135,8 +135,9 @@ BEGIN
     ] LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', tbl);
         EXECUTE format(
-            'CREATE POLICY IF NOT EXISTS tenant_isolation ON %I '
+            'CREATE POLICY tenant_isolation ON %I '
             'USING (tenant_id = current_setting(''app.current_tenant'', true)) '
             'WITH CHECK (tenant_id = current_setting(''app.current_tenant'', true))',
             tbl

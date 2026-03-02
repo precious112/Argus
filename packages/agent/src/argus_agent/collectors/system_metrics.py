@@ -227,7 +227,10 @@ class SystemMetricsCollector:
             # Store in metrics repo
             rows = [(now, name, value, None) for name, value in metrics.items()]
             try:
-                insert_metrics_batch(rows)
+                from argus_agent.storage.repositories import (
+                    get_metrics_repository,
+                )
+                get_metrics_repository().insert_metrics_batch(rows)
             except Exception:
                 logger.exception("Failed to store remote metrics")
 

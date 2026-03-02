@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,47 @@ def _ts_str(val: Any) -> str:
     return str(val)
 
 
+def _split_sql_statements(sql: str) -> list[str]:
+    """Split multi-statement SQL into individual statements.
+
+    Respects ``$$`` dollar-quoted blocks (e.g. ``DO $$ ... END $$;``)
+    so that semicolons inside PL/pgSQL bodies are not treated as
+    statement boundaries.
+    """
+    statements: list[str] = []
+    buf: list[str] = []
+    in_dollar = False
+
+    for raw_line in sql.splitlines():
+        stripped = raw_line.strip()
+
+        # Skip blank lines and pure-comment lines outside $$ blocks
+        if not in_dollar:
+            if not stripped or stripped.startswith("--"):
+                continue
+
+        buf.append(raw_line)
+
+        # Track $$ toggling *before* checking for statement boundary
+        if raw_line.count("$$") % 2 == 1:
+            in_dollar = not in_dollar
+
+        # Statement boundary: line ends with ';' while outside $$
+        if not in_dollar and stripped.endswith(";"):
+            stmt = "\n".join(buf).strip()
+            if stmt:
+                statements.append(stmt)
+            buf = []
+
+    # Leftover (shouldn't happen with well-formed SQL)
+    if buf:
+        stmt = "\n".join(buf).strip()
+        if stmt:
+            statements.append(stmt)
+
+    return statements
+
+
 class TimescaleDBMetricsRepository:
     """MetricsRepository backed by TimescaleDB (SaaS mode).
 
@@ -81,7 +123,10 @@ class TimescaleDBMetricsRepository:
 
     def __init__(self) -> None:
         self._url: str = ""
-        self._pool: Any = None  # asyncpg.Pool (created lazily)
+        self._pool: Any = None
+        self._bg_loop: asyncio.AbstractEventLoop | None = None
+        self._bg_thread: threading.Thread | None = None
+        self._schema_applied: bool = False
 
     # --- Lifecycle ---
 
@@ -90,56 +135,92 @@ class TimescaleDBMetricsRepository:
         self._url = db_url
         logger.info("TimescaleDB metrics repository configured (lazy pool)")
 
+    def _ensure_bg_loop(self) -> asyncio.AbstractEventLoop:
+        """Start a persistent background event loop if not running."""
+        if self._bg_loop is None or not self._bg_loop.is_running():
+            self._bg_loop = asyncio.new_event_loop()
+            self._bg_thread = threading.Thread(
+                target=self._bg_loop.run_forever, daemon=True,
+            )
+            self._bg_thread.start()
+        return self._bg_loop
+
     def close(self) -> None:
-        if self._pool is not None:
+        if self._pool is not None and self._bg_loop is not None:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(self._pool.close())
-                else:
-                    loop.run_until_complete(self._pool.close())
+                future = asyncio.run_coroutine_threadsafe(
+                    self._pool.close(), self._bg_loop,
+                )
+                future.result(timeout=5)
             except Exception:
-                logger.warning("Failed to close TimescaleDB pool", exc_info=True)
+                logger.warning(
+                    "Failed to close TimescaleDB pool", exc_info=True,
+                )
             self._pool = None
+        if self._bg_loop is not None:
+            self._bg_loop.call_soon_threadsafe(self._bg_loop.stop)
+            if self._bg_thread is not None:
+                self._bg_thread.join(timeout=5)
+            self._bg_loop = None
+            self._bg_thread = None
 
     async def _get_pool(self) -> Any:
-        """Lazily create the asyncpg pool and run schema setup."""
+        """Get or create the single asyncpg connection pool."""
         if self._pool is None:
             import asyncpg
 
             url = self._url
-            # Strip SQLAlchemy driver prefix if present
             if "+asyncpg" in url:
-                url = url.replace("postgresql+asyncpg://", "postgresql://")
-            self._pool = await asyncpg.create_pool(url, min_size=5, max_size=25)
-            await self._apply_schema()
+                url = url.replace(
+                    "postgresql+asyncpg://", "postgresql://",
+                )
+            self._pool = await asyncpg.create_pool(
+                url, min_size=2, max_size=15,
+            )
+            if not self._schema_applied:
+                await self._apply_schema_on(self._pool)
+                self._schema_applied = True
         return self._pool
 
-    async def _apply_schema(self) -> None:
-        """Run the TimescaleDB schema SQL."""
+    async def _apply_schema_on(self, pool: Any) -> None:
+        """Run the TimescaleDB schema SQL on the given pool.
+
+        asyncpg only supports single-statement ``execute()`` calls, so
+        we split the schema file into individual statements first.
+        """
         try:
             schema_path = Path(__file__).parent / "timescale_schema.sql"
             sql = schema_path.read_text()
-            pool = self._pool
+            statements = _split_sql_statements(sql)
             async with pool.acquire() as conn:
-                await conn.execute(sql)
-            logger.info("TimescaleDB schema applied")
+                for stmt in statements:
+                    try:
+                        await conn.execute(stmt)
+                    except Exception as exc:
+                        logger.warning(
+                            "Schema statement failed (continuing):"
+                            " %.120s — %s",
+                            stmt.replace("\n", " "), exc,
+                        )
+            logger.info(
+                "TimescaleDB schema applied (%d statements)",
+                len(statements),
+            )
         except Exception:
-            logger.warning("TimescaleDB schema application failed (non-fatal)", exc_info=True)
+            logger.warning(
+                "TimescaleDB schema application failed (non-fatal)",
+                exc_info=True,
+            )
 
     def _run(self, coro: Any) -> Any:
-        """Sync-to-async bridge."""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
+        """Sync-to-async bridge via persistent background event loop.
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(asyncio.run, coro)
-                    return future.result(timeout=30)
-            return loop.run_until_complete(coro)
-        except RuntimeError:
-            return asyncio.run(coro)
+        All coroutines run on a single background loop that owns the
+        asyncpg pool, avoiding pool-per-event-loop proliferation.
+        """
+        loop = self._ensure_bg_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=30)
 
     async def _execute(self, query: str, params: list[Any] | None = None) -> list[Any]:
         """Execute a query with RLS tenant context and return rows."""
@@ -148,10 +229,17 @@ class TimescaleDBMetricsRepository:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             tenant_id = get_tenant_id()
-            await conn.execute("SET LOCAL app.current_tenant = $1", tenant_id)
-            if params:
-                return await conn.fetch(query, *params)
-            return await conn.fetch(query)
+            safe_tid = tenant_id.replace("'", "''")
+            # SET LOCAL is scoped to the current transaction — we must
+            # wrap it together with the query in an explicit transaction
+            # so the RLS context is active when the query runs.
+            async with conn.transaction():
+                await conn.execute(
+                    f"SET LOCAL app.current_tenant = '{safe_tid}'"
+                )
+                if params:
+                    return await conn.fetch(query, *params)
+                return await conn.fetch(query)
 
     async def _execute_void(self, query: str, params: list[Any] | None = None) -> None:
         """Execute a query that returns no rows."""
@@ -160,11 +248,15 @@ class TimescaleDBMetricsRepository:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             tenant_id = get_tenant_id()
-            await conn.execute("SET LOCAL app.current_tenant = $1", tenant_id)
-            if params:
-                await conn.execute(query, *params)
-            else:
-                await conn.execute(query)
+            safe_tid = tenant_id.replace("'", "''")
+            async with conn.transaction():
+                await conn.execute(
+                    f"SET LOCAL app.current_tenant = '{safe_tid}'"
+                )
+                if params:
+                    await conn.execute(query, *params)
+                else:
+                    await conn.execute(query)
 
     # --- System Metrics ---
 
@@ -197,16 +289,22 @@ class TimescaleDBMetricsRepository:
 
         async def _batch() -> None:
             pool = await self._get_pool()
+            safe_tid = tid.replace("'", "''")
             async with pool.acquire() as conn:
-                await conn.execute("SET LOCAL app.current_tenant = $1", tid)
-                await conn.executemany(
-                    "INSERT INTO system_metrics (timestamp, tenant_id, metric_name, value, labels) "
-                    "VALUES ($1, $2, $3, $4, $5)",
-                    [
-                        (ts, tid, name, val, json.dumps(labels or {}))
-                        for ts, name, val, labels in rows
-                    ],
-                )
+                async with conn.transaction():
+                    await conn.execute(f"SET LOCAL app.current_tenant = '{safe_tid}'")
+                    sql = (
+                        "INSERT INTO system_metrics"
+                        " (timestamp, tenant_id, metric_name, value, labels)"
+                        " VALUES ($1, $2, $3, $4, $5)"
+                    )
+                    await conn.executemany(
+                        sql,
+                        [
+                            (ts, tid, name, val, json.dumps(labels or {}))
+                            for ts, name, val, labels in rows
+                        ],
+                    )
 
         self._run(_batch())
 
@@ -1088,11 +1186,13 @@ class TimescaleDBMetricsRepository:
             pool = await self._get_pool()
             async with pool.acquire() as conn:
                 tenant_id = get_tenant_id()
-                await conn.execute("SET LOCAL app.current_tenant = $1", tenant_id)
-                if pg_params:
-                    rows = await conn.fetch(pg_sql, *pg_params)
-                else:
-                    rows = await conn.fetch(pg_sql)
-                return [tuple(r.values()) for r in rows]
+                safe_tid = tenant_id.replace("'", "''")
+                async with conn.transaction():
+                    await conn.execute(f"SET LOCAL app.current_tenant = '{safe_tid}'")
+                    if pg_params:
+                        rows = await conn.fetch(pg_sql, *pg_params)
+                    else:
+                        rows = await conn.fetch(pg_sql)
+                    return [tuple(r.values()) for r in rows]
 
         return self._run(_raw())
