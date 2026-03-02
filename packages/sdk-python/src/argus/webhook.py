@@ -13,8 +13,6 @@ Usage with Flask::
     app.register_blueprint(handler.flask_blueprint())
 """
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import json
@@ -25,7 +23,7 @@ import shutil
 import socket
 import subprocess
 import time
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger("argus.webhook")
 
@@ -228,7 +226,7 @@ class ArgusWebhookHandler:
     def __init__(
         self,
         webhook_secret: str,
-        tools: dict[str, Any] | None = None,
+        tools: Optional[dict[str, Any]] = None,
     ) -> None:
         self.secret = webhook_secret
         self.tools: dict[str, Any] = tools if tools is not None else dict(_DEFAULT_TOOLS)
