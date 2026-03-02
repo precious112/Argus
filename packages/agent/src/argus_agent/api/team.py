@@ -116,7 +116,7 @@ async def invite_member(
             role=body.role,
             invited_by=user.get("sub", ""),
             token_hash=token_hash,
-            expires_at=datetime.now(UTC) + timedelta(days=7),
+            expires_at=datetime.now(UTC).replace(tzinfo=None) + timedelta(days=7),
         )
         session.add(invitation)
         await session.commit()
@@ -284,7 +284,7 @@ async def accept_invite(body: AcceptInviteRequest, response: Response):
         if not invitation:
             raise HTTPException(404, "Invalid or expired invitation")
 
-        if invitation.expires_at and invitation.expires_at < datetime.now(UTC):
+        if invitation.expires_at and invitation.expires_at < datetime.now(UTC).replace(tzinfo=None):
             raise HTTPException(410, "Invitation has expired")
 
         # Check username availability
@@ -318,7 +318,7 @@ async def accept_invite(body: AcceptInviteRequest, response: Response):
         session.add(member)
 
         # Mark invitation as accepted
-        invitation.accepted_at = datetime.now(UTC)
+        invitation.accepted_at = datetime.now(UTC).replace(tzinfo=None)
 
         await session.commit()
 

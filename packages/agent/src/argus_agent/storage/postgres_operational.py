@@ -83,13 +83,16 @@ class PostgresOperationalRepository:
 
         session = _session_factory()
 
-        # Attach a one-shot listener to set tenant context at transaction start
+        # Attach a one-shot listener to set tenant context at transaction start.
+        # SET LOCAL does not support parameterized values in PostgreSQL,
+        # so we use a quoted literal.  The tenant_id comes from our own
+        # context (not user input), but we sanitize it to be safe.
         @event.listens_for(session.sync_session, "after_begin")
         def _set_tenant(session_inner, transaction, connection):  # type: ignore[no-untyped-def]
             tenant_id = get_tenant_id()
+            safe_tid = tenant_id.replace("'", "''")
             connection.execute(
-                text("SET LOCAL app.current_tenant = :tid"),
-                {"tid": tenant_id},
+                text(f"SET LOCAL app.current_tenant = '{safe_tid}'"),
             )
 
         return session

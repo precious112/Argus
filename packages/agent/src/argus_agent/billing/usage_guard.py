@@ -94,7 +94,7 @@ async def check_event_ingest_limit(tenant_id: str) -> None:
 
         repo = get_metrics_repository()
         # Count events this calendar month
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         count = await repo.count_events_since(tenant_id, start_of_month)
     except Exception:
@@ -126,7 +126,7 @@ async def check_ai_message_limit(request: Request) -> None:
         from argus_agent.storage.token_usage import TokenUsageService
 
         svc = TokenUsageService()
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
         summary = await svc.get_usage_over_time(
             granularity="day",
@@ -174,7 +174,7 @@ async def get_tenant_usage_summary(tenant_id: str) -> dict[str, Any]:
         from argus_agent.storage.repositories import get_metrics_repository
 
         repo = get_metrics_repository()
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         events_count = await repo.count_events_since(tenant_id, start_of_month)
     except Exception:

@@ -34,6 +34,8 @@ WORKDIR /app
 # Agent server
 COPY packages/agent/pyproject.toml packages/agent/README.md ./
 COPY packages/agent/src/ ./src/
+COPY packages/agent/alembic.ini ./alembic.ini
+COPY packages/agent/alembic/ ./alembic/
 RUN uv pip install --system --no-cache-dir ".[all-providers]"
 
 # CLI / TUI client
@@ -65,6 +67,13 @@ WORKDIR /app/web
 COPY --from=web-builder /app/.next/standalone ./
 COPY --from=web-builder /app/.next/static ./.next/static
 COPY --from=web-builder /app/public ./public
+
+# Alembic migrations
+COPY --from=agent-builder /app/alembic.ini /app/alembic.ini
+COPY --from=agent-builder /app/alembic/ /app/alembic/
+
+# Agent source (for dev overlay mounts + alembic)
+COPY --from=agent-builder /app/src/ /app/src/
 
 # Entrypoint script
 WORKDIR /app

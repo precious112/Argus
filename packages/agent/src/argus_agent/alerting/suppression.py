@@ -14,10 +14,10 @@ from argus_agent.storage.repositories import get_session
 logger = logging.getLogger("argus.alerting.suppression")
 
 
-def _ensure_utc(dt: datetime) -> datetime:
-    """Ensure a datetime is UTC-aware (SQLite returns naive datetimes)."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=UTC)
+def _ensure_naive(dt: datetime) -> datetime:
+    """Strip timezone info for consistent naive-UTC comparisons."""
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
     return dt
 
 
@@ -81,7 +81,7 @@ class SuppressionService:
 
     async def get_active_acknowledgments(self) -> list[dict[str, Any]]:
         """Return all active acknowledgments, auto-expiring stale ones."""
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         async with get_session() as session:
             stmt = select(AlertAcknowledgment).where(
                 AlertAcknowledgment.active.is_(True),
@@ -91,7 +91,7 @@ class SuppressionService:
 
             active = []
             for row in rows:
-                if row.expires_at is not None and now >= _ensure_utc(row.expires_at):
+                if row.expires_at is not None and now >= _ensure_naive(row.expires_at):
                     row.active = False
                     continue
                 active.append(self._ack_to_dict(row))
@@ -122,7 +122,7 @@ class SuppressionService:
                     rule_id=rule_id,
                     muted_by=muted_by,
                     reason=reason,
-                    expires_at=expires_at or datetime.now(UTC),
+                    expires_at=expires_at or datetime.now(UTC).replace(tzinfo=None),
                     active=True,
                 )
                 session.add(row)
@@ -153,7 +153,7 @@ class SuppressionService:
 
     async def get_active_mutes(self) -> list[dict[str, Any]]:
         """Return all active rule mutes, auto-expiring stale ones."""
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         async with get_session() as session:
             stmt = select(AlertRuleMute).where(
                 AlertRuleMute.active.is_(True),
@@ -163,7 +163,7 @@ class SuppressionService:
 
             active = []
             for row in rows:
-                if now >= _ensure_utc(row.expires_at):
+                if now >= _ensure_naive(row.expires_at):
                     row.active = False
                     continue
                 active.append(self._mute_to_dict(row))
@@ -184,12 +184,12 @@ class SuppressionService:
         for ack in acks:
             expires = None
             if ack["expires_at"]:
-                expires = _ensure_utc(datetime.fromisoformat(ack["expires_at"]))
+                expires = _ensure_naive(datetime.fromisoformat(ack["expires_at"]))
             engine._acknowledged_keys[ack["dedup_key"]] = expires
 
         mutes = await self.get_active_mutes()
         for mute in mutes:
-            expires = _ensure_utc(datetime.fromisoformat(mute["expires_at"]))
+            expires = _ensure_naive(datetime.fromisoformat(mute["expires_at"]))
             engine._muted_rules[mute["rule_id"]] = expires
 
         logger.info(

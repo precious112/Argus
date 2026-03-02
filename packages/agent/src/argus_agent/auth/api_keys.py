@@ -49,11 +49,12 @@ async def create_api_key(
     prefix = plain_key[:16]  # first 16 chars as prefix for identification
 
     key_id = str(uuid.uuid4())
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(tzinfo=None)
 
     async with get_session() as session:
         # Set tenant context for RLS
-        await session.execute(text("SET LOCAL app.current_tenant = :tid"), {"tid": tenant_id})
+        safe_tid = tenant_id.replace("'", "''")
+        await session.execute(text(f"SET LOCAL app.current_tenant = '{safe_tid}'"))
         entry = ApiKey(
             id=key_id,
             tenant_id=tenant_id,
@@ -94,7 +95,7 @@ async def validate_api_key(plain_key: str) -> dict[str, Any] | None:
 
     async with get_session() as session:
         # Bypass RLS — set empty tenant to use the api_key_lookup policy
-        await session.execute(text("SET LOCAL app.current_tenant = ''"))
+        await session.execute(text("SET LOCAL app.current_tenant = ''"))  # noqa: S608
 
         stmt = select(ApiKey).where(
             ApiKey.key_hash == key_hash,
@@ -107,7 +108,7 @@ async def validate_api_key(plain_key: str) -> dict[str, Any] | None:
             return None
 
         # Update last_used_at
-        row.last_used_at = datetime.now(UTC)
+        row.last_used_at = datetime.now(UTC).replace(tzinfo=None)
         await session.commit()
 
         return {
@@ -123,8 +124,9 @@ async def revoke_api_key(key_id: str, tenant_id: str) -> bool:
     from argus_agent.storage.saas_models import ApiKey
 
     async with get_session() as session:
+        safe_tid2 = tenant_id.replace("'", "''")
         await session.execute(
-            text("SET LOCAL app.current_tenant = :tid"), {"tid": tenant_id}
+            text(f"SET LOCAL app.current_tenant = '{safe_tid2}'")
         )
         stmt = select(ApiKey).where(ApiKey.id == key_id, ApiKey.is_active.is_(True))
         result = await session.execute(stmt)
@@ -132,6 +134,6 @@ async def revoke_api_key(key_id: str, tenant_id: str) -> bool:
         if row is None:
             return False
         row.is_active = False
-        row.revoked_at = datetime.now(UTC)
+        row.revoked_at = datetime.now(UTC).replace(tzinfo=None)
         await session.commit()
         return True

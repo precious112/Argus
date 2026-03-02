@@ -6,11 +6,13 @@ so that autogenerate can detect schema changes.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import pool
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from argus_agent.storage.models import Base  # noqa: F401 — registers all base models
 from argus_agent.storage.saas_models import (  # noqa: F401 — registers SaaS models
@@ -31,6 +33,9 @@ target_metadata = Base.metadata
 # Allow override via environment variable
 pg_url = os.environ.get("ARGUS_DEPLOYMENT__POSTGRES_URL", "")
 if pg_url:
+    # Ensure we use the asyncpg driver
+    if pg_url.startswith("postgresql://"):
+        pg_url = pg_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     config.set_main_option("sqlalchemy.url", pg_url)
 
 
@@ -47,20 +52,25 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def run_migrations_online() -> None:
-    """Run migrations in 'online' mode — connect and apply."""
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+def do_run_migrations(connection):  # type: ignore[no-untyped-def]
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_migrations_online() -> None:
+    """Run migrations in 'online' mode — async connect and apply."""
+    url = config.get_main_option("sqlalchemy.url")
+    connectable = create_async_engine(
+        url,
         poolclass=pool.NullPool,
     )
-    with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
-        with context.begin_transaction():
-            context.run_migrations()
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+    await connectable.dispose()
 
 
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    run_migrations_online()
+    asyncio.run(run_migrations_online())

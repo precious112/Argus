@@ -73,14 +73,14 @@ async def send_verification_email(user_id: str, email: str) -> str | None:
                 EmailVerificationToken.user_id == user_id,
                 EmailVerificationToken.used_at.is_(None),
             )
-            .values(used_at=datetime.now(UTC))
+            .values(used_at=datetime.now(UTC).replace(tzinfo=None))
         )
 
         vt = EmailVerificationToken(
             user_id=user_id,
             email=email,
             token=token,
-            expires_at=datetime.now(UTC) + timedelta(hours=24),
+            expires_at=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=24),
         )
         session.add(vt)
         await session.commit()
@@ -116,11 +116,11 @@ async def verify_email_token(token: str) -> dict:
         if not vt:
             return {"ok": False, "error": "Invalid or already used token"}
 
-        if vt.expires_at < datetime.now(UTC):
+        if vt.expires_at < datetime.now(UTC).replace(tzinfo=None):
             return {"ok": False, "error": "Token has expired"}
 
         # Mark token as used
-        vt.used_at = datetime.now(UTC)
+        vt.used_at = datetime.now(UTC).replace(tzinfo=None)
 
         # Mark user email as verified
         await session.execute(
@@ -155,13 +155,13 @@ async def send_password_reset_email(email: str) -> bool:
                 PasswordResetToken.user_id == user.id,
                 PasswordResetToken.used_at.is_(None),
             )
-            .values(used_at=datetime.now(UTC))
+            .values(used_at=datetime.now(UTC).replace(tzinfo=None))
         )
 
         prt = PasswordResetToken(
             user_id=user.id,
             token=token,
-            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            expires_at=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1),
         )
         session.add(prt)
         await session.commit()
@@ -197,7 +197,7 @@ async def verify_reset_token(token: str) -> dict:
         if not prt:
             return {"ok": False, "error": "Invalid or already used token"}
 
-        if prt.expires_at < datetime.now(UTC):
+        if prt.expires_at < datetime.now(UTC).replace(tzinfo=None):
             return {"ok": False, "error": "Token has expired"}
 
     return {"ok": True, "user_id": prt.user_id, "token": token}
@@ -217,11 +217,11 @@ async def consume_reset_token(token: str, new_password_hash: str) -> dict:
         if not prt:
             return {"ok": False, "error": "Invalid or already used token"}
 
-        if prt.expires_at < datetime.now(UTC):
+        if prt.expires_at < datetime.now(UTC).replace(tzinfo=None):
             return {"ok": False, "error": "Token has expired"}
 
         # Mark token as used
-        prt.used_at = datetime.now(UTC)
+        prt.used_at = datetime.now(UTC).replace(tzinfo=None)
 
         # Update password
         await session.execute(

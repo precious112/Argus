@@ -11,7 +11,7 @@ from argus_agent.storage.models import Base
 
 
 def _utcnow() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class Tenant(Base):

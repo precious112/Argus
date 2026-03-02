@@ -36,7 +36,7 @@ async def health_check() -> dict[str, Any]:
         "status": "healthy",
         "version": __version__,
         "edition": mgr.edition.value,
-        "timestamp": datetime.now(UTC).isoformat(),
+        "timestamp": datetime.now(UTC).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -203,7 +203,7 @@ async def resolve_alert(alert_id: str) -> dict[str, Any]:
             alert_id,
             status="resolved",
             resolved=True,
-            resolved_at=datetime.now(UTC),
+            resolved_at=datetime.now(UTC).replace(tzinfo=None),
         )
         if not success:
             raise HTTPException(status_code=404, detail="Alert not found or already resolved")
@@ -217,7 +217,7 @@ async def resolve_alert(alert_id: str) -> dict[str, Any]:
             alert_id,
             status="resolved",
             resolved=True,
-            resolved_at=datetime.now(UTC),
+            resolved_at=datetime.now(UTC).replace(tzinfo=None),
         )
     except Exception:
         pass  # Don't break the endpoint if DB write fails
@@ -239,7 +239,7 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
     expires_hours = float(body.get("expires_hours", 24))
     reason = body.get("reason", "")
 
-    expires_at = datetime.now(UTC) + timedelta(hours=expires_hours)
+    expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=expires_hours)
 
     # Try in-memory first
     success = engine.acknowledge_alert(alert_id, acknowledged_by="user", expires_at=expires_at)
@@ -286,7 +286,7 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
         await AlertHistoryService().update_status(
             alert_id,
             status="acknowledged",
-            acknowledged_at=datetime.now(UTC),
+            acknowledged_at=datetime.now(UTC).replace(tzinfo=None),
             acknowledged_by="user",
         )
     except Exception:
@@ -361,7 +361,7 @@ async def mute_rule(rule_id: str, body: dict[str, Any] | None = None) -> dict[st
     duration_hours = min(float(body.get("duration_hours", 24)), 168)
     reason = body.get("reason", "")
 
-    expires_at = datetime.now(UTC) + timedelta(hours=duration_hours)
+    expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=duration_hours)
 
     success = engine.mute_rule(rule_id, expires_at)
     if not success:
@@ -868,7 +868,7 @@ async def analytics_usage(
     if granularity not in ("hour", "day", "week", "month"):
         raise HTTPException(status_code=400, detail="Invalid granularity")
 
-    since = datetime.now(UTC) - timedelta(hours=since_hours)
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=since_hours)
     svc = TokenUsageService()
     data = await svc.get_usage_over_time(
         granularity=granularity, since=since,
@@ -888,7 +888,7 @@ async def analytics_breakdown(
     if group_by not in ("provider", "model", "source"):
         raise HTTPException(status_code=400, detail="Invalid group_by")
 
-    since = datetime.now(UTC) - timedelta(hours=since_hours)
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=since_hours)
     svc = TokenUsageService()
     data = await svc.get_usage_by_dimension(dimension=group_by, since=since)
     return {"group_by": group_by, "data": data}

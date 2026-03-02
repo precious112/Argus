@@ -361,7 +361,7 @@ class AlertEngine:
         the rule's cooldown, any acknowledgment for this dedup_key is auto-cleared
         (the condition resolved and a new incident started).
         """
-        now = now or datetime.now(UTC)
+        now = now or datetime.now(UTC).replace(tzinfo=None)
 
         # Check rule-level mute first
         if rule_id in self._muted_rules:
@@ -402,7 +402,7 @@ class AlertEngine:
             if not self._matches(rule, event):
                 continue
 
-            now = datetime.now(UTC)
+            now = datetime.now(UTC).replace(tzinfo=None)
             dedup_key = build_dedup_key(event, rule.id)
 
             # Track when we last saw a matching event (even if suppressed)
@@ -511,7 +511,7 @@ class AlertEngine:
         for alert in self._active_alerts:
             if alert.id == alert_id and not alert.resolved:
                 alert.resolved = True
-                alert.resolved_at = datetime.now(UTC)
+                alert.resolved_at = datetime.now(UTC).replace(tzinfo=None)
                 alert.status = AlertState.RESOLVED
                 # Clear acknowledgment for this alert's dedup_key
                 dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
@@ -536,7 +536,7 @@ class AlertEngine:
 
         for alert in self._active_alerts:
             if alert.id == alert_id:
-                now = datetime.now(UTC)
+                now = datetime.now(UTC).replace(tzinfo=None)
                 alert.status = AlertState.ACKNOWLEDGED
                 alert.acknowledged_at = now
                 alert.acknowledged_by = acknowledged_by
@@ -578,7 +578,7 @@ class AlertEngine:
 
     def get_muted_rules(self) -> dict[str, datetime]:
         """Return currently muted rules (auto-expires stale entries)."""
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         expired = [k for k, v in self._muted_rules.items() if now >= v]
         for k in expired:
             del self._muted_rules[k]
@@ -586,7 +586,7 @@ class AlertEngine:
 
     def get_acknowledged_keys(self) -> dict[str, datetime]:
         """Return currently acknowledged dedup keys (auto-expires stale entries)."""
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         expired = [k for k, v in self._acknowledged_keys.items() if now >= v]
         for k in expired:
             del self._acknowledged_keys[k]

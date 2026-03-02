@@ -126,7 +126,7 @@ async def _handle_subscription_active(data: Any) -> None:
             sub.current_period_start = _parse_dt(data, "current_period_start")
             sub.current_period_end = _parse_dt(data, "current_period_end")
             sub.cancel_at_period_end = False
-            sub.updated_at = datetime.now(UTC)
+            sub.updated_at = datetime.now(UTC).replace(tzinfo=None)
         else:
             sub = Subscription(
                 id=str(uuid.uuid4()),
@@ -145,7 +145,7 @@ async def _handle_subscription_active(data: Any) -> None:
         if tenant:
             tenant.plan = "teams"
             tenant.polar_customer_id = customer_id
-            tenant.updated_at = datetime.now(UTC)
+            tenant.updated_at = datetime.now(UTC).replace(tzinfo=None)
 
         await session.commit()
 
@@ -164,7 +164,7 @@ async def _handle_subscription_canceled(data: Any) -> None:
         if sub:
             sub.status = "canceled"
             sub.cancel_at_period_end = True
-            sub.updated_at = datetime.now(UTC)
+            sub.updated_at = datetime.now(UTC).replace(tzinfo=None)
             await session.commit()
 
     logger.info("Subscription canceled (grace): %s", sub_id)
@@ -181,12 +181,12 @@ async def _handle_subscription_revoked(data: Any) -> None:
         sub = result.scalar_one_or_none()
         if sub:
             sub.status = "revoked"
-            sub.updated_at = datetime.now(UTC)
+            sub.updated_at = datetime.now(UTC).replace(tzinfo=None)
 
             tenant = await session.get(Tenant, sub.tenant_id)
             if tenant:
                 tenant.plan = "free"
-                tenant.updated_at = datetime.now(UTC)
+                tenant.updated_at = datetime.now(UTC).replace(tzinfo=None)
 
             await session.commit()
             logger.info("Subscription revoked, tenant %s downgraded to free", sub.tenant_id)
@@ -204,7 +204,7 @@ async def _handle_subscription_updated(data: Any) -> None:
         if sub:
             sub.current_period_start = _parse_dt(data, "current_period_start")
             sub.current_period_end = _parse_dt(data, "current_period_end")
-            sub.updated_at = datetime.now(UTC)
+            sub.updated_at = datetime.now(UTC).replace(tzinfo=None)
             await session.commit()
 
     logger.info("Subscription updated: %s", sub_id)

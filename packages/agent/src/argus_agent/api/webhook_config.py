@@ -170,7 +170,7 @@ async def update_webhook(
         if body.is_active is not None:
             wh.is_active = body.is_active
 
-        wh.updated_at = datetime.now(UTC)
+        wh.updated_at = datetime.now(UTC).replace(tzinfo=None)
         await session.commit()
         await session.refresh(wh)
 
@@ -230,9 +230,9 @@ async def test_webhook(
             timeout_seconds=min(wh.timeout_seconds, 10),
         )
 
-        wh.last_ping_at = datetime.now(UTC)
+        wh.last_ping_at = datetime.now(UTC).replace(tzinfo=None)
         wh.last_ping_status = status
-        wh.updated_at = datetime.now(UTC)
+        wh.updated_at = datetime.now(UTC).replace(tzinfo=None)
         await session.commit()
 
     return {"success": success, "status": status}

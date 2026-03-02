@@ -112,7 +112,7 @@ class TokenUsageService:
     ) -> list[dict[str, Any]]:
         """Aggregate token usage by time bucket."""
         fmt = _STRFTIME_FORMATS.get(granularity, _STRFTIME_FORMATS["hour"])
-        since = since or datetime.now(UTC) - timedelta(hours=24)
+        since = since or datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=24)
 
         async with get_session() as session:
             bucket_expr = func.strftime(fmt, TokenUsage.timestamp)
@@ -155,7 +155,7 @@ class TokenUsageService:
         since: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Group usage by provider, model, or source."""
-        since = since or datetime.now(UTC) - timedelta(hours=24)
+        since = since or datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=24)
 
         col_map = {
             "provider": TokenUsage.provider,
@@ -193,7 +193,7 @@ class TokenUsageService:
 
     async def get_summary(self) -> dict[str, Any]:
         """Aggregate stats: totals, today, this week, this month, estimated cost."""
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = today_start - timedelta(days=now.weekday())
         month_start = today_start.replace(day=1)
