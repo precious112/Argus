@@ -232,7 +232,7 @@ class ArgusWebhookHandler:
     ) -> None:
         self.secret = webhook_secret
         self.tools: dict[str, Any] = tools if tools is not None else dict(_DEFAULT_TOOLS)
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._executor = ThreadPoolExecutor(max_workers=8)
 
     def _verify(self, body: bytes, headers: dict[str, str]) -> bool:
         sig = headers.get("x-argus-signature", headers.get("X-Argus-Signature", ""))
