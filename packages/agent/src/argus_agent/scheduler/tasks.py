@@ -25,6 +25,11 @@ async def quick_health_check() -> None:
     Zero LLM cost. Checks CPU, memory, disk, and load against thresholds.
     Emits events for anything abnormal.
     """
+    from argus_agent.config import get_settings
+    if get_settings().deployment.mode == "saas":
+        await _remote_health_check()
+        return
+
     bus = get_event_bus()
     findings: list[str] = []
 
@@ -88,6 +93,84 @@ async def quick_health_check() -> None:
                 message="All systems normal",
             )
         )
+
+
+async def _remote_health_check() -> None:
+    """SaaS mode: health check via webhooks to tenant hosts."""
+    from argus_agent.collectors.remote import execute_remote_tool, get_webhook_tenants
+
+    bus = get_event_bus()
+    tenants = await get_webhook_tenants()
+    if not tenants:
+        await bus.publish(
+            Event(
+                source=EventSource.SCHEDULER,
+                type=EventType.HEALTH_CHECK,
+                message="No webhook tenants configured",
+            )
+        )
+        return
+
+    for t in tenants:
+        findings: list[str] = []
+        result = await execute_remote_tool(t["tenant_id"], "system_metrics", {})
+        if not result:
+            findings.append(f"WARNING: Could not reach tenant {t['tenant_id']}")
+        else:
+            cpu = result.get("cpu_percent", 0)
+            if cpu > 95:
+                findings.append(f"CRITICAL: CPU at {cpu}%")
+            elif cpu > 80:
+                findings.append(f"WARNING: CPU at {cpu}%")
+
+            mem = result.get("memory", {})
+            mem_pct = mem.get("percent", 0) if isinstance(mem, dict) else 0
+            if mem_pct > 95:
+                findings.append(f"CRITICAL: Memory at {mem_pct}%")
+            elif mem_pct > 85:
+                findings.append(f"WARNING: Memory at {mem_pct}%")
+
+            disk = result.get("disk", {})
+            disk_pct = disk.get("percent", 0) if isinstance(disk, dict) else 0
+            if disk_pct > 95:
+                findings.append(f"CRITICAL: Disk at {disk_pct}%")
+            elif disk_pct > 85:
+                findings.append(f"WARNING: Disk at {disk_pct}%")
+
+            load_avg = result.get("load_avg", [])
+            if isinstance(load_avg, list) and load_avg:
+                load1 = float(load_avg[0])
+                # Estimate CPU count from memory/disk presence (assume at least 1)
+                load_per_cpu = load1
+                if load_per_cpu > 3.0:
+                    findings.append(f"CRITICAL: Load at {load1:.2f}")
+                elif load_per_cpu > 1.5:
+                    findings.append(f"WARNING: Load at {load1:.2f}")
+
+        if findings:
+            severity = (
+                EventSeverity.URGENT
+                if any("CRITICAL" in f for f in findings)
+                else EventSeverity.NOTABLE
+            )
+            await bus.publish(
+                Event(
+                    source=EventSource.SCHEDULER,
+                    type=EventType.HEALTH_CHECK,
+                    severity=severity,
+                    message=f"[tenant {t['tenant_id']}] " + "; ".join(findings),
+                    data={"findings": findings, "tenant_id": t["tenant_id"]},
+                )
+            )
+        else:
+            await bus.publish(
+                Event(
+                    source=EventSource.SCHEDULER,
+                    type=EventType.HEALTH_CHECK,
+                    message=f"[tenant {t['tenant_id']}] All systems normal",
+                    data={"tenant_id": t["tenant_id"]},
+                )
+            )
 
 
 async def trend_analysis() -> None:

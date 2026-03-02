@@ -31,6 +31,7 @@ class SecurityScanner:
     """Periodic security scanner — all checks are READ-ONLY.
 
     Follows the same async start/stop pattern as other collectors.
+    In SaaS mode, checks are routed through webhooks to the tenant's host.
     """
 
     def __init__(self, interval: int = DEFAULT_INTERVAL) -> None:
@@ -42,13 +43,17 @@ class SecurityScanner:
         self._known_executables: set[str] = set()
         self._host_root = get_settings().collector.host_root
         self._last_results: dict[str, Any] = {}
+        self._is_saas = get_settings().deployment.mode == "saas"
 
     async def start(self) -> None:
         if self._running:
             return
         self._running = True
         self._task = asyncio.create_task(self._scan_loop())
-        logger.info("Security scanner started (interval=%ds)", self._interval)
+        logger.info(
+            "Security scanner started (interval=%ds, saas=%s)",
+            self._interval, self._is_saas,
+        )
 
     async def stop(self) -> None:
         self._running = False
@@ -85,7 +90,10 @@ class SecurityScanner:
             "checks": {},
         }
 
-        # Run each check, collecting findings
+        if self._is_saas:
+            return await self._scan_once_remote(bus, results)
+
+        # Self-hosted: run local sync checks
         checks = [
             ("open_ports", self._check_open_ports),
             ("failed_ssh", self._check_failed_ssh),
@@ -101,7 +109,6 @@ class SecurityScanner:
                 findings = check_fn()
                 results["checks"][name] = findings
 
-                # Publish events for notable findings
                 for finding in findings.get("events", []):
                     await bus.publish(Event(
                         source=EventSource.SECURITY_SCANNER,
@@ -116,6 +123,54 @@ class SecurityScanner:
 
         self._last_results = results
         return results
+
+    async def _scan_once_remote(
+        self,
+        bus: Any,
+        results: dict[str, Any],
+    ) -> dict[str, Any]:
+        """SaaS mode: run all checks via webhooks."""
+        from argus_agent.collectors.remote import get_webhook_tenants
+
+        tenants = await get_webhook_tenants()
+        if not tenants:
+            logger.debug("No webhook tenants configured — skipping remote scan")
+            self._last_results = results
+            return results
+
+        checks: list[tuple[str, Any]] = [
+            ("open_ports", self._remote_open_ports),
+            ("failed_ssh", self._remote_failed_ssh),
+            ("file_permissions", self._remote_file_permissions),
+            ("suspicious_processes", self._remote_suspicious_processes),
+            ("new_executables", self._remote_new_executables),
+            ("process_lineage", self._remote_process_lineage),
+            ("outbound_connections", self._remote_outbound_connections),
+        ]
+
+        for name, check_fn in checks:
+            try:
+                findings = await check_fn(tenants)
+                results["checks"][name] = findings
+
+                for finding in findings.get("events", []):
+                    await bus.publish(Event(
+                        source=EventSource.SECURITY_SCANNER,
+                        type=finding["type"],
+                        severity=EventSeverity(finding["severity"]),
+                        message=finding["message"],
+                        data=finding.get("data", {}),
+                    ))
+            except Exception:
+                logger.exception("Remote security check '%s' failed", name)
+                results["checks"][name] = {"error": "check failed"}
+
+        self._last_results = results
+        return results
+
+    # ------------------------------------------------------------------
+    # LOCAL (self-hosted) checks — sync, use psutil / filesystem
+    # ------------------------------------------------------------------
 
     def _check_open_ports(self) -> dict[str, Any]:
         """Check for new listening ports."""
@@ -159,7 +214,6 @@ class SecurityScanner:
             return {"failures_by_ip": {}, "events": events}
 
         try:
-            # Read last 1000 lines
             lines = path.read_text(errors="replace").splitlines()[-1000:]
             pattern = re.compile(r"Failed password.*from (\d+\.\d+\.\d+\.\d+)")
             for line in lines:
@@ -227,7 +281,6 @@ class SecurityScanner:
                 name = (info.get("name") or "").lower()
                 exe = info.get("exe") or ""
 
-                # Known bad process names (substring match)
                 if any(bad in name for bad in KNOWN_BAD_NAMES):
                     entry = {"pid": info["pid"], "name": name, "reason": "known_bad_name"}
                     suspicious.append(entry)
@@ -238,7 +291,6 @@ class SecurityScanner:
                         "data": entry,
                     })
 
-                # Deleted binary
                 if exe and "(deleted)" in exe:
                     entry = {
                         "pid": info["pid"], "name": name,
@@ -278,7 +330,7 @@ class SecurityScanner:
                     if entry.is_file():
                         try:
                             st = entry.stat()
-                            if st.st_mode & 0o111:  # executable bit
+                            if st.st_mode & 0o111:
                                 current.add(entry.path)
                         except OSError:
                             pass
@@ -314,7 +366,6 @@ class SecurityScanner:
                 if name not in shells:
                     continue
 
-                # Check parent
                 try:
                     parent = psutil.Process(info["ppid"])
                     parent_name = (parent.name() or "").lower()
@@ -352,6 +403,237 @@ class SecurityScanner:
                     current.add((conn.raddr.ip, conn.raddr.port))
         except (psutil.AccessDenied, OSError):
             pass
+
+        if self._known_outbound:
+            new = current - self._known_outbound
+            for ip, port in new:
+                events.append({
+                    "type": EventType.SUSPICIOUS_OUTBOUND,
+                    "severity": EventSeverity.NOTABLE,
+                    "message": f"New outbound connection: {ip}:{port}",
+                    "data": {"ip": ip, "port": port},
+                })
+
+        self._known_outbound = current
+        connections = [{"ip": ip, "port": port} for ip, port in sorted(current)]
+        return {"connections": connections, "events": events}
+
+    # ------------------------------------------------------------------
+    # REMOTE (SaaS) checks — async, use webhooks
+    # ------------------------------------------------------------------
+
+    async def _remote_open_ports(self, tenants: list[dict[str, Any]]) -> dict[str, Any]:
+        """Check for new listening ports via network_connections webhook."""
+        from argus_agent.collectors.remote import execute_remote_tool
+
+        events: list[dict[str, Any]] = []
+        all_ports: set[int] = set()
+
+        for t in tenants:
+            result = await execute_remote_tool(t["tenant_id"], "network_connections", {})
+            if not result:
+                continue
+            for conn in result.get("connections", []):
+                if conn.get("status") == "LISTEN":
+                    laddr = conn.get("laddr", "")
+                    try:
+                        port = int(laddr.rsplit(":", 1)[-1]) if ":" in laddr else 0
+                    except (ValueError, IndexError):
+                        continue
+                    if port:
+                        all_ports.add(port)
+                        if self._known_ports and port not in self._known_ports:
+                            events.append({
+                                "type": EventType.NEW_OPEN_PORT,
+                                "severity": EventSeverity.NOTABLE,
+                                "message": (
+                            f"New listening port: {port} "
+                            f"(tenant {t['tenant_id']})"
+                        ),
+                                "data": {"port": port, "tenant_id": t["tenant_id"]},
+                            })
+
+        if not self._known_ports:
+            self._known_ports = all_ports
+        else:
+            self._known_ports = all_ports
+
+        return {"listening_ports": sorted(all_ports), "events": events}
+
+    async def _remote_failed_ssh(self, tenants: list[dict[str, Any]]) -> dict[str, Any]:
+        """Check SSH brute force via log_search webhook."""
+        from argus_agent.collectors.remote import execute_remote_tool
+
+        events: list[dict[str, Any]] = []
+        all_failures: dict[str, int] = defaultdict(int)
+
+        for t in tenants:
+            result = await execute_remote_tool(
+                t["tenant_id"], "log_search",
+                {"pattern": "Failed password", "path": "/var/log/auth.log", "limit": 200},
+            )
+            if not result:
+                continue
+            ip_pattern = re.compile(r"Failed password.*from (\d+\.\d+\.\d+\.\d+)")
+            for line in result.get("matches", []):
+                match = ip_pattern.search(line)
+                if match:
+                    all_failures[match.group(1)] += 1
+
+            for ip, count in all_failures.items():
+                if count >= 10:
+                    events.append({
+                        "type": EventType.BRUTE_FORCE,
+                        "severity": EventSeverity.URGENT,
+                        "message": (
+                            f"SSH brute force: {count} failures "
+                            f"from {ip} (tenant {t['tenant_id']})"
+                        ),
+                        "data": {"ip": ip, "count": count, "tenant_id": t["tenant_id"]},
+                    })
+
+        return {"failures_by_ip": dict(all_failures), "events": events}
+
+    async def _remote_file_permissions(self, tenants: list[dict[str, Any]]) -> dict[str, Any]:
+        """Check file permissions via security_scan webhook."""
+        from argus_agent.collectors.remote import execute_remote_tool
+
+        events: list[dict[str, Any]] = []
+        findings: list[dict[str, Any]] = []
+
+        for t in tenants:
+            result = await execute_remote_tool(t["tenant_id"], "security_scan", {})
+            if not result:
+                continue
+            ww = result.get("world_writable_tmp")
+            if isinstance(ww, int) and ww > 0:
+                findings.append({
+                    "path": "/tmp",
+                    "world_writable_count": ww,
+                    "tenant_id": t["tenant_id"],
+                })
+                events.append({
+                    "type": EventType.PERMISSION_RISK,
+                    "severity": EventSeverity.NOTABLE,
+                    "message": f"{ww} world-writable file(s) in /tmp (tenant {t['tenant_id']})",
+                    "data": {"count": ww, "tenant_id": t["tenant_id"]},
+                })
+
+        return {"files": findings, "events": events}
+
+    async def _remote_suspicious_processes(self, tenants: list[dict[str, Any]]) -> dict[str, Any]:
+        """Detect suspicious processes via process_list webhook."""
+        from argus_agent.collectors.remote import execute_remote_tool
+
+        events: list[dict[str, Any]] = []
+        suspicious: list[dict[str, Any]] = []
+
+        for t in tenants:
+            result = await execute_remote_tool(t["tenant_id"], "process_list", {"limit": 200})
+            if not result:
+                continue
+            for proc in result.get("processes", []):
+                name = (proc.get("name") or "").lower()
+                pid = proc.get("pid", 0)
+                if any(bad in name for bad in KNOWN_BAD_NAMES):
+                    entry = {
+                        "pid": pid, "name": name,
+                        "reason": "known_bad_name",
+                        "tenant_id": t["tenant_id"],
+                    }
+                    suspicious.append(entry)
+                    events.append({
+                        "type": EventType.SUSPICIOUS_PROCESS,
+                        "severity": EventSeverity.URGENT,
+                        "message": (
+                            f"Suspicious process: {name} "
+                            f"(PID {pid}, tenant {t['tenant_id']})"
+                        ),
+                        "data": entry,
+                    })
+
+        return {"suspicious": suspicious, "events": events}
+
+    async def _remote_new_executables(self, tenants: list[dict[str, Any]]) -> dict[str, Any]:
+        """Check for new executables via security_scan webhook."""
+        from argus_agent.collectors.remote import execute_remote_tool
+
+        events: list[dict[str, Any]] = []
+        current: set[str] = set()
+
+        for t in tenants:
+            result = await execute_remote_tool(t["tenant_id"], "security_scan", {})
+            if not result:
+                continue
+            ww = result.get("world_writable_tmp")
+            if isinstance(ww, int) and ww > 0:
+                placeholder = f"/tmp/<{ww}-writable-files>@{t['tenant_id']}"
+                current.add(placeholder)
+
+        if self._known_executables:
+            new = current - self._known_executables
+            for path in new:
+                events.append({
+                    "type": EventType.NEW_EXECUTABLE,
+                    "severity": EventSeverity.NOTABLE,
+                    "message": f"New executable(s) detected on remote host: {path}",
+                    "data": {"path": path},
+                })
+
+        self._known_executables = current
+        return {"executables": sorted(current), "events": events}
+
+    async def _remote_process_lineage(self, tenants: list[dict[str, Any]]) -> dict[str, Any]:
+        """Simplified process lineage check via webhook (flag shell processes)."""
+        from argus_agent.collectors.remote import execute_remote_tool
+
+        events: list[dict[str, Any]] = []
+        shells = {"sh", "bash", "zsh", "dash", "fish"}
+
+        for t in tenants:
+            result = await execute_remote_tool(t["tenant_id"], "process_list", {"limit": 200})
+            if not result:
+                continue
+            for proc in result.get("processes", []):
+                name = (proc.get("name") or "").lower()
+                if name in shells:
+                    events.append({
+                        "type": EventType.SUSPICIOUS_PROCESS,
+                        "severity": EventSeverity.NOTABLE,
+                        "message": (
+                            f"Shell process '{name}' running "
+                            f"(PID {proc.get('pid', '?')}, "
+                            f"tenant {t['tenant_id']})"
+                        ),
+                        "data": {
+                            "pid": proc.get("pid", 0),
+                            "name": name,
+                            "tenant_id": t["tenant_id"],
+                        },
+                    })
+
+        return {"events": events}
+
+    async def _remote_outbound_connections(self, tenants: list[dict[str, Any]]) -> dict[str, Any]:
+        """Track outbound connections via network_connections webhook."""
+        from argus_agent.collectors.remote import execute_remote_tool
+
+        events: list[dict[str, Any]] = []
+        current: set[tuple[str, int]] = set()
+
+        for t in tenants:
+            result = await execute_remote_tool(t["tenant_id"], "network_connections", {})
+            if not result:
+                continue
+            for conn in result.get("connections", []):
+                if conn.get("status") == "ESTABLISHED" and conn.get("raddr"):
+                    raddr = conn["raddr"]
+                    try:
+                        ip, port_str = raddr.rsplit(":", 1)
+                        port = int(port_str)
+                        current.add((ip, port))
+                    except (ValueError, IndexError):
+                        continue
 
         if self._known_outbound:
             new = current - self._known_outbound
