@@ -13,6 +13,7 @@ Usage with Flask::
     app.register_blueprint(handler.flask_blueprint())
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -23,6 +24,7 @@ import shutil
 import socket
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 logger = logging.getLogger("argus.webhook")
@@ -230,6 +232,7 @@ class ArgusWebhookHandler:
     ) -> None:
         self.secret = webhook_secret
         self.tools: dict[str, Any] = tools if tools is not None else dict(_DEFAULT_TOOLS)
+        self._executor = ThreadPoolExecutor(max_workers=4)
 
     def _verify(self, body: bytes, headers: dict[str, str]) -> bool:
         sig = headers.get("x-argus-signature", headers.get("X-Argus-Signature", ""))
@@ -266,8 +269,15 @@ class ArgusWebhookHandler:
             return {"error": str(e), "result": None}
 
     async def handle_request(self, body: bytes, headers: dict[str, str]) -> dict[str, Any]:
-        """Verify signature and execute requested tool (async)."""
-        return self.handle_request_sync(body, headers)
+        """Verify signature and execute requested tool (async).
+
+        Runs the (potentially blocking) tool function in a thread pool
+        so it never blocks the event loop.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor, self.handle_request_sync, body, headers,
+        )
 
     def fastapi_router(self, prefix: str = "/argus/webhook") -> Any:
         """Return a FastAPI APIRouter that handles POST ``{prefix}``."""
@@ -280,7 +290,7 @@ class ArgusWebhookHandler:
         async def _webhook(request: Request) -> JSONResponse:
             body = await request.body()
             headers = dict(request.headers)
-            result = self.handle_request_sync(body, headers)
+            result = await self.handle_request(body, headers)
             status = 200 if result.get("error") is None else 400
             return JSONResponse(result, status_code=status)
 
