@@ -1,0 +1,57 @@
+# Argus SaaS — dev overrides
+#
+# Adds the Next.js dev server for hot-reload during local development.
+# API + worker run from source via volume mounts.
+#
+# Usage:
+#   docker compose \
+#     -f docker/docker-compose.saas.yml \
+#     -f docker/docker-compose.saas.dev.yml \
+#     --env-file .env.saas up
+
+services:
+  # Override API to mount source for reload
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile.unified
+    command: >
+      python -m uvicorn argus_agent.main:app
+      --host 0.0.0.0 --port 7600 --reload
+    volumes:
+      - ../packages/agent/src:/app/src:ro
+
+  # Override worker to mount source for reload
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile.unified
+    volumes:
+      - ../packages/agent/src:/app/src:ro
+    deploy:
+      replicas: 1
+
+  # Next.js dev server with hot-reload
+  web:
+    image: node:22-slim
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../packages/web:/app
+      - web_node_modules:/app/node_modules
+    environment:
+      - NEXT_PUBLIC_AGENT_WS_URL=ws://localhost:7600/api/v1/ws
+      - NEXT_PUBLIC_AGENT_API_URL=http://localhost:7600/api/v1
+      - NEXT_PUBLIC_ARGUS_URL=http://localhost:7600
+    depends_on:
+      - api
+
+  # In dev mode nginx also proxies the web dev server
+  nginx:
+    volumes:
+      - ./nginx/saas.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  web_node_modules:

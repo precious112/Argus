@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable, Coroutine
+from dataclasses import asdict
 from typing import Any
 
 from argus_agent.events.types import Event, EventSeverity
@@ -112,3 +114,90 @@ def reset_event_bus() -> None:
     if _bus:
         _bus.clear()
     _bus = None
+
+
+# ---------------------------------------------------------------------------
+# Redis-backed EventBus for cross-process event distribution (SaaS mode)
+# ---------------------------------------------------------------------------
+
+REDIS_EVENTS_CHANNEL = "argus:events"
+
+
+class RedisEventBus(EventBus):
+    """EventBus subclass that replicates events across processes via Redis.
+
+    Local handlers are called immediately (via ``super().publish()``).
+    The event is then serialised and published to Redis so that other
+    API pods / worker processes receive it too.
+    """
+
+    def __init__(self, redis: Any) -> None:
+        super().__init__()
+        self._redis = redis
+        self._sub_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._publishing = False  # prevent rebroadcast loops
+
+    async def start(self) -> None:
+        self._sub_task = asyncio.create_task(self._subscribe_loop())
+        logger.info("RedisEventBus started")
+
+    def stop(self) -> None:
+        if self._sub_task:
+            self._sub_task.cancel()
+        logger.info("RedisEventBus stopped")
+
+    async def publish(self, event: Event) -> None:
+        """Publish locally, then broadcast to Redis (if not from Redis)."""
+        await super().publish(event)
+
+        if self._publishing:
+            # Event came from Redis — don't re-publish
+            return
+
+        try:
+            data = asdict(event)
+            # datetime → ISO string for JSON serialization
+            data["timestamp"] = event.timestamp.isoformat()
+            await self._redis.publish(REDIS_EVENTS_CHANNEL, json.dumps(data))
+        except Exception:
+            logger.debug("Failed to publish event to Redis", exc_info=True)
+
+    async def _subscribe_loop(self) -> None:
+        from argus_agent.events.types import EventSeverity as _Sev
+
+        pubsub = self._redis.pubsub()
+        try:
+            await pubsub.subscribe(REDIS_EVENTS_CHANNEL)
+            async for message in pubsub.listen():
+                if message["type"] != "message":
+                    continue
+                try:
+                    data = json.loads(message["data"])
+                    event = Event(
+                        source=data["source"],
+                        type=data["type"],
+                        severity=_Sev(data.get("severity", "NORMAL")),
+                        data=data.get("data", {}),
+                        message=data.get("message", ""),
+                    )
+                    # Deliver locally without re-publishing to Redis
+                    self._publishing = True
+                    try:
+                        await super().publish(event)
+                    finally:
+                        self._publishing = False
+                except Exception:
+                    logger.debug("Error deserialising Redis event", exc_info=True)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await pubsub.unsubscribe()
+            await pubsub.aclose()
+
+
+def init_redis_event_bus(redis: Any) -> RedisEventBus:
+    """Create and install a RedisEventBus as the global event bus."""
+    global _bus
+    bus = RedisEventBus(redis)
+    _bus = bus
+    return bus

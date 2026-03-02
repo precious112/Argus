@@ -18,6 +18,25 @@ logger = logging.getLogger("argus.agent.loop")
 MAX_TOOL_ROUNDS = 20
 
 
+async def _try_remote_execute(
+    tool_name: str,
+    tool_args: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Attempt to execute a tool via remote webhook in SaaS mode.
+
+    Returns None if the tool should be executed locally.
+    """
+    try:
+        from argus_agent.tenancy.context import get_tenant_id
+        from argus_agent.webhooks.tool_router import execute_tool as remote_execute
+
+        tenant_id = get_tenant_id()
+        return await remote_execute(tool_name, tool_args, tenant_id)
+    except Exception:
+        logger.debug("Remote tool routing skipped for %s", tool_name, exc_info=True)
+        return None
+
+
 def _coerce_args(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
     """Coerce tool arguments to match declared schema types.
 
@@ -196,14 +215,20 @@ class AgentLoop:
                         {"id": tool_call_id, "name": tool_name, "arguments": args},
                     )
 
-                    # Execute the tool
+                    # Execute the tool — try remote webhook first (SaaS mode)
                     tool = get_tool(tool_name)
                     if tool is None:
                         tool_result = {"error": f"Unknown tool: {tool_name}"}
                     else:
                         try:
                             args = _coerce_args(tool, args)
-                            tool_result = await tool.execute(**args)
+
+                            # Route to remote SDK webhook if configured
+                            remote_result = await _try_remote_execute(tool_name, args)
+                            if remote_result is not None:
+                                tool_result = remote_result
+                            else:
+                                tool_result = await tool.execute(**args)
                         except Exception as e:
                             logger.exception("Tool execution error: %s", tool_name)
                             tool_result = {"error": f"Tool execution failed: {e}"}

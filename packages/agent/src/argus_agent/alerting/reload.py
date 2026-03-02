@@ -22,7 +22,7 @@ async def reload_channels() -> None:
     External channels (Slack, Email, Webhook) go to the formatter (severity-routed).
     """
     from argus_agent.api.ws import manager
-    from argus_agent.main import _get_alert_engine, _get_alert_formatter
+    from argus_agent.main import _get_alert_engine, _get_alert_formatter, _get_distributed_manager
 
     engine = _get_alert_engine()
     if engine is None:
@@ -32,8 +32,9 @@ async def reload_channels() -> None:
     svc = NotificationSettingsService()
     configs = await svc.get_all_raw()
 
-    # WebSocket always goes directly to the engine
-    engine.set_channels([WebSocketChannel(manager)])
+    # Use distributed manager in SaaS mode for cross-pod alert delivery
+    ws_mgr = _get_distributed_manager() or manager
+    engine.set_channels([WebSocketChannel(ws_mgr)])
 
     external: list[SlackChannel | EmailChannel | WebhookChannel] = []
 

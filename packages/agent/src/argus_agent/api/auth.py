@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 
 from argus_agent.auth.dependencies import get_current_user
 from argus_agent.auth.jwt import create_access_token
-from argus_agent.auth.password import verify_password
+from argus_agent.auth.password import hash_password, verify_password
 from argus_agent.config import get_settings
 from argus_agent.storage.models import User
 from argus_agent.storage.repositories import get_session
@@ -95,3 +95,97 @@ async def me(user: dict = Depends(get_current_user)):
         "tenant_id": user.get("tenant_id", "default"),
         "role": user.get("role", "member"),
     }
+
+
+# ---- Email Verification ----
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+@router.post("/verify-email")
+async def verify_email(body: VerifyEmailRequest):
+    """Verify an email address using the token from the email link."""
+    settings = get_settings()
+    if settings.deployment.mode != "saas":
+        raise HTTPException(400, "Not available in self-hosted mode")
+
+    from argus_agent.auth.email import verify_email_token
+
+    result = await verify_email_token(body.token)
+    if not result["ok"]:
+        raise HTTPException(400, result["error"])
+
+    return {"status": "ok", "message": "Email verified successfully"}
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+@router.post("/resend-verification")
+async def resend_verification(body: ResendVerificationRequest):
+    """Resend the verification email."""
+    settings = get_settings()
+    if settings.deployment.mode != "saas":
+        raise HTTPException(400, "Not available in self-hosted mode")
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(User).where(User.email == body.email, User.is_active.is_(True))
+        )
+        user = result.scalar_one_or_none()
+
+    if user and not user.email_verified:
+        from argus_agent.auth.email import send_verification_email
+
+        await send_verification_email(user.id, user.email)
+
+    # Always return success to not reveal if email exists
+    return {"status": "ok", "message": "If the email exists, a verification link has been sent"}
+
+
+# ---- Password Reset ----
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+@router.post("/forgot-password")
+async def forgot_password(body: ForgotPasswordRequest):
+    """Send a password reset email."""
+    settings = get_settings()
+    if settings.deployment.mode != "saas":
+        raise HTTPException(400, "Not available in self-hosted mode")
+
+    from argus_agent.auth.email import send_password_reset_email
+
+    await send_password_reset_email(body.email)
+
+    return {"status": "ok", "message": "If the email exists, a reset link has been sent"}
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+@router.post("/reset-password")
+async def reset_password(body: ResetPasswordRequest):
+    """Reset password using a valid token."""
+    settings = get_settings()
+    if settings.deployment.mode != "saas":
+        raise HTTPException(400, "Not available in self-hosted mode")
+
+    if len(body.new_password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+
+    from argus_agent.auth.email import consume_reset_token
+
+    result = await consume_reset_token(body.token, hash_password(body.new_password))
+    if not result["ok"]:
+        raise HTTPException(400, result["error"])
+
+    return {"status": "ok", "message": "Password reset successfully"}

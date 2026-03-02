@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const PUBLIC_PATHS = ["/login", "/register"];
-const PUBLIC_PREFIXES = ["/_next", "/favicon.ico", "/argus-logo.png"];
+const PUBLIC_PATHS = ["/login", "/register", "/forgot-password", "/reset-password", "/verify-email"];
+const PUBLIC_PREFIXES = ["/_next", "/favicon.ico", "/argus-logo.png", "/login/callback"];
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

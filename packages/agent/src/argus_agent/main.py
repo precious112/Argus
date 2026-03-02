@@ -45,6 +45,8 @@ _action_engine = None
 _sdk_telemetry_collector = None
 _soak_runner = None
 _alert_formatter = None
+_distributed_manager = None
+_redis_event_bus = None
 
 
 def _get_collectors():
@@ -87,6 +89,11 @@ def _get_alert_formatter():
     return _alert_formatter
 
 
+def _get_distributed_manager():
+    """Get the distributed connection manager (SaaS mode only)."""
+    return _distributed_manager
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
@@ -94,6 +101,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _security_scanner, _alert_engine, _token_budget
     global _baseline_tracker, _anomaly_detector, _investigator, _action_engine
     global _sdk_telemetry_collector, _soak_runner, _alert_formatter
+    global _distributed_manager, _redis_event_bus
 
     settings = get_settings()
 
@@ -129,6 +137,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         set_metrics_repository(metrics_repo)
 
         await init_key_cache(settings.deployment.redis_url)
+
+        # Redis EventBus for cross-process event distribution
+        import redis.asyncio as aioredis
+
+        from argus_agent.events.bus import init_redis_event_bus
+
+        _redis_events_conn = aioredis.from_url(
+            settings.deployment.redis_url, decode_responses=True
+        )
+        _redis_event_bus = init_redis_event_bus(_redis_events_conn)
+        await _redis_event_bus.start()
+
+        # Distributed ConnectionManager for cross-pod broadcasts
+        from argus_agent.queue.distributed_manager import DistributedConnectionManager
+
+        _redis_broadcast_conn = aioredis.from_url(
+            settings.deployment.redis_url, decode_responses=True
+        )
+        from argus_agent.api.ws import manager as _local_manager
+
+        _distributed_manager = DistributedConnectionManager(
+            _local_manager, _redis_broadcast_conn
+        )
+        await _distributed_manager.start()
+
         logger.info("SaaS mode: PostgreSQL + TimescaleDB + Redis initialized")
     else:
         # Self-hosted: SQLite + DuckDB (unchanged)
@@ -167,6 +200,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from argus_agent.alerting.formatter import AlertFormatter
     from argus_agent.api.ws import manager
 
+    # Use distributed manager for SaaS cross-pod broadcasts, local otherwise
+    ws_mgr = _distributed_manager if _distributed_manager else manager
+
     _alert_formatter = AlertFormatter(
         channels=[],
         batch_window=settings.alerting.batch_window,
@@ -176,7 +212,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     _investigator = Investigator(
         budget=_token_budget,
-        ws_manager=manager,
+        ws_manager=ws_mgr,
         formatter=_alert_formatter,
     )
     await _investigator.start()
@@ -184,7 +220,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 3b. Action engine
     from argus_agent.actions.engine import ActionEngine
 
-    _action_engine = ActionEngine(ws_manager=manager)
+    _action_engine = ActionEngine(ws_manager=ws_mgr)
 
     # 4. Alert engine with channels (DB-backed)
     from argus_agent.alerting.engine import AlertEngine
@@ -325,6 +361,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Clean up Redis in SaaS mode
     if settings.deployment.mode == "saas":
+        if _distributed_manager:
+            await _distributed_manager.stop()
+        if _redis_event_bus:
+            _redis_event_bus.stop()
+
         from argus_agent.auth.key_cache import close_key_cache
 
         await close_key_cache()
@@ -447,9 +488,13 @@ def create_app() -> FastAPI:
         "/api/v1/auth/accept-invite",
         "/api/v1/billing/plans",
         "/api/v1/webhooks/polar",
+        "/api/v1/auth/forgot-password",
+        "/api/v1/auth/reset-password",
+        "/api/v1/auth/verify-email",
     }
     auth_exempt_prefixes = (
         "/api/v1/ingest",
+        "/api/v1/auth/oauth/",
     )
 
     @app.middleware("http")
@@ -491,15 +536,26 @@ def create_app() -> FastAPI:
     # SaaS-only routers
     if settings.deployment.mode == "saas":
         from argus_agent.api.billing import router as billing_router
+        from argus_agent.api.investigations import router as investigations_router
         from argus_agent.api.keys import router as keys_router
+        from argus_agent.api.llm_keys import router as llm_keys_router
+        from argus_agent.api.onboarding import router as onboarding_router
         from argus_agent.api.registration import router as reg_router
+        from argus_agent.api.service_config import (
+            escalation_router,
+        )
+        from argus_agent.api.service_config import (
+            router as service_config_router,
+        )
         from argus_agent.api.team import (
             accept_router,
         )
         from argus_agent.api.team import (
             router as team_router,
         )
+        from argus_agent.api.webhook_config import router as webhook_config_router
         from argus_agent.api.webhooks import router as webhooks_router
+        from argus_agent.auth.oauth import router as oauth_router
 
         app.include_router(reg_router, prefix="/api/v1")
         app.include_router(team_router, prefix="/api/v1")
@@ -507,6 +563,13 @@ def create_app() -> FastAPI:
         app.include_router(accept_router, prefix="/api/v1")
         app.include_router(billing_router, prefix="/api/v1")
         app.include_router(webhooks_router, prefix="/api/v1")
+        app.include_router(webhook_config_router, prefix="/api/v1")
+        app.include_router(oauth_router, prefix="/api/v1")
+        app.include_router(onboarding_router, prefix="/api/v1")
+        app.include_router(llm_keys_router, prefix="/api/v1")
+        app.include_router(service_config_router, prefix="/api/v1")
+        app.include_router(escalation_router, prefix="/api/v1")
+        app.include_router(investigations_router, prefix="/api/v1")
 
     # Serve static web UI in production
     static_dir = Path(__file__).parent / "static"

@@ -1,5 +1,15 @@
 name: Publish
 
+# Builds and pushes the unified Argus image to GHCR.
+#
+# The same image is used for both self-hosted and SaaS deployments:
+#   - Self-hosted: docker-compose.unified.yml (single container)
+#   - SaaS:        docker-compose.saas.yml    (api + worker + infra)
+#
+# SaaS mode runs the same image with different commands:
+#   api:    python -m uvicorn argus_agent.main:app ...
+#   worker: python -m argus_agent.queue.worker
+
 on:
   push:
     tags: ["v*"]

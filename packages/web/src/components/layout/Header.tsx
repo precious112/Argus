@@ -73,6 +73,18 @@ export function Header() {
             <a href="/keys" className="hover:text-[var(--foreground)]">
               Keys
             </a>
+            <a href="/investigations" className="hover:text-[var(--foreground)]">
+              Investigations
+            </a>
+            <a href="/escalation" className="hover:text-[var(--foreground)]">
+              Escalation
+            </a>
+            <a href="/webhooks" className="hover:text-[var(--foreground)]">
+              Webhooks
+            </a>
+            <a href="/settings/llm" className="hover:text-[var(--foreground)]">
+              LLM Keys
+            </a>
             <a href="/billing" className="hover:text-[var(--foreground)]">
               Billing
             </a>

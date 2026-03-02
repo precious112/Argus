@@ -40,6 +40,7 @@ export {
 export { addBreadcrumb, getBreadcrumbs, clearBreadcrumbs } from "./breadcrumbs";
 export { startRuntimeMetrics, stopRuntimeMetrics } from "./runtime";
 export { patchHttp, unpatchHttp } from "./integrations/http";
+export { ArgusWebhookHandler, type ToolHandler, type ToolResult, type WebhookHandlerOptions } from "./webhook";
 
 export const VERSION = "0.1.0";
 

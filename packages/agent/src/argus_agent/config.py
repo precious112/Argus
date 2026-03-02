@@ -94,6 +94,11 @@ class DeploymentConfig(BaseModel):
     billing_provider: str = "polar"  # "polar" | "stripe"
     smtp_url: str = ""
     frontend_url: str = "http://localhost:3000"
+    # OAuth providers (leave empty to disable)
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    github_client_id: str = ""
+    github_client_secret: str = ""
 
 
 class AlertConfig(BaseModel):

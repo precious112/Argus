@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import uuid
 from typing import Any
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from argus_agent.agent.loop import AgentLoop
@@ -92,6 +95,19 @@ async def websocket_endpoint(websocket: WebSocket, client: str = "web") -> None:
 
     await manager.connect(websocket, tenant_id)
     client_type = client if client in ("cli", "web") else "web"
+
+    # In SaaS mode, delegate to the thin handler that enqueues to Redis
+    from argus_agent.config import get_settings as _get_ws_settings
+
+    if _get_ws_settings().deployment.mode == "saas":
+        try:
+            await _handle_ws_saas(websocket, tenant_id, payload, client_type)
+        except WebSocketDisconnect:
+            manager.disconnect(websocket, tenant_id)
+            logger.info("SaaS client disconnected")
+        return
+
+    # --- Self-hosted path (unchanged) ---
 
     # Send connected message with initial system status
     from argus_agent.collectors.system_metrics import get_system_snapshot
@@ -333,3 +349,255 @@ async def _handle_user_message(
             )
     except Exception:
         logger.exception("Failed to persist conversation")
+
+
+# ---------------------------------------------------------------------------
+# SaaS thin handler — enqueues tasks to Redis, relays stream events
+# ---------------------------------------------------------------------------
+
+
+async def _handle_ws_saas(
+    websocket: WebSocket,
+    tenant_id: str,
+    jwt_payload: dict[str, Any],
+    client_type: str,
+) -> None:
+    """SaaS-mode WebSocket handler.
+
+    Instead of running the agent loop in-process, tasks are enqueued into
+    a Redis list and a separate ``AgentWorker`` process picks them up.
+    Streaming events are relayed back via Redis pub/sub.
+    """
+    from argus_agent.config import get_settings
+    from argus_agent.queue.task_queue import (
+        ACTION_KEY_PREFIX,
+        TaskPayload,
+        TaskQueue,
+    )
+
+    settings = get_settings()
+    redis = aioredis.from_url(settings.deployment.redis_url, decode_responses=True)
+    queue = TaskQueue(redis)
+
+    # Send initial handshake messages
+    from argus_agent.collectors.system_metrics import get_system_snapshot
+
+    await manager.send(
+        websocket,
+        ServerMessage(
+            type=ServerMessageType.CONNECTED,
+            data={"message": "Connected to Argus agent"},
+        ),
+    )
+    snapshot = get_system_snapshot()
+    status_data: dict[str, Any] = {**snapshot, "mode": settings.mode}
+    await manager.send(
+        websocket,
+        ServerMessage(type=ServerMessageType.SYSTEM_STATUS, data=status_data),
+    )
+
+    active_task_id: str | None = None
+    relay_task: asyncio.Task | None = None  # type: ignore[type-arg]
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = ClientMessage.model_validate_json(raw)
+            except Exception:
+                await manager.send(
+                    websocket,
+                    ServerMessage(
+                        type=ServerMessageType.ERROR,
+                        data={"message": "Invalid message format"},
+                    ),
+                )
+                continue
+
+            if msg.type == ClientMessageType.PING:
+                await manager.send(
+                    websocket,
+                    ServerMessage(type=ServerMessageType.PONG),
+                )
+
+            elif msg.type == ClientMessageType.USER_MESSAGE:
+                content = msg.data.get("content", "")
+                if not content:
+                    continue
+
+                if relay_task and not relay_task.done():
+                    await manager.send(
+                        websocket,
+                        ServerMessage(
+                            type=ServerMessageType.ERROR,
+                            data={"message": "Agent is busy, please wait."},
+                        ),
+                    )
+                    continue
+
+                payload = TaskPayload(
+                    tenant_id=tenant_id,
+                    user_id=jwt_payload.get("sub", ""),
+                    conversation_id=str(uuid.uuid4()),
+                    content=content,
+                    client_type=client_type,
+                )
+                await queue.enqueue(payload)
+                active_task_id = payload.task_id
+
+                relay_task = asyncio.create_task(
+                    _relay_stream(
+                        websocket,
+                        redis,
+                        active_task_id,
+                        payload.conversation_id,
+                    )
+                )
+
+            elif msg.type == ClientMessageType.ACTION_RESPONSE:
+                if active_task_id:
+                    data = json.dumps({
+                        "action_id": msg.data.get("action_id", msg.id),
+                        "approved": msg.data.get("approved", False),
+                        "user": msg.data.get("user", ""),
+                    })
+                    await redis.publish(
+                        f"{ACTION_KEY_PREFIX}{active_task_id}", data
+                    )
+
+            elif msg.type == ClientMessageType.CANCEL:
+                if active_task_id:
+                    await queue.cancel(active_task_id)
+
+    finally:
+        # On disconnect: stop relay, but do NOT cancel the worker task —
+        # it will persist results to DB independently.
+        if relay_task and not relay_task.done():
+            relay_task.cancel()
+            try:
+                await relay_task
+            except asyncio.CancelledError:
+                pass
+        manager.disconnect(websocket, tenant_id)
+        await redis.aclose()
+
+
+async def _relay_stream(
+    websocket: WebSocket,
+    redis: aioredis.Redis,
+    task_id: str,
+    conversation_id: str,
+) -> None:
+    """Subscribe to the worker's stream channel and forward events to the WS."""
+    from argus_agent.queue.task_queue import STREAM_KEY_PREFIX
+
+    pubsub = redis.pubsub()
+    message_started = False
+
+    try:
+        await pubsub.subscribe(f"{STREAM_KEY_PREFIX}{task_id}")
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+
+            try:
+                payload = json.loads(message["data"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            event_type = payload.get("event_type", "")
+            data = payload.get("data", {})
+
+            if event_type == "thinking_start":
+                await manager.send(
+                    websocket,
+                    ServerMessage(type=ServerMessageType.THINKING_START, data={}),
+                )
+
+            elif event_type == "thinking_end":
+                await manager.send(
+                    websocket,
+                    ServerMessage(type=ServerMessageType.THINKING_END, data={}),
+                )
+
+            elif event_type == "assistant_message_delta":
+                if not message_started:
+                    await manager.send(
+                        websocket,
+                        ServerMessage(
+                            type=ServerMessageType.ASSISTANT_MESSAGE_START,
+                            data={"conversation_id": conversation_id},
+                        ),
+                    )
+                    message_started = True
+                await manager.send(
+                    websocket,
+                    ServerMessage(
+                        type=ServerMessageType.ASSISTANT_MESSAGE_DELTA, data=data
+                    ),
+                )
+
+            elif event_type == "tool_call":
+                if not message_started:
+                    await manager.send(
+                        websocket,
+                        ServerMessage(
+                            type=ServerMessageType.ASSISTANT_MESSAGE_START,
+                            data={"conversation_id": conversation_id},
+                        ),
+                    )
+                    message_started = True
+                await manager.send(
+                    websocket,
+                    ServerMessage(type=ServerMessageType.TOOL_CALL, data=data),
+                )
+
+            elif event_type == "tool_result":
+                await manager.send(
+                    websocket,
+                    ServerMessage(type=ServerMessageType.TOOL_RESULT, data=data),
+                )
+
+            elif event_type == "_ws_message":
+                # Forward as-is (ACTION_REQUEST, etc.)
+                try:
+                    srv = ServerMessage.model_validate(data)
+                    await manager.send(websocket, srv)
+                except Exception:
+                    logger.warning("Failed to forward _ws_message")
+
+            elif event_type == "_done":
+                if message_started:
+                    await manager.send(
+                        websocket,
+                        ServerMessage(
+                            type=ServerMessageType.ASSISTANT_MESSAGE_END,
+                            data={
+                                "tokens": {
+                                    "prompt": data.get("prompt_tokens", 0),
+                                    "completion": data.get("completion_tokens", 0),
+                                },
+                                "tool_calls": data.get("tool_calls", 0),
+                                "rounds": data.get("rounds", 0),
+                            },
+                        ),
+                    )
+                break
+
+            elif event_type in ("_cancelled", "error"):
+                default_msg = "Task cancelled" if event_type == "_cancelled" else "Agent error"
+                err_msg = data.get("message", default_msg)
+                await manager.send(
+                    websocket,
+                    ServerMessage(
+                        type=ServerMessageType.ERROR,
+                        data={"message": err_msg},
+                    ),
+                )
+                break
+
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await pubsub.unsubscribe()
+        await pubsub.aclose()

@@ -90,7 +90,15 @@ async def register(body: RegisterRequest, response: Response):
 
         await session.commit()
 
-    # 4. Issue JWT
+    # 4. Send verification email (non-blocking, best-effort)
+    try:
+        from argus_agent.auth.email import send_verification_email
+
+        await send_verification_email(user_id, body.email)
+    except Exception:
+        logger.warning("Failed to send verification email for %s", body.email)
+
+    # 5. Issue JWT
     token = create_access_token(user_id, body.username, tenant_id, "owner")
     max_age = settings.security.session_expiry_hours * 3600
 

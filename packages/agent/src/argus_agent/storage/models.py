@@ -58,8 +58,11 @@ class User(Base):
     tenant_id: Mapped[str] = mapped_column(String(36), default="default", index=True)
     username: Mapped[str] = mapped_column(String(150), index=True)
     email: Mapped[str] = mapped_column(String(255), default="", index=True)
-    password_hash: Mapped[str] = mapped_column(String(255))
+    password_hash: Mapped[str] = mapped_column(String(255), default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    oauth_provider: Mapped[str] = mapped_column(String(20), default="")  # google, github
+    oauth_id: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
@@ -131,6 +134,9 @@ class Investigation(Base):
     tokens_used: Mapped[int] = mapped_column(Integer, default=0)
     conversation_id: Mapped[str] = mapped_column(String(36), default="")
     alert_id: Mapped[int] = mapped_column(Integer, default=0)
+    assigned_to: Mapped[str] = mapped_column(String(36), default="")
+    assigned_by: Mapped[str] = mapped_column(String(36), default="")
+    service_name: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
