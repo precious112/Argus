@@ -23,19 +23,67 @@ def _get_polar_client():  # type: ignore[no-untyped-def]
     return Polar(access_token=settings.deployment.polar_access_token)
 
 
-async def create_checkout_session(
-    tenant_id: str, success_url: str, cancel_url: str
-) -> dict[str, str]:
-    """Create a Polar checkout session for the Teams plan."""
+def _get_product_id(plan_id: str, billing_interval: str) -> str:
+    """Map (plan_id, billing_interval) → Polar product ID from config."""
     settings = get_settings()
-    polar = _get_polar_client()
+    mapping: dict[tuple[str, str], str] = {
+        ("teams", "month"): settings.deployment.polar_teams_product_id,
+        ("teams", "year"): settings.deployment.polar_teams_annual_product_id,
+        ("business", "month"): settings.deployment.polar_business_product_id,
+        ("business", "year"): settings.deployment.polar_business_annual_product_id,
+    }
+    product_id = mapping.get((plan_id, billing_interval), "")
+    if not product_id:
+        # Fallback to Teams monthly if no specific product configured
+        product_id = settings.deployment.polar_teams_product_id
+    return product_id
 
-    # Attach tenant_id as metadata so the webhook can link the subscription
+
+def _product_id_to_plan(product_id: str) -> str:
+    """Reverse-map a Polar product ID back to a plan name."""
+    settings = get_settings()
+    reverse: dict[str, str] = {}
+    if settings.deployment.polar_teams_product_id:
+        reverse[settings.deployment.polar_teams_product_id] = "teams"
+    if settings.deployment.polar_teams_annual_product_id:
+        reverse[settings.deployment.polar_teams_annual_product_id] = "teams"
+    if settings.deployment.polar_business_product_id:
+        reverse[settings.deployment.polar_business_product_id] = "business"
+    if settings.deployment.polar_business_annual_product_id:
+        reverse[settings.deployment.polar_business_annual_product_id] = "business"
+    return reverse.get(product_id, "teams")
+
+
+def _product_id_to_interval(product_id: str) -> str:
+    """Reverse-map a Polar product ID back to a billing interval."""
+    settings = get_settings()
+    annual_ids = {
+        settings.deployment.polar_teams_annual_product_id,
+        settings.deployment.polar_business_annual_product_id,
+    }
+    return "year" if product_id in annual_ids else "month"
+
+
+async def create_checkout_session(
+    tenant_id: str,
+    success_url: str,
+    cancel_url: str,
+    plan_id: str = "teams",
+    billing_interval: str = "month",
+) -> dict[str, str]:
+    """Create a Polar checkout session for the specified plan and interval."""
+    polar = _get_polar_client()
+    product_id = _get_product_id(plan_id, billing_interval)
+
     result = polar.checkouts.custom.create(
         request={
-            "product_id": settings.deployment.polar_teams_product_id,
+            "product_id": product_id,
             "success_url": success_url,
-            "metadata": {"tenant_id": tenant_id},
+            "metadata": {
+                "tenant_id": tenant_id,
+                "plan_id": plan_id,
+                "billing_interval": billing_interval,
+            },
         },
     )
 
@@ -61,6 +109,8 @@ async def get_subscription_status(tenant_id: str) -> dict[str, Any] | None:
             "id": sub.id,
             "polar_subscription_id": sub.polar_subscription_id,
             "status": sub.status,
+            "plan_id": sub.plan_id,
+            "billing_interval": sub.billing_interval,
             "current_period_start": (
                 sub.current_period_start.isoformat() if sub.current_period_start else None
             ),
@@ -103,7 +153,7 @@ async def handle_webhook_event(payload: bytes, headers: dict[str, str]) -> dict[
 
 
 async def _handle_subscription_active(data: Any) -> None:
-    """Activate or reactivate subscription: upsert sub + set plan=teams."""
+    """Activate or reactivate subscription: upsert sub + set plan."""
     sub_id = data.id
     customer_id = data.customer_id if hasattr(data, "customer_id") else ""
     product_id = data.product_id if hasattr(data, "product_id") else ""
@@ -112,6 +162,11 @@ async def _handle_subscription_active(data: Any) -> None:
     if not tenant_id:
         logger.warning("No tenant_id in subscription metadata for %s", sub_id)
         return
+
+    # Determine plan from metadata or product_id
+    metadata = getattr(data, "metadata", None) or {}
+    plan_id = metadata.get("plan_id") or _product_id_to_plan(product_id)
+    billing_interval = metadata.get("billing_interval") or _product_id_to_interval(product_id)
 
     async with get_session() as session:
         # Upsert subscription
@@ -123,6 +178,8 @@ async def _handle_subscription_active(data: Any) -> None:
             sub.status = "active"
             sub.polar_customer_id = customer_id
             sub.polar_product_id = product_id
+            sub.plan_id = plan_id
+            sub.billing_interval = billing_interval
             sub.current_period_start = _parse_dt(data, "current_period_start")
             sub.current_period_end = _parse_dt(data, "current_period_end")
             sub.cancel_at_period_end = False
@@ -134,6 +191,8 @@ async def _handle_subscription_active(data: Any) -> None:
                 polar_subscription_id=sub_id,
                 polar_customer_id=customer_id,
                 polar_product_id=product_id,
+                plan_id=plan_id,
+                billing_interval=billing_interval,
                 status="active",
                 current_period_start=_parse_dt(data, "current_period_start"),
                 current_period_end=_parse_dt(data, "current_period_end"),
@@ -143,13 +202,16 @@ async def _handle_subscription_active(data: Any) -> None:
         # Upgrade tenant plan
         tenant = await session.get(Tenant, tenant_id)
         if tenant:
-            tenant.plan = "teams"
+            tenant.plan = plan_id
             tenant.polar_customer_id = customer_id
             tenant.updated_at = datetime.now(UTC).replace(tzinfo=None)
 
         await session.commit()
 
-    logger.info("Subscription activated for tenant %s", tenant_id)
+    logger.info(
+        "Subscription activated for tenant %s (plan=%s, interval=%s)",
+        tenant_id, plan_id, billing_interval,
+    )
 
 
 async def _handle_subscription_canceled(data: Any) -> None:

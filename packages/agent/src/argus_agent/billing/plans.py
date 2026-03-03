@@ -1,4 +1,4 @@
-"""Canonical plan definitions and limit lookups."""
+"""Canonical plan definitions, pricing, and limit lookups."""
 
 from __future__ import annotations
 
@@ -56,28 +56,38 @@ PLAN_LIMITS: dict[str, PlanLimits] = {
         on_call_rotation=True,
         service_ownership=True,
     ),
+    "business": PlanLimits(
+        name="Business",
+        monthly_event_limit=300_000,
+        max_team_members=30,
+        max_api_keys=30,
+        max_services=30,
+        data_retention_days=90,
+        conversation_retention_days=270,
+        daily_ai_messages=-1,
+        webhook_enabled=True,
+        custom_dashboards=True,
+        external_alert_channels=True,
+        audit_log=True,
+        on_call_rotation=True,
+        service_ownership=True,
+    ),
 }
 
-# Usage-based scaling tiers for Teams plan: (event_ceiling, price_dollars)
-USAGE_TIERS: list[tuple[int, int]] = [
-    (100_000, 25),       # base: $25/mo
-    (500_000, 50),       # 100K–500K: $50/mo
-    (2_000_000, 100),    # 500K–2M: $100/mo
-    (10_000_000, 250),   # 2M–10M: $250/mo
-    (50_000_000, 500),   # 10M–50M: $500/mo
-]
+# Plan pricing (monthly and annual in cents)
+PLAN_PRICING: dict[str, dict[str, int]] = {
+    "teams": {"monthly_cents": 2500, "annual_cents": 24000},    # $25/mo | $240/yr
+    "business": {"monthly_cents": 6000, "annual_cents": 57600},  # $60/mo | $576/yr
+}
+
+# PAYG rate: $0.0003/event = 0.03 cents/event = $0.30 per 1K events
+PAYG_RATE_CENTS_PER_EVENT = 0.03
+
+# Notification thresholds
+QUOTA_WARNING_THRESHOLDS = [0.80, 1.00]
+PAYG_WARNING_THRESHOLDS = [0.80, 1.00]
 
 
 def get_plan_limits(plan: str) -> PlanLimits:
     """Return limits for *plan*, defaulting to free."""
     return PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
-
-
-def get_effective_event_limit(plan: str, usage_tier_price: int) -> int:
-    """Return the event ceiling for the current usage tier (Teams only)."""
-    if plan != "teams":
-        return PLAN_LIMITS.get(plan, PLAN_LIMITS["free"]).monthly_event_limit
-    for limit, price in USAGE_TIERS:
-        if usage_tier_price <= price:
-            return limit
-    return 50_000_000  # enterprise-contact tier

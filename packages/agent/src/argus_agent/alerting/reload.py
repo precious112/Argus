@@ -38,6 +38,27 @@ async def reload_channels() -> None:
 
     external: list[SlackChannel | EmailChannel | WebhookChannel] = []
 
+    # In SaaS mode, check for OAuth Slack installation (takes priority over manual config)
+    oauth_slack_used = False
+    from argus_agent.config import get_settings as _get_settings
+    if _get_settings().deployment.mode == "saas":
+        try:
+            from argus_agent.integrations.slack_oauth import decrypt_bot_token, get_installation
+            from argus_agent.tenancy.context import get_tenant_id
+            tenant_id = get_tenant_id()
+            install = await get_installation(tenant_id)
+            if install and install.default_channel_id:
+                bot_token = decrypt_bot_token(install)
+                if bot_token:
+                    external.append(SlackChannel(
+                        bot_token=bot_token,
+                        channel_id=install.default_channel_id,
+                    ))
+                    oauth_slack_used = True
+                    logger.debug("Using OAuth Slack install for tenant %s", tenant_id)
+        except Exception:
+            logger.debug("No OAuth Slack install available, falling back to manual config")
+
     for row in configs:
         if not row["enabled"]:
             continue
@@ -45,6 +66,9 @@ async def reload_channels() -> None:
         ctype = row["channel_type"]
 
         if ctype == "slack":
+            # Skip manual Slack config if OAuth install is active
+            if oauth_slack_used:
+                continue
             external.append(SlackChannel(
                 bot_token=cfg.get("bot_token", ""),
                 channel_id=cfg.get("channel_id", ""),

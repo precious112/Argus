@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from argus_agent.auth.dependencies import require_role
-from argus_agent.billing.plans import PLAN_LIMITS, USAGE_TIERS
+from argus_agent.billing.payg import get_payg_status, set_payg_budget
+from argus_agent.billing.plans import PLAN_LIMITS, PLAN_PRICING
 from argus_agent.billing.polar_service import (
     create_checkout_session,
     create_customer_portal_session,
@@ -19,9 +21,18 @@ from argus_agent.config import get_settings
 router = APIRouter(prefix="/billing", tags=["billing"])
 
 
+class CheckoutRequest(BaseModel):
+    plan_id: str = "teams"
+    billing_interval: str = "month"
+
+
+class PaygBudgetRequest(BaseModel):
+    budget_dollars: float = 0.0
+
+
 @router.get("/plans")
 async def list_plans() -> dict[str, Any]:
-    """List available plan tiers with limits and pricing (public)."""
+    """List available plan tiers with limits, pricing, and PAYG info."""
     plans = []
     for key, limits in PLAN_LIMITS.items():
         plans.append({
@@ -42,12 +53,22 @@ async def list_plans() -> dict[str, Any]:
             "service_ownership": limits.service_ownership,
         })
 
-    tiers = [
-        {"up_to_events": ceiling, "price_dollars": price}
-        for ceiling, price in USAGE_TIERS
-    ]
+    pricing = {
+        plan_id: {
+            "monthly": prices["monthly_cents"] / 100,
+            "annual": prices["annual_cents"] / 100,
+        }
+        for plan_id, prices in PLAN_PRICING.items()
+    }
 
-    return {"plans": plans, "usage_tiers": tiers}
+    return {
+        "plans": plans,
+        "pricing": pricing,
+        "payg": {
+            "rate_per_1k_dollars": 0.30,
+            "available_on": ["teams", "business"],
+        },
+    }
 
 
 @router.get("/status")
@@ -65,15 +86,29 @@ async def billing_status(user: dict = Depends(require_role("owner", "admin"))) -
 
 
 @router.post("/checkout")
-async def create_checkout(user: dict = Depends(require_role("owner", "admin"))) -> dict[str, str]:
-    """Create a Polar checkout session for the Teams plan."""
+async def create_checkout(
+    body: CheckoutRequest | None = None,
+    user: dict = Depends(require_role("owner", "admin")),
+) -> dict[str, str]:
+    """Create a Polar checkout session for the specified plan and interval."""
     settings = get_settings()
     tenant_id = user.get("tenant_id", "default")
+
+    plan_id = body.plan_id if body else "teams"
+    billing_interval = body.billing_interval if body else "month"
+
+    if plan_id not in ("teams", "business"):
+        plan_id = "teams"
+    if billing_interval not in ("month", "year"):
+        billing_interval = "month"
 
     success_url = f"{settings.deployment.frontend_url}/billing?upgraded=true"
     cancel_url = f"{settings.deployment.frontend_url}/billing"
 
-    return await create_checkout_session(tenant_id, success_url, cancel_url)
+    return await create_checkout_session(
+        tenant_id, success_url, cancel_url,
+        plan_id=plan_id, billing_interval=billing_interval,
+    )
 
 
 @router.post("/portal")
@@ -81,3 +116,36 @@ async def customer_portal(user: dict = Depends(require_role("owner", "admin"))) 
     """Create a Polar customer portal session for subscription management."""
     tenant_id = user.get("tenant_id", "default")
     return await create_customer_portal_session(tenant_id)
+
+
+@router.get("/payg")
+async def get_payg(user: dict = Depends(require_role("owner", "admin"))) -> dict[str, Any]:
+    """Get current PAYG configuration and spend."""
+    tenant_id = user.get("tenant_id", "default")
+    status = await get_payg_status(tenant_id)
+    return {
+        "enabled": status["enabled"],
+        "budget_dollars": status["budget_cents"] / 100,
+        "spent_dollars": status["spent_cents"] / 100,
+        "remaining_dollars": status["remaining_cents"] / 100,
+        "overage_events": status["overage_events"],
+        "rate_per_1k_dollars": 0.30,
+    }
+
+
+@router.put("/payg")
+async def update_payg(
+    body: PaygBudgetRequest,
+    user: dict = Depends(require_role("owner", "admin")),
+) -> dict[str, Any]:
+    """Set PAYG budget. Set budget_dollars to 0 to disable."""
+    tenant_id = user.get("tenant_id", "default")
+    budget_cents = int(body.budget_dollars * 100)
+    result = await set_payg_budget(tenant_id, budget_cents)
+    return {
+        "enabled": result["enabled"],
+        "budget_dollars": result["budget_cents"] / 100,
+        "spent_dollars": result["spent_cents"] / 100,
+        "remaining_dollars": result["remaining_cents"] / 100,
+        "overage_events": result["overage_events"],
+    }

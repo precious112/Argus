@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -9,6 +10,7 @@ from email.message import EmailMessage
 from urllib.parse import urlencode
 
 import aiosmtplib
+import resend
 from sqlalchemy import select, update
 
 from argus_agent.config import get_settings
@@ -19,7 +21,26 @@ from argus_agent.storage.saas_models import EmailVerificationToken, PasswordRese
 logger = logging.getLogger("argus.auth.email")
 
 
-async def send_email(to: str, subject: str, body: str) -> bool:
+async def _send_via_resend(to: str, subject: str, body: str) -> bool:
+    """Send an email via Resend API. Returns True on success."""
+    settings = get_settings()
+    resend.api_key = settings.deployment.resend_api_key
+
+    try:
+        params: resend.Emails.SendParams = {
+            "from": settings.deployment.email_from,
+            "to": [to],
+            "subject": subject,
+            "text": body,
+        }
+        await asyncio.to_thread(resend.Emails.send, params)
+        return True
+    except Exception:
+        logger.exception("Resend API failed for %s", to)
+        return False
+
+
+async def _send_via_smtp(to: str, subject: str, body: str) -> bool:
     """Send an email via SMTP. Returns True on success."""
     settings = get_settings()
     smtp_url = settings.deployment.smtp_url
@@ -39,7 +60,7 @@ async def send_email(to: str, subject: str, body: str) -> bool:
     password = parsed.password or ""
 
     msg = EmailMessage()
-    msg["From"] = settings.alerting.email_from or f"noreply@{host}"
+    msg["From"] = settings.deployment.email_from or f"noreply@{host}"
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(body)
@@ -56,8 +77,20 @@ async def send_email(to: str, subject: str, body: str) -> bool:
         )
         return True
     except Exception:
-        logger.exception("Failed to send email to %s", to)
+        logger.exception("Failed to send email to %s via SMTP", to)
         return False
+
+
+async def send_email(to: str, subject: str, body: str) -> bool:
+    """Send an email. Uses Resend API in SaaS mode (with SMTP fallback), SMTP only otherwise."""
+    settings = get_settings()
+
+    if settings.deployment.mode == "saas" and settings.deployment.resend_api_key:
+        if await _send_via_resend(to, subject, body):
+            return True
+        logger.warning("Resend failed, falling back to SMTP for %s", to)
+
+    return await _send_via_smtp(to, subject, body)
 
 
 async def send_verification_email(user_id: str, email: str) -> str | None:
@@ -231,3 +264,59 @@ async def consume_reset_token(token: str, new_password_hash: str) -> dict:
         await session.commit()
 
     return {"ok": True, "user_id": prt.user_id}
+
+
+async def send_usage_notification_email(
+    to: str, tenant_name: str, threshold: str, **kwargs: str | int | float
+) -> bool:
+    """Send a usage threshold notification email.
+
+    *threshold* is one of: quota_80, quota_100, payg_80, payg_100.
+    Extra keyword args are interpolated into the message body.
+    """
+    subjects: dict[str, str] = {
+        "quota_80": f"[Argus] {tenant_name}: 80% of monthly event quota used",
+        "quota_100": f"[Argus] {tenant_name}: Monthly event quota exceeded",
+        "payg_80": f"[Argus] {tenant_name}: 80% of PAYG budget used",
+        "payg_100": f"[Argus] {tenant_name}: PAYG budget exhausted",
+    }
+
+    current = kwargs.get("current", 0)
+    limit = kwargs.get("limit", 0)
+    budget = kwargs.get("budget", 0)
+    spent = kwargs.get("spent", 0)
+    payg_enabled = kwargs.get("payg_enabled", False)
+
+    bodies: dict[str, str] = {
+        "quota_80": (
+            f"You've used 80% of your monthly event quota "
+            f"({current:,}/{limit:,}).\n\n"
+            "Consider enabling Pay-As-You-Go to avoid disruption when "
+            "you reach your limit."
+        ),
+        "quota_100": (
+            f"You've exceeded your plan quota ({current:,}/{limit:,} events).\n\n"
+            + (
+                "Pay-As-You-Go is now active. Events beyond your plan quota "
+                "are being charged at $0.30 per 1,000 events."
+                if payg_enabled
+                else "Event ingestion is now blocked. Enable Pay-As-You-Go or "
+                "upgrade your plan to continue ingesting events."
+            )
+        ),
+        "payg_80": (
+            f"You've used 80% of your PAYG budget "
+            f"(${spent}/${budget}).\n\n"
+            "Increase your budget to avoid event rejection when it's exhausted."
+        ),
+        "payg_100": (
+            f"Your PAYG budget is exhausted (${spent}/${budget}).\n\n"
+            "Events are now being rejected. Increase your PAYG budget to "
+            "resume ingesting events."
+        ),
+    }
+
+    subject = subjects.get(threshold, f"[Argus] {tenant_name}: Usage notification")
+    body = bodies.get(threshold, "You have a usage notification from Argus.")
+
+    return await send_email(to, subject, body)

@@ -90,6 +90,11 @@ class DeploymentConfig(BaseModel):
     polar_access_token: str = ""
     polar_webhook_secret: str = ""
     polar_teams_product_id: str = ""
+    polar_teams_annual_product_id: str = ""
+    polar_business_product_id: str = ""
+    polar_business_annual_product_id: str = ""
+    polar_payg_meter_id: str = ""
+    payg_rate_cents_per_1k: int = 30  # $0.30 per 1K events
     stripe_secret_key: str = ""
     billing_provider: str = "polar"  # "polar" | "stripe"
     smtp_url: str = ""
@@ -99,6 +104,13 @@ class DeploymentConfig(BaseModel):
     google_client_secret: str = ""
     github_client_id: str = ""
     github_client_secret: str = ""
+    # Resend API (SaaS email transport, falls back to SMTP)
+    resend_api_key: str = ""
+    email_from: str = "Argus <noreply@argus.dev>"
+    # Slack App (SaaS OAuth bot integration)
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_signing_secret: str = ""
 
 
 class AlertConfig(BaseModel):

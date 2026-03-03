@@ -496,6 +496,7 @@ def create_app() -> FastAPI:
         "/api/v1/auth/forgot-password",
         "/api/v1/auth/reset-password",
         "/api/v1/auth/verify-email",
+        "/api/v1/integrations/slack/callback",
     }
     auth_exempt_prefixes = (
         "/api/v1/ingest",
@@ -552,6 +553,7 @@ def create_app() -> FastAPI:
         from argus_agent.api.service_config import (
             router as service_config_router,
         )
+        from argus_agent.api.slack_integration import router as slack_integration_router
         from argus_agent.api.team import (
             accept_router,
         )
@@ -575,6 +577,7 @@ def create_app() -> FastAPI:
         app.include_router(service_config_router, prefix="/api/v1")
         app.include_router(escalation_router, prefix="/api/v1")
         app.include_router(investigations_router, prefix="/api/v1")
+        app.include_router(slack_integration_router, prefix="/api/v1")
 
     # Serve static web UI in production
     static_dir = Path(__file__).parent / "static"

@@ -1,4 +1,4 @@
-"""SaaS-only ORM models — tenants, API keys, webhooks, teams."""
+"""SaaS-only ORM models — tenants, API keys, webhooks, teams, integrations."""
 
 from __future__ import annotations
 
@@ -24,6 +24,8 @@ class Tenant(Base):
     slug: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     plan: Mapped[str] = mapped_column(String(50), default="free")
     polar_customer_id: Mapped[str] = mapped_column(String(100), default="")
+    payg_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    payg_monthly_budget_cents: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
@@ -191,8 +193,47 @@ class Subscription(Base):
     polar_customer_id: Mapped[str] = mapped_column(String(100), default="")
     polar_product_id: Mapped[str] = mapped_column(String(100), default="")
     status: Mapped[str] = mapped_column(String(30), default="active")
+    billing_interval: Mapped[str] = mapped_column(String(20), default="month")
+    plan_id: Mapped[str] = mapped_column(String(50), default="teams")
     current_period_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     current_period_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class UsageNotification(Base):
+    """Tracks which usage threshold notifications have been sent per billing cycle."""
+
+    __tablename__ = "usage_notifications"
+    __table_args__ = (
+        Index("ix_usage_notif_tenant_period", "tenant_id", "billing_period_start"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    billing_period_start: Mapped[datetime] = mapped_column(DateTime)
+    threshold: Mapped[str] = mapped_column(String(50))  # quota_80, quota_100, payg_80, payg_100
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class SlackInstallation(Base):
+    """OAuth-installed Slack bot per tenant (one installation per tenant)."""
+
+    __tablename__ = "slack_installations"
+    __table_args__ = (
+        Index("ix_slack_installations_tenant", "tenant_id", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(36))
+    team_id: Mapped[str] = mapped_column(String(20))  # Slack workspace ID (T...)
+    team_name: Mapped[str] = mapped_column(String(255), default="")
+    bot_token: Mapped[str] = mapped_column(Text, default="")  # Encrypted xoxb-... token
+    bot_user_id: Mapped[str] = mapped_column(String(30), default="")
+    default_channel_id: Mapped[str] = mapped_column(String(20), default="")
+    default_channel_name: Mapped[str] = mapped_column(String(255), default="")
+    installed_by: Mapped[str] = mapped_column(String(36), default="")  # Argus user_id
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)

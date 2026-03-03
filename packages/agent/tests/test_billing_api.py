@@ -29,12 +29,14 @@ async def test_list_plans(_mock_app):
     assert res.status_code == 200
     data = res.json()
     assert "plans" in data
-    assert "usage_tiers" in data
+    assert "pricing" in data
+    assert "payg" in data
     assert len(data["plans"]) == len(PLAN_LIMITS)
 
     plan_ids = {p["id"] for p in data["plans"]}
     assert "free" in plan_ids
     assert "teams" in plan_ids
+    assert "business" in plan_ids
 
     # Verify free plan values
     free = next(p for p in data["plans"] if p["id"] == "free")
@@ -46,18 +48,39 @@ async def test_list_plans(_mock_app):
     assert teams["monthly_event_limit"] == 100_000
     assert teams["max_team_members"] == 10
 
+    # Verify business plan values
+    biz = next(p for p in data["plans"] if p["id"] == "business")
+    assert biz["monthly_event_limit"] == 300_000
+    assert biz["max_team_members"] == 30
+
 
 @pytest.mark.asyncio
-async def test_list_plans_has_usage_tiers(_mock_app):
-    """GET /billing/plans includes usage-based scaling tiers."""
+async def test_list_plans_has_pricing(_mock_app):
+    """GET /billing/plans includes pricing for Teams and Business."""
     transport = ASGITransport(app=_mock_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         res = await client.get("/api/v1/billing/plans")
     data = res.json()
-    tiers = data["usage_tiers"]
-    assert len(tiers) >= 3
-    assert tiers[0]["up_to_events"] == 100_000
-    assert tiers[0]["price_dollars"] == 25
+    pricing = data["pricing"]
+    assert "teams" in pricing
+    assert "business" in pricing
+    assert pricing["teams"]["monthly"] == 25
+    assert pricing["teams"]["annual"] == 240
+    assert pricing["business"]["monthly"] == 60
+    assert pricing["business"]["annual"] == 576
+
+
+@pytest.mark.asyncio
+async def test_list_plans_has_payg_info(_mock_app):
+    """GET /billing/plans includes PAYG rate info."""
+    transport = ASGITransport(app=_mock_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.get("/api/v1/billing/plans")
+    data = res.json()
+    payg = data["payg"]
+    assert payg["rate_per_1k_dollars"] == 0.30
+    assert "teams" in payg["available_on"]
+    assert "business" in payg["available_on"]
 
 
 @pytest.mark.asyncio
@@ -76,4 +99,25 @@ async def test_checkout_requires_auth(_mock_app):
     transport = ASGITransport(app=_mock_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         res = await client.post("/api/v1/billing/checkout")
+    assert res.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_payg_get_requires_auth(_mock_app):
+    """GET /billing/payg requires authentication."""
+    transport = ASGITransport(app=_mock_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.get("/api/v1/billing/payg")
+    assert res.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_payg_put_requires_auth(_mock_app):
+    """PUT /billing/payg requires authentication."""
+    transport = ASGITransport(app=_mock_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.put(
+            "/api/v1/billing/payg",
+            json={"budget_dollars": 10},
+        )
     assert res.status_code == 401

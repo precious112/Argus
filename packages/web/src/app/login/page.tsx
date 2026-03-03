@@ -24,7 +24,7 @@ export default function LoginPage() {
       .then((data) => {
         if (data?.registration_enabled) setRegistrationEnabled(true);
       })
-      .catch(() => {});
+      .catch((err) => console.debug("Deployment info fetch failed:", err));
 
     // Check available OAuth providers
     fetch(`${apiBase}/api/v1/auth/oauth/providers`)
@@ -32,7 +32,7 @@ export default function LoginPage() {
       .then((data) => {
         if (data) setOauthProviders(data);
       })
-      .catch(() => {});
+      .catch((err) => console.debug("OAuth providers fetch failed:", err));
   }, [apiBase]);
 
   async function handleSubmit(e: FormEvent) {
