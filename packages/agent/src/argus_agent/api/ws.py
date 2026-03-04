@@ -398,6 +398,8 @@ async def _handle_ws_saas(
 
     active_task_id: str | None = None
     relay_task: asyncio.Task | None = None  # type: ignore[type-arg]
+    # Single conversation_id for the entire WebSocket session
+    session_conversation_id = str(uuid.uuid4())
 
     try:
         while True:
@@ -438,7 +440,7 @@ async def _handle_ws_saas(
                 payload = TaskPayload(
                     tenant_id=tenant_id,
                     user_id=jwt_payload.get("sub", ""),
-                    conversation_id=str(uuid.uuid4()),
+                    conversation_id=session_conversation_id,
                     content=content,
                     client_type=client_type,
                 )

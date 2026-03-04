@@ -14,7 +14,8 @@ import asyncio
 import logging
 import os
 import random
-import stat
+import shutil
+import subprocess
 import sys
 
 from dotenv import load_dotenv
@@ -101,32 +102,50 @@ async def error_burst_loop() -> None:
 
 
 def create_xmrig_process() -> None:
-    """Create a fake xmrig executable in /tmp.
+    """Create a fake xmrig process for security testing.
 
-    Creates /tmp/xmrig_saas_test — a shell script that sleeps forever.
-    The security scanner should detect this via the process_list webhook.
+    Copies the system `sleep` binary to /tmp/xmrig so that psutil
+    reports the process name as "xmrig" — making it trivially detectable
+    by both the security scanner and the agent's process_list tool.
 
     NOTE: Does NOT auto-clean. User removes via Argus chat:
-        "remove the xmrig process"
+        "kill the xmrig process"
     """
-    xmrig_path = "/tmp/xmrig_saas_test"
+    xmrig_path = "/tmp/xmrig"
 
-    if os.path.exists(xmrig_path):
-        logger.info("xmrig test file already exists at %s", xmrig_path)
-    else:
-        logger.info("Creating fake xmrig at %s", xmrig_path)
-        with open(xmrig_path, "w") as f:
-            f.write("#!/bin/bash\n")
-            f.write("# Fake xmrig for Argus SaaS security testing\n")
-            f.write("while true; do sleep 60; done\n")
-        os.chmod(xmrig_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
-        logger.info("Created fake xmrig at %s", xmrig_path)
+    # Check if already running
+    try:
+        result = subprocess.run(
+            ["pgrep", "-x", "xmrig"], capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            pids = result.stdout.strip()
+            logger.info("xmrig already running (PID %s)", pids)
+            return
+    except Exception:
+        pass
 
-    # Launch it in the background
-    logger.info("Starting xmrig_saas_test process...")
-    pid = os.spawnl(os.P_NOWAIT, "/bin/bash", "xmrig_saas_test", xmrig_path)
-    logger.info("xmrig_saas_test running with PID %d", pid)
-    logger.info("To remove: ask Argus chat 'remove the xmrig process'")
+    # Create the fake binary by copying sleep
+    sleep_bin = shutil.which("sleep")
+    if not sleep_bin:
+        logger.error("Could not find 'sleep' binary — cannot create fake xmrig")
+        return
+
+    if not os.path.exists(xmrig_path):
+        logger.info("Creating fake xmrig at %s (copy of %s)", xmrig_path, sleep_bin)
+        shutil.copy2(sleep_bin, xmrig_path)
+        os.chmod(xmrig_path, 0o755)
+
+    # Launch it — sleep infinity keeps it alive
+    logger.info("Starting xmrig process...")
+    proc = subprocess.Popen(
+        [xmrig_path, "infinity"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    logger.info("xmrig running with PID %d", proc.pid)
+    logger.info("To remove: ask Argus chat 'kill the xmrig process'")
 
 
 async def main() -> None:

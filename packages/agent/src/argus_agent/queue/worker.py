@@ -132,10 +132,11 @@ class AgentWorker:
         set_tenant_id(payload.tenant_id)
         await self._queue.set_status(task_id, TaskStatus.RUNNING)
 
-        # 2. Conversation memory
+        # 2. Conversation memory — load prior messages for multi-turn context
         from argus_agent.agent.memory import ConversationMemory
 
         memory = ConversationMemory(conversation_id=payload.conversation_id)
+        await memory.load_history()
 
         # 3. Build streaming callback that publishes to Redis
         redis_pub = self._redis
@@ -196,15 +197,19 @@ class AgentWorker:
                 result = run_task.result()
                 await self._queue.set_status(task_id, TaskStatus.COMPLETED)
 
-                # Persist conversation
+                # Persist conversation — save all new messages for multi-turn context
                 try:
                     await memory.persist_conversation(title=payload.content[:100])
-                    await memory.persist_message("user", content=payload.content)
-                    if result.content:
+                    # Only persist messages added during this turn (skip loaded history)
+                    new_msgs = memory.messages[memory._loaded_count:]
+                    for msg in new_msgs:
+                        if msg.role == "system":
+                            continue
                         await memory.persist_message(
-                            "assistant",
-                            content=result.content,
-                            token_count=result.prompt_tokens + result.completion_tokens,
+                            role=msg.role,
+                            content=msg.content,
+                            tool_calls=msg.tool_calls if msg.tool_calls else None,
+                            token_count=0,
                         )
                 except Exception:
                     logger.exception("Failed to persist conversation for task %s", task_id)

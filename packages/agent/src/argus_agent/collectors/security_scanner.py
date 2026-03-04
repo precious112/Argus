@@ -279,15 +279,23 @@ class SecurityScanner:
                     continue
 
                 name = (info.get("name") or "").lower()
+                cmdline = " ".join(info.get("cmdline") or []).lower()
                 exe = info.get("exe") or ""
 
-                if any(bad in name for bad in KNOWN_BAD_NAMES):
-                    entry = {"pid": info["pid"], "name": name, "reason": "known_bad_name"}
+                # Check both name and cmdline for known-bad patterns
+                matched = None
+                for bad in KNOWN_BAD_NAMES:
+                    if bad in name or bad in cmdline:
+                        matched = bad
+                        break
+                if matched:
+                    display_name = matched if matched != name else name
+                    entry = {"pid": info["pid"], "name": display_name, "reason": "known_bad_name"}
                     suspicious.append(entry)
                     events.append({
                         "type": EventType.SUSPICIOUS_PROCESS,
                         "severity": EventSeverity.URGENT,
-                        "message": f"Suspicious process: {name} (PID {info['pid']})",
+                        "message": f"Suspicious process: {display_name} (PID {info['pid']})",
                         "data": entry,
                     })
 
@@ -534,10 +542,18 @@ class SecurityScanner:
                 continue
             for proc in result.get("processes", []):
                 name = (proc.get("name") or "").lower()
+                cmdline = (proc.get("cmdline") or "").lower()
                 pid = proc.get("pid", 0)
-                if any(bad in name for bad in KNOWN_BAD_NAMES):
+                # Check both process name and cmdline for known-bad patterns
+                matched = None
+                for bad in KNOWN_BAD_NAMES:
+                    if bad in name or bad in cmdline:
+                        matched = bad
+                        break
+                if matched:
+                    display_name = matched if matched in cmdline else name
                     entry = {
-                        "pid": pid, "name": name,
+                        "pid": pid, "name": display_name,
                         "reason": "known_bad_name",
                         "tenant_id": t["tenant_id"],
                     }
@@ -546,7 +562,7 @@ class SecurityScanner:
                         "type": EventType.SUSPICIOUS_PROCESS,
                         "severity": EventSeverity.URGENT,
                         "message": (
-                            f"Suspicious process: {name} "
+                            f"Suspicious process: {display_name} "
                             f"(PID {pid}, tenant {t['tenant_id']})"
                         ),
                         "data": entry,
