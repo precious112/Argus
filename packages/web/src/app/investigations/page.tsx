@@ -217,7 +217,7 @@ export default function InvestigationsPage() {
                       </>
                     )}
                     <td className="px-3 py-2 text-xs text-[var(--muted)]">
-                      {inv.tokens_used.toLocaleString()}
+                      {(inv.tokens_used ?? 0).toLocaleString()}
                     </td>
                     <td className="px-3 py-2 text-xs text-[var(--muted)]">
                       {inv.created_at

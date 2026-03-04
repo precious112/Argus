@@ -307,16 +307,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         interval_seconds=21600,  # 6h
     )
 
-    _scheduler.register(
-        "ai_periodic_review",
-        _investigator.periodic_review,
-        interval_seconds=21600,  # 6h
-    )
-    _scheduler.register(
-        "ai_daily_digest",
-        _investigator.daily_digest,
-        interval_seconds=86400,  # 24h
-    )
+    if settings.deployment.mode == "saas":
+        _scheduler.register(
+            "ai_periodic_review",
+            _make_tenant_aware_task(_investigator.periodic_review),
+            interval_seconds=21600,  # 6h
+        )
+        _scheduler.register(
+            "ai_daily_digest",
+            _make_tenant_aware_task(_investigator.daily_digest),
+            interval_seconds=86400,  # 24h
+        )
+    else:
+        _scheduler.register(
+            "ai_periodic_review",
+            _investigator.periodic_review,
+            interval_seconds=21600,  # 6h
+        )
+        _scheduler.register(
+            "ai_daily_digest",
+            _investigator.daily_digest,
+            interval_seconds=86400,  # 24h
+        )
     await _scheduler.start()
 
     # Soak test runner (opt-in via ARGUS_SOAK_ENABLED=true)
@@ -373,6 +385,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await operational_repo.close()
     metrics_repo.close()
     logger.info("Argus agent server stopped")
+
+
+def _make_tenant_aware_task(coro_fn):
+    """Wrap a periodic task to run once per tenant in SaaS mode."""
+    async def _wrapper():
+        from sqlalchemy import select
+
+        from argus_agent.storage.repositories import get_session
+        from argus_agent.storage.saas_models import Tenant
+        from argus_agent.tenancy.context import set_tenant_id
+
+        try:
+            async with get_session() as session:
+                result = await session.execute(select(Tenant.id))
+                tenant_ids = [row[0] for row in result.all()]
+        except Exception:
+            logger.warning("Could not list tenants for periodic task, skipping", exc_info=True)
+            return
+
+        for tid in tenant_ids:
+            try:
+                set_tenant_id(tid)
+                await coro_fn()
+            except Exception:
+                logger.warning("Periodic task failed for tenant %s", tid, exc_info=True)
+
+    return _wrapper
 
 
 def _make_baseline_update_task(tracker):

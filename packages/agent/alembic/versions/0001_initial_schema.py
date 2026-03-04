@@ -30,8 +30,7 @@ _TENANT_TABLES = [
     "token_usage",
     "alert_acknowledgments",
     "alert_rule_mutes",
-    # SaaS-only tables
-    "tenants",
+    # SaaS-only tables (tenants uses 'id' not 'tenant_id', handled separately)
     "webhook_configs",
     "team_members",
     "team_invitations",
@@ -70,11 +69,14 @@ def upgrade() -> None:
         "users",
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column("tenant_id", sa.String(36), nullable=False, server_default="default", index=True),
-        sa.Column("username", sa.String(150), unique=True, index=True),
+        sa.Column("username", sa.String(150), index=True),
+        sa.Column("email", sa.String(255), server_default=""),
         sa.Column("password_hash", sa.String(255)),
         sa.Column("is_active", sa.Boolean, server_default="true"),
         sa.Column("created_at", sa.DateTime),
+        sa.UniqueConstraint("tenant_id", "username", name="uq_user_tenant_username"),
     )
+    op.create_index("ix_users_email", "users", ["email"])
 
     op.create_table(
         "sessions",
@@ -265,6 +267,15 @@ def upgrade() -> None:
             f"WITH CHECK (tenant_id = current_setting('app.current_tenant', true))"
         )
 
+    # tenants: RLS uses 'id' (not 'tenant_id') since the tenant's own id IS the tenant identifier
+    op.execute("ALTER TABLE tenants ENABLE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE tenants FORCE ROW LEVEL SECURITY")
+    op.execute(
+        "CREATE POLICY tenant_isolation ON tenants "
+        "USING (id = current_setting('app.current_tenant', true)) "
+        "WITH CHECK (id = current_setting('app.current_tenant', true))"
+    )
+
     # api_keys: RLS with special bypass for key validation (no tenant context yet)
     op.execute(f"ALTER TABLE {_API_KEYS_TABLE} ENABLE ROW LEVEL SECURITY")
     op.execute(f"ALTER TABLE {_API_KEYS_TABLE} FORCE ROW LEVEL SECURITY")
@@ -283,7 +294,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Drop RLS policies
-    all_tables = _TENANT_TABLES + [_API_KEYS_TABLE]
+    all_tables = _TENANT_TABLES + ["tenants", _API_KEYS_TABLE]
     for table in all_tables:
         op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
     op.execute(f"DROP POLICY IF EXISTS api_key_lookup ON {_API_KEYS_TABLE}")

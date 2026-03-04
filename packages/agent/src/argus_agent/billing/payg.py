@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -83,7 +84,7 @@ async def get_payg_status(tenant_id: str) -> dict[str, Any]:
         from argus_agent.storage.repositories import get_metrics_repository
 
         repo = get_metrics_repository()
-        events_count = await repo.count_events_since(tenant_id, period_start)
+        events_count = await asyncio.to_thread(repo.count_events_since, tenant_id, period_start)
     except Exception:
         pass
 

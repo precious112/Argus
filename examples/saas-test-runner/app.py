@@ -11,6 +11,10 @@ import logging
 import os
 import random
 
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env file if present
+
 import argus
 from argus.decorators import trace
 from argus.exceptions import install as install_exception_hook

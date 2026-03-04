@@ -28,11 +28,15 @@ interface ErrorGroup {
 interface ServiceMetricsPanelProps {
   service: string;
   apiBase: string;
+  eventCount?: number;
+  errorCount?: number;
 }
 
 export function ServiceMetricsPanel({
   service,
   apiBase,
+  eventCount = 0,
+  errorCount = 0,
 }: ServiceMetricsPanelProps) {
   const [metrics, setMetrics] = useState<MetricBucket[]>([]);
   const [errors, setErrors] = useState<ErrorGroup[]>([]);
@@ -66,6 +70,8 @@ export function ServiceMetricsPanel({
     0,
   );
   const totalErrors = metrics.reduce((sum, b) => sum + b.error_count, 0);
+  const denominator = totalInvocations || eventCount;
+  const effectiveErrors = totalErrors || errorCount;
   const avgP95 =
     metrics.length > 0
       ? metrics.reduce((sum, b) => sum + b.p95_duration_ms, 0) / metrics.length
@@ -85,11 +91,11 @@ export function ServiceMetricsPanel({
         <SummaryCard
           label="Error Rate"
           value={
-            totalInvocations > 0
-              ? `${((totalErrors / totalInvocations) * 100).toFixed(1)}%`
+            denominator > 0
+              ? `${((effectiveErrors / denominator) * 100).toFixed(1)}%`
               : "0%"
           }
-          warn={totalErrors > 0}
+          warn={effectiveErrors > 0}
         />
         <SummaryCard label="Avg P95 Latency" value={`${avgP95.toFixed(0)}ms`} />
         <SummaryCard label="Cold Starts" value={totalColdStarts.toLocaleString()} />

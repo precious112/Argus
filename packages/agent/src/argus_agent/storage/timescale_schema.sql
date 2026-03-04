@@ -124,27 +124,6 @@ CREATE TABLE IF NOT EXISTS metric_baselines (
 );
 CREATE INDEX IF NOT EXISTS idx_mb_tenant ON metric_baselines(tenant_id, metric_name);
 
--- RLS policies for all timeseries tables
-DO $$
-DECLARE
-    tbl TEXT;
-BEGIN
-    FOREACH tbl IN ARRAY ARRAY[
-        'system_metrics', 'log_index', 'sdk_events', 'spans',
-        'dependency_calls', 'sdk_metrics', 'deploy_events', 'metric_baselines'
-    ] LOOP
-        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
-        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
-        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', tbl);
-        EXECUTE format(
-            'CREATE POLICY tenant_isolation ON %I '
-            'USING (tenant_id = current_setting(''app.current_tenant'', true)) '
-            'WITH CHECK (tenant_id = current_setting(''app.current_tenant'', true))',
-            tbl
-        );
-    END LOOP;
-END $$;
-
 -- Default retention policies (30 days)
 SELECT add_retention_policy('system_metrics', INTERVAL '30 days', if_not_exists => TRUE);
 SELECT add_retention_policy('log_index', INTERVAL '30 days', if_not_exists => TRUE);
@@ -154,7 +133,7 @@ SELECT add_retention_policy('dependency_calls', INTERVAL '30 days', if_not_exist
 SELECT add_retention_policy('sdk_metrics', INTERVAL '30 days', if_not_exists => TRUE);
 SELECT add_retention_policy('deploy_events', INTERVAL '90 days', if_not_exists => TRUE);
 
--- Continuous aggregates
+-- Continuous aggregates (MUST be created BEFORE enabling RLS on the source hypertables)
 CREATE MATERIALIZED VIEW IF NOT EXISTS sdk_events_hourly
 WITH (timescaledb.continuous) AS
 SELECT
@@ -195,3 +174,24 @@ SELECT add_continuous_aggregate_policy('spans_hourly',
     schedule_interval => INTERVAL '1 hour',
     if_not_exists => TRUE
 );
+
+-- RLS policies for all timeseries tables (AFTER continuous aggregates)
+DO $$
+DECLARE
+    tbl TEXT;
+BEGIN
+    FOREACH tbl IN ARRAY ARRAY[
+        'system_metrics', 'log_index', 'sdk_events', 'spans',
+        'dependency_calls', 'sdk_metrics', 'deploy_events', 'metric_baselines'
+    ] LOOP
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
+        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', tbl);
+        EXECUTE format(
+            'CREATE POLICY tenant_isolation ON %I '
+            'USING (tenant_id = current_setting(''app.current_tenant'', true)) '
+            'WITH CHECK (tenant_id = current_setting(''app.current_tenant'', true))',
+            tbl
+        );
+    END LOOP;
+END $$;

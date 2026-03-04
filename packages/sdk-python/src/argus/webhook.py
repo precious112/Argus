@@ -177,6 +177,9 @@ def _tool_run_command(**kwargs: Any) -> dict[str, Any]:
     timeout = min(int(kwargs.get("timeout", 10)), 30)
     if not command:
         return {"error": "command is required"}
+    # Normalize: agent sends array, join into string for shell execution
+    if isinstance(command, list):
+        command = " ".join(command)
     # Basic safety check
     blocked = ["rm -rf /", "mkfs", "dd if=", "> /dev/sd"]
     for b in blocked:

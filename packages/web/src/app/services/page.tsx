@@ -232,6 +232,8 @@ export default function ServicesPage() {
                 <ServiceMetricsPanel
                   service={selectedService}
                   apiBase={API_BASE}
+                  eventCount={services.find((s) => s.service === selectedService)?.event_count ?? 0}
+                  errorCount={services.find((s) => s.service === selectedService)?.error_count ?? 0}
                 />
               </div>
             ) : (

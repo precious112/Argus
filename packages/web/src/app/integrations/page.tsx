@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useDeployment } from "@/hooks/useDeployment";
 
@@ -27,6 +27,20 @@ const SlackIcon = () => (
 );
 
 export default function IntegrationsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-full items-center justify-center p-8 text-[var(--muted)]">
+          Loading integrations...
+        </div>
+      }
+    >
+      <IntegrationsContent />
+    </Suspense>
+  );
+}
+
+function IntegrationsContent() {
   const { isSaaS } = useDeployment();
   const searchParams = useSearchParams();
 

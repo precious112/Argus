@@ -1196,3 +1196,24 @@ class TimescaleDBMetricsRepository:
                     return [tuple(r.values()) for r in rows]
 
         return self._run(_raw())
+
+    # ── Billing: event counting ──────────────────────────────────
+
+    def count_events_since(self, tenant_id: str, since: datetime) -> int:
+        """Count total ingested events (sdk_events) for a tenant since a given time."""
+
+        async def _count() -> int:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
+                safe_tid = tenant_id.replace("'", "''")
+                async with conn.transaction():
+                    await conn.execute(
+                        f"SET LOCAL app.current_tenant = '{safe_tid}'"
+                    )
+                    row = await conn.fetchrow(
+                        "SELECT COUNT(*) AS cnt FROM sdk_events WHERE timestamp >= $1",
+                        since,
+                    )
+                    return int(row["cnt"]) if row else 0
+
+        return self._run(_count())

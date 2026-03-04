@@ -99,7 +99,7 @@ def get_authorize_url(tenant_id: str, user_id: str) -> str:
     params = {
         "client_id": settings.deployment.slack_client_id,
         "scope": BOT_SCOPES,
-        "redirect_uri": f"{settings.deployment.frontend_url}/api/v1/integrations/slack/callback",
+        "redirect_uri": f"{settings.deployment.api_base_url or settings.deployment.frontend_url}/api/v1/integrations/slack/callback",
         "state": state,
     }
     return f"{SLACK_AUTHORIZE_URL}?{urlencode(params)}"
@@ -121,7 +121,7 @@ async def exchange_code(code: str, state: str) -> SlackInstallation:
                 "client_secret": settings.deployment.slack_client_secret,
                 "code": code,
                 "redirect_uri": (
-                    f"{settings.deployment.frontend_url}"
+                    f"{settings.deployment.api_base_url or settings.deployment.frontend_url}"
                     "/api/v1/integrations/slack/callback"
                 ),
             },

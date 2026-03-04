@@ -134,7 +134,7 @@ async def check_event_ingest_limit(tenant_id: str) -> None:
         from argus_agent.storage.repositories import get_metrics_repository
 
         repo = get_metrics_repository()
-        event_count = await repo.count_events_since(tenant_id, period_start)
+        event_count = await asyncio.to_thread(repo.count_events_since, tenant_id, period_start)
     except Exception:
         logger.debug("Could not check event count, allowing ingest", exc_info=True)
         return
@@ -242,7 +242,7 @@ async def get_tenant_usage_summary(tenant_id: str) -> dict[str, Any]:
         from argus_agent.storage.repositories import get_metrics_repository
 
         repo = get_metrics_repository()
-        events_count = await repo.count_events_since(tenant_id, period_start)
+        events_count = await asyncio.to_thread(repo.count_events_since, tenant_id, period_start)
     except Exception:
         pass
 

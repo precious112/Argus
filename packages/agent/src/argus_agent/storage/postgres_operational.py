@@ -99,17 +99,31 @@ class PostgresOperationalRepository:
 
     @staticmethod
     async def _run_migrations(url: str) -> None:
-        """Run Alembic migrations programmatically."""
+        """Run Alembic migrations with advisory lock to prevent races."""
         try:
+            import asyncpg
+
             from alembic import command
             from alembic.config import Config
 
-            alembic_cfg = Config()
-            alembic_cfg.set_main_option("script_location", "alembic")
-            # Use synchronous URL for Alembic (it manages its own connections)
-            sync_url = url.replace("postgresql+asyncpg://", "postgresql://")
-            alembic_cfg.set_main_option("sqlalchemy.url", sync_url)
-            command.upgrade(alembic_cfg, "head")
-            logger.info("Alembic migrations applied successfully")
+            # Connect via asyncpg to grab an advisory lock
+            dsn = url.replace("postgresql+asyncpg://", "postgresql://")
+            lock_conn = await asyncpg.connect(dsn)
+            try:
+                acquired = await lock_conn.fetchval(
+                    "SELECT pg_try_advisory_lock(1)"
+                )
+                if not acquired:
+                    logger.info("Another process is running migrations, skipping")
+                    return
+
+                alembic_cfg = Config()
+                alembic_cfg.set_main_option("script_location", "alembic")
+                alembic_cfg.set_main_option("sqlalchemy.url", url)
+                command.upgrade(alembic_cfg, "head")
+                logger.info("Alembic migrations applied successfully")
+            finally:
+                await lock_conn.execute("SELECT pg_advisory_unlock(1)")
+                await lock_conn.close()
         except Exception:
             logger.warning("Alembic migration skipped (non-fatal)", exc_info=True)

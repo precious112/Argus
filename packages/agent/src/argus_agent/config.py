@@ -99,6 +99,9 @@ class DeploymentConfig(BaseModel):
     billing_provider: str = "polar"  # "polar" | "stripe"
     smtp_url: str = ""
     frontend_url: str = "http://localhost:3000"
+    # External API base URL (for Slack OAuth callback, Polar webhooks, etc.)
+    # If empty, falls back to frontend_url.
+    api_base_url: str = ""
     # OAuth providers (leave empty to disable)
     google_client_id: str = ""
     google_client_secret: str = ""

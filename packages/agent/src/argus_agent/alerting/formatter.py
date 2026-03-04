@@ -334,6 +334,11 @@ class AlertFormatter:
         if severity_order.index(event.severity) < severity_order.index(self._min_severity):
             return {}
 
+        # Lazy-load Slack channel if not yet loaded (SaaS: tenant context
+        # is only available when alerts fire, not at startup)
+        if not self._channels:
+            await self._try_load_slack_channel()
+
         friendly = format_event(event)
 
         if event.severity == EventSeverity.URGENT:
@@ -343,6 +348,29 @@ class AlertFormatter:
         async with self._buffer_lock:
             self._buffer.append(item)
         return {}
+
+    async def _try_load_slack_channel(self) -> None:
+        """Attempt to load Slack channel from OAuth installation for current tenant."""
+        try:
+            from argus_agent.config import get_settings
+            if get_settings().deployment.mode != "saas":
+                return
+            from argus_agent.alerting.channels import SlackChannel
+            from argus_agent.integrations.slack_oauth import decrypt_bot_token, get_installation
+            from argus_agent.tenancy.context import get_tenant_id
+
+            tenant_id = get_tenant_id()
+            install = await get_installation(tenant_id)
+            if install and install.default_channel_id:
+                bot_token = decrypt_bot_token(install)
+                if bot_token:
+                    self._channels.append(SlackChannel(
+                        bot_token=bot_token,
+                        channel_id=install.default_channel_id,
+                    ))
+                    logger.info("Lazy-loaded Slack channel for tenant %s", tenant_id)
+        except Exception:
+            logger.debug("Could not lazy-load Slack channel", exc_info=True)
 
     async def _send_immediate(self, alert: Any, event: Event, friendly: str) -> dict[str, str]:
         """Send an URGENT alert immediately to all external channels.

@@ -73,4 +73,18 @@ async def run_migrations_online() -> None:
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    asyncio.run(run_migrations_online())
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # Called from within an already-running event loop (e.g. app startup).
+        # Use nest_asyncio to allow nested asyncio.run(), or fall back to
+        # creating a brand-new loop in a thread.
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            executor.submit(asyncio.run, run_migrations_online()).result()
+    else:
+        asyncio.run(run_migrations_online())

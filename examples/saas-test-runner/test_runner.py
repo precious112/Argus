@@ -17,6 +17,10 @@ import random
 import stat
 import sys
 
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env file if present
+
 import httpx
 
 logging.basicConfig(
