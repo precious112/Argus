@@ -92,9 +92,11 @@ def _tool_process_list(**kwargs: Any) -> dict[str, Any]:
     limit = int(kwargs.get("limit", 20))
     sort_by = kwargs.get("sort_by", "cpu")
     procs = []
-    for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent", "status"]):
+    for p in psutil.process_iter(["pid", "name", "cmdline", "cpu_percent", "memory_percent", "status"]):
         try:
-            procs.append(p.info)
+            info = p.info
+            info["cmdline"] = " ".join(info.get("cmdline") or [])
+            procs.append(info)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     key = "cpu_percent" if sort_by == "cpu" else "memory_percent"
