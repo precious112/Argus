@@ -34,6 +34,7 @@ class AlertHistoryService:
                 message=event.message,
                 event_type=str(event.type),
                 source=str(event.source),
+                dedup_key=getattr(alert, "dedup_key", "") or "",
                 status=str(alert.status),
             )
             session.add(entry)
@@ -98,6 +99,7 @@ class AlertHistoryService:
                 "message": row.message,
                 "source": row.source,
                 "event_type": row.event_type,
+                "dedup_key": row.dedup_key or "",
                 "timestamp": row.timestamp.isoformat() if row.timestamp else None,
                 "resolved": row.resolved,
                 "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,

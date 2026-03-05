@@ -114,6 +114,7 @@ class AlertHistory(Base):
     event_type: Mapped[str] = mapped_column(String(50), default="")
     summary: Mapped[str] = mapped_column(Text, default="")
     source: Mapped[str] = mapped_column(String(100), default="")
+    dedup_key: Mapped[str] = mapped_column(String(255), default="", index=True)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     investigation_id: Mapped[str] = mapped_column(String(36), default="")

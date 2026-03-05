@@ -43,6 +43,7 @@ _anomaly_detector = None
 _investigator = None
 _action_engine = None
 _sdk_telemetry_collector = None
+_heartbeat_monitor = None
 _soak_runner = None
 _alert_formatter = None
 _distributed_manager = None
@@ -276,11 +277,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _sdk_telemetry_collector.anomaly_detector = _anomaly_detector
     await _sdk_telemetry_collector.start()
 
+    # Start heartbeat monitor (DB-seeded, survives restarts)
+    from argus_agent.collectors.heartbeat_monitor import HeartbeatMonitor
+
+    _heartbeat_monitor = HeartbeatMonitor()
+    await _heartbeat_monitor.start()
+
     # Start scheduler with periodic tasks
     from argus_agent.scheduler.scheduler import Scheduler
     from argus_agent.scheduler.tasks import (
         quick_health_check,
-        quick_security_check,
         trend_analysis,
     )
 
@@ -294,12 +300,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _make_baseline_update_task(_baseline_tracker),
             interval_seconds=21600,
         )
-        _scheduler.register(
-            "security_check",
-            quick_security_check,
-            interval_seconds=300,
-        )
-
     # SDK baseline update (both modes)
     _scheduler.register(
         "sdk_baseline_update",
@@ -362,6 +362,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _scheduler.stop()
     if _sdk_telemetry_collector:
         await _sdk_telemetry_collector.stop()
+    if _heartbeat_monitor:
+        await _heartbeat_monitor.stop()
     if _security_scanner:
         await _security_scanner.stop()
     if _log_watcher:

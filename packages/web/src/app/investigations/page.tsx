@@ -182,9 +182,9 @@ export default function InvestigationsPage() {
                 </tr>
               </thead>
               <tbody>
-                {investigations.map((inv) => (
+                {investigations.map((inv, idx) => (
                   <tr
-                    key={inv.id}
+                    key={inv.id || idx}
                     className="border-b border-[var(--border)] hover:bg-[var(--card)]"
                   >
                     <td className="max-w-[200px] truncate px-3 py-2">

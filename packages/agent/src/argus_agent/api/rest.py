@@ -266,7 +266,7 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
         if db_alert is None:
             raise HTTPException(status_code=404, detail="Alert not found")
 
-        dedup_key = f"{db_alert['source']}:{db_alert['rule_id']}"
+        dedup_key = db_alert.get("dedup_key") or f"{db_alert['source']}:{db_alert['rule_id']}"
         svc = SuppressionService()
         await svc.acknowledge(
             dedup_key=dedup_key,
@@ -325,7 +325,7 @@ async def unacknowledge_alert(alert_id: str) -> dict[str, Any]:
         if db_alert is None or db_alert.get("status") != "acknowledged":
             raise HTTPException(status_code=404, detail="Alert not found or not acknowledged")
 
-        dedup_key = f"{db_alert['source']}:{db_alert['rule_id']}"
+        dedup_key = db_alert.get("dedup_key") or f"{db_alert['source']}:{db_alert['rule_id']}"
         svc = SuppressionService()
         await svc.unacknowledge(dedup_key)
         # Also remove from in-memory engine

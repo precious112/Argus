@@ -78,6 +78,12 @@ async def ingest_telemetry(
     # Validate API key in SaaS mode (sets tenant context)
     await _validate_ingest_key(x_argus_key)
 
+    # Enforce event quota in SaaS mode
+    from argus_agent.billing.usage_guard import check_event_ingest_limit
+    from argus_agent.tenancy.context import get_tenant_id
+
+    await check_event_ingest_limit(get_tenant_id(), batch_size=len(batch.events))
+
     if len(batch.events) > MAX_EVENTS_PER_BATCH:
         raise HTTPException(
             status_code=400,

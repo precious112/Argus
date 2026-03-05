@@ -119,7 +119,7 @@ async def check_api_key_limit(request: Request) -> None:
         )
 
 
-async def check_event_ingest_limit(tenant_id: str) -> None:
+async def check_event_ingest_limit(tenant_id: str, *, batch_size: int = 1) -> None:
     """Check quota; allow if under plan limit. If over, check PAYG budget."""
     if not _is_saas():
         return
@@ -136,11 +136,11 @@ async def check_event_ingest_limit(tenant_id: str) -> None:
         repo = get_metrics_repository()
         event_count = await asyncio.to_thread(repo.count_events_since, tenant_id, period_start)
     except Exception:
-        logger.debug("Could not check event count, allowing ingest", exc_info=True)
-        return
+        logger.warning("Could not check event count, rejecting ingest", exc_info=True)
+        raise HTTPException(503, "Billing check unavailable, try again")
 
-    # Under plan quota → allow
-    if event_count < limits.monthly_event_limit:
+    # Under plan quota (accounting for batch size) → allow
+    if event_count + batch_size <= limits.monthly_event_limit:
         asyncio.ensure_future(
             _check_quota_thresholds(
                 tenant_id, event_count, limits.monthly_event_limit, period_start,

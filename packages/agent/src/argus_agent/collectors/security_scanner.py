@@ -148,12 +148,18 @@ class SecurityScanner:
             ("outbound_connections", self._remote_outbound_connections),
         ]
 
+        from argus_agent.tenancy.context import set_tenant_id
+
         for name, check_fn in checks:
             try:
                 findings = await check_fn(tenants)
                 results["checks"][name] = findings
 
                 for finding in findings.get("events", []):
+                    # Set tenant context so alerts route to the correct tenant
+                    tid = finding.get("data", {}).get("tenant_id")
+                    if tid:
+                        set_tenant_id(tid)
                     await bus.publish(Event(
                         source=EventSource.SECURITY_SCANNER,
                         type=finding["type"],

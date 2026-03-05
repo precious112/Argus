@@ -7,9 +7,11 @@ import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
+
+from fastapi import HTTPException
 
 from argus_agent.agent.investigator import InvestigationRequest, InvestigationStatus
 from argus_agent.events.bus import EventBus
@@ -174,9 +176,9 @@ def build_dedup_key(event: Event, rule_id: str) -> str:
         service = data.get("service", "unknown")
         return f"{event.source}:sdk_cold_start:{service}"
 
-    # --- System-wide metrics (no finer grain) ---
+    # --- System-wide metrics: key on event type so all severity rules share one key ---
     if etype in (EventType.CPU_HIGH, EventType.MEMORY_HIGH, EventType.DISK_HIGH):
-        return f"{event.source}:{rule_id}"
+        return f"{event.source}:{etype}"
 
     # Fallback: source + rule_id (preserves old behavior for unknown types)
     return f"{event.source}:{rule_id}"
@@ -327,6 +329,9 @@ class AlertEngine:
         # Suppression state
         self._acknowledged_keys: dict[str, datetime] = {}  # dedup_key -> expires_at
         self._muted_rules: dict[str, datetime] = {}  # rule_id -> expires_at
+        # Billing quota cache
+        self._quota_exceeded_cache: bool = False
+        self._quota_cache_expires: datetime | None = None
 
     def set_channels(self, channels: list[Any]) -> None:
         self._channels = channels
@@ -396,8 +401,37 @@ class AlertEngine:
 
         return False
 
+    async def _is_over_quota(self) -> bool:
+        """Check if tenant is over event quota (cached, 60s TTL)."""
+        from argus_agent.config import get_settings
+
+        if get_settings().deployment.mode != "saas":
+            return False
+
+        now = datetime.now(UTC).replace(tzinfo=None)
+        if self._quota_cache_expires and now < self._quota_cache_expires:
+            return self._quota_exceeded_cache
+
+        try:
+            from argus_agent.billing.usage_guard import check_event_ingest_limit
+            from argus_agent.tenancy.context import get_tenant_id
+
+            await check_event_ingest_limit(get_tenant_id())
+            self._quota_exceeded_cache = False
+        except HTTPException:
+            self._quota_exceeded_cache = True
+        except Exception:
+            self._quota_exceeded_cache = False
+
+        self._quota_cache_expires = now + timedelta(seconds=60)
+        return self._quota_exceeded_cache
+
     async def _handle_event(self, event: Event) -> None:
         """Evaluate all rules against an incoming event."""
+        # In SaaS mode, suppress all alerts when over event quota
+        if await self._is_over_quota():
+            return
+
         for rule in self._rules.values():
             if not self._matches(rule, event):
                 continue
@@ -440,6 +474,14 @@ class AlertEngine:
                 await AlertHistoryService().save(alert, event)
             except Exception:
                 logger.exception("Failed to persist alert %s to database", alert.id)
+
+            # Reload channels for current tenant (SaaS: per-tenant Slack/Email)
+            try:
+                from argus_agent.alerting.reload import reload_channels
+
+                await reload_channels()
+            except Exception:
+                logger.debug("Channel reload failed", exc_info=True)
 
             # Send to notification channels (WebSocket — immediate, unfiltered)
             for channel in self._channels:
