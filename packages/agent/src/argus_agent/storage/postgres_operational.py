@@ -59,8 +59,11 @@ class PostgresOperationalRepository:
         await self._run_migrations(url)
 
         # Create any tables that Alembic might not cover yet (safety net)
-        async with _engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        try:
+            async with _engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all, checkfirst=True)
+        except Exception:
+            logger.debug("create_all skipped (tables likely already exist)", exc_info=True)
 
         logger.info("PostgreSQL operational repository initialized")
 

@@ -199,6 +199,13 @@ function isActive(pathname: string, itemPath: string): boolean {
   return pathname.startsWith(itemPath);
 }
 
+interface OrgInfo {
+  tenant_id: string;
+  tenant_name: string;
+  role: string;
+  is_current: boolean;
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -206,11 +213,22 @@ export function Sidebar() {
   const { isSaaS } = useDeployment();
 
   const [collapsed, setCollapsed] = useState(false);
+  const [orgs, setOrgs] = useState<OrgInfo[]>([]);
 
   useEffect(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored === "true") setCollapsed(true);
   }, []);
+
+  useEffect(() => {
+    if (!isSaaS) return;
+    const apiBase =
+      process.env.NEXT_PUBLIC_ARGUS_URL || "http://localhost:7600";
+    fetch(`${apiBase}/api/v1/auth/organizations`, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setOrgs(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, [isSaaS]);
 
   // Hide sidebar on auth/onboarding pages
   if (HIDDEN_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"))) {
@@ -244,7 +262,7 @@ export function Sidebar() {
     >
       {/* Logo */}
       <div className="flex h-14 items-center gap-2 border-b border-[var(--border)] px-4">
-        <img src="/argus-logo.png" alt="Argus" className="h-7 w-7 flex-shrink-0" />
+        <img src="/argus-logo.png" alt="Argus" className="h-7 flex-shrink-0 object-contain" />
         {!collapsed && (
           <span className="text-lg font-semibold tracking-tight">Argus</span>
         )}
@@ -290,6 +308,47 @@ export function Sidebar() {
 
       {/* Bottom section */}
       <div className="border-t border-[var(--border)] px-2 py-3 space-y-2">
+        {/* Org switcher */}
+        {isSaaS && orgs.length > 1 && !collapsed && (
+          <select
+            value={orgs.find((o) => o.is_current)?.tenant_id ?? ""}
+            onChange={async (e) => {
+              const tid = e.target.value;
+              if (!tid) return;
+              const res = await fetch(`${apiBase}/api/v1/auth/switch-org`, {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tenant_id: tid }),
+              });
+              if (res.ok) window.location.href = "/";
+            }}
+            className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1.5 text-xs text-[var(--foreground)] outline-none"
+          >
+            {orgs.map((o) => (
+              <option key={o.tenant_id} value={o.tenant_id}>
+                {o.tenant_name}{o.is_current ? " (current)" : ""}
+              </option>
+            ))}
+          </select>
+        )}
+        {isSaaS && orgs.length > 1 && collapsed && (
+          <button
+            title="Switch organization"
+            onClick={() => {
+              setCollapsed(false);
+              localStorage.setItem(STORAGE_KEY, "false");
+            }}
+            className="flex w-full items-center justify-center rounded-md px-2 py-2 text-sm text-[var(--muted)] transition-colors hover:bg-[var(--card)] hover:text-[var(--foreground)]"
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+              <circle cx="9" cy="7" r="4" />
+              <line x1="19" y1="8" x2="19" y2="14" />
+              <line x1="22" y1="11" x2="16" y2="11" />
+            </svg>
+          </button>
+        )}
         {/* Logout */}
         <button
           onClick={handleLogout}

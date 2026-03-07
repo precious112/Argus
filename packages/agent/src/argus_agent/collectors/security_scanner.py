@@ -641,10 +641,11 @@ class SecurityScanner:
         from argus_agent.collectors.remote import execute_remote_tool
 
         events: list[dict[str, Any]] = []
-        current: set[tuple[str, int]] = set()
+        all_current: set[tuple[str, int]] = set()
 
         for t in tenants:
-            result = await execute_remote_tool(t["tenant_id"], "network_connections", {})
+            tid = t["tenant_id"]
+            result = await execute_remote_tool(tid, "network_connections", {})
             if not result:
                 continue
             for conn in result.get("connections", []):
@@ -653,20 +654,22 @@ class SecurityScanner:
                     try:
                         ip, port_str = raddr.rsplit(":", 1)
                         port = int(port_str)
-                        current.add((ip, port))
+                        all_current.add((ip, port))
                     except (ValueError, IndexError):
                         continue
 
         if self._known_outbound:
-            new = current - self._known_outbound
+            new = all_current - self._known_outbound
+            # Attribute to the first (or only) tenant for quota tracking
+            fallback_tid = tenants[0]["tenant_id"] if tenants else None
             for ip, port in new:
                 events.append({
                     "type": EventType.SUSPICIOUS_OUTBOUND,
                     "severity": EventSeverity.NOTABLE,
                     "message": f"New outbound connection: {ip}:{port}",
-                    "data": {"ip": ip, "port": port},
+                    "data": {"ip": ip, "port": port, "tenant_id": fallback_tid},
                 })
 
-        self._known_outbound = current
-        connections = [{"ip": ip, "port": port} for ip, port in sorted(current)]
+        self._known_outbound = all_current
+        connections = [{"ip": ip, "port": port} for ip, port in sorted(all_current)]
         return {"connections": connections, "events": events}

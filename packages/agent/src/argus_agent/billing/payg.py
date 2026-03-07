@@ -84,7 +84,7 @@ async def get_payg_status(tenant_id: str) -> dict[str, Any]:
         from argus_agent.storage.repositories import get_metrics_repository
 
         repo = get_metrics_repository()
-        events_count = await asyncio.to_thread(repo.count_events_since, tenant_id, period_start)
+        events_count = await asyncio.to_thread(repo.get_event_quota_count, tenant_id, period_start)
     except Exception:
         pass
 
@@ -119,20 +119,19 @@ async def report_payg_events_to_polar(tenant_id: str, overage_events: int) -> No
             return
 
     try:
-        from polar_sdk import Polar
+        from argus_agent.billing.polar_service import _get_polar_client
 
-        polar = Polar(access_token=settings.deployment.polar_access_token)
-        polar.meters.ingest(
+        polar = _get_polar_client()
+        polar.events.ingest(
             request={
-                "meter_id": meter_id,
                 "events": [
                     {
-                        "external_customer_id": tenant.polar_customer_id,
+                        "customer_id": tenant.polar_customer_id,
                         "name": "payg_overage_events",
-                        "value": overage_events,
+                        "metadata": {"count": overage_events},
                     }
                 ],
             }
         )
     except Exception:
-        logger.debug("Failed to report PAYG events to Polar for %s", tenant_id, exc_info=True)
+        logger.warning("Failed to report PAYG events to Polar for %s", tenant_id, exc_info=True)

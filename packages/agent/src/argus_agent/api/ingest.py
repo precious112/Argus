@@ -113,6 +113,23 @@ async def ingest_telemetry(
     except Exception:
         logger.exception("Failed to store SDK events")
 
+    # Increment unified event quota counter
+    try:
+        from argus_agent.billing.usage_guard import (
+            _billing_period_start,
+            _get_tenant_and_subscription,
+        )
+
+        tenant_id = get_tenant_id()
+        if tenant_id != "default" and stored > 0:
+            _, sub = await _get_tenant_and_subscription(tenant_id)
+            period_start = _billing_period_start(sub)
+            from argus_agent.storage.repositories import get_metrics_repository as _get_repo
+
+            _get_repo().increment_event_quota(tenant_id, period_start, stored)
+    except Exception:
+        logger.debug("Failed to increment event quota counter")
+
     # Classify error events through the event bus
     try:
         from argus_agent.events.bus import get_event_bus

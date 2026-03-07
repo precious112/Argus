@@ -329,9 +329,8 @@ class AlertEngine:
         # Suppression state
         self._acknowledged_keys: dict[str, datetime] = {}  # dedup_key -> expires_at
         self._muted_rules: dict[str, datetime] = {}  # rule_id -> expires_at
-        # Billing quota cache
-        self._quota_exceeded_cache: bool = False
-        self._quota_cache_expires: datetime | None = None
+        # Billing quota cache: tenant_id → (exceeded, expires_at)
+        self._quota_cache: dict[str, tuple[bool, datetime]] = {}
 
     def set_channels(self, channels: list[Any]) -> None:
         self._channels = channels
@@ -401,36 +400,74 @@ class AlertEngine:
 
         return False
 
-    async def _is_over_quota(self) -> bool:
-        """Check if tenant is over event quota (cached, 60s TTL)."""
+    async def _is_over_quota(self, event: Event) -> bool:
+        """Check if tenant is over event quota (cached per-tenant, 60s TTL)."""
         from argus_agent.config import get_settings
 
         if get_settings().deployment.mode != "saas":
             return False
 
+        from argus_agent.tenancy.context import get_tenant_id
+
+        tenant_id = (event.data or {}).get("tenant_id") or get_tenant_id()
+        if tenant_id == "default":
+            return False  # self-hosted or no tenant context — skip
+
         now = datetime.now(UTC).replace(tzinfo=None)
-        if self._quota_cache_expires and now < self._quota_cache_expires:
-            return self._quota_exceeded_cache
+        cached = self._quota_cache.get(tenant_id)
+        if cached and now < cached[1]:
+            return cached[0]
 
         try:
             from argus_agent.billing.usage_guard import check_event_ingest_limit
-            from argus_agent.tenancy.context import get_tenant_id
 
-            await check_event_ingest_limit(get_tenant_id())
-            self._quota_exceeded_cache = False
+            await check_event_ingest_limit(tenant_id)
+            self._quota_cache[tenant_id] = (False, now + timedelta(seconds=60))
+            return False
         except HTTPException:
-            self._quota_exceeded_cache = True
+            self._quota_cache[tenant_id] = (True, now + timedelta(seconds=60))
+            return True
         except Exception:
-            self._quota_exceeded_cache = False
+            self._quota_cache[tenant_id] = (False, now + timedelta(seconds=60))
+            return False
 
-        self._quota_cache_expires = now + timedelta(seconds=60)
-        return self._quota_exceeded_cache
+    async def _increment_quota(self, event: Event) -> None:
+        """Increment the unified event quota counter for this internal event."""
+        try:
+            from argus_agent.config import get_settings
+
+            if get_settings().deployment.mode != "saas":
+                return
+
+            tenant_id = (event.data or {}).get("tenant_id")
+            if not tenant_id:
+                from argus_agent.tenancy.context import get_tenant_id
+
+                tenant_id = get_tenant_id()
+            if tenant_id == "default":
+                return
+
+            from argus_agent.billing.usage_guard import (
+                _billing_period_start,
+                _get_tenant_and_subscription,
+            )
+            from argus_agent.storage.repositories import get_metrics_repository
+
+            _, sub = await _get_tenant_and_subscription(tenant_id)
+            period_start = _billing_period_start(sub)
+            repo = get_metrics_repository()
+            repo.increment_event_quota(tenant_id, period_start, 1)
+        except Exception:
+            logger.debug("Failed to increment event quota for internal event", exc_info=True)
 
     async def _handle_event(self, event: Event) -> None:
         """Evaluate all rules against an incoming event."""
         # In SaaS mode, suppress all alerts when over event quota
-        if await self._is_over_quota():
+        if await self._is_over_quota(event):
             return
+
+        # Count this internal event toward unified quota
+        await self._increment_quota(event)
 
         for rule in self._rules.values():
             if not self._matches(rule, event):

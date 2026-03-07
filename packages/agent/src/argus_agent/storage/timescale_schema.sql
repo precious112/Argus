@@ -124,6 +124,14 @@ CREATE TABLE IF NOT EXISTS metric_baselines (
 );
 CREATE INDEX IF NOT EXISTS idx_mb_tenant ON metric_baselines(tenant_id, metric_name);
 
+-- 9. event_quota_usage (regular table for billing counters)
+CREATE TABLE IF NOT EXISTS event_quota_usage (
+    tenant_id    VARCHAR(36) NOT NULL,
+    period_start TIMESTAMPTZ NOT NULL,
+    event_count  BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, period_start)
+);
+
 -- Default retention policies (30 days)
 SELECT add_retention_policy('system_metrics', INTERVAL '30 days', if_not_exists => TRUE);
 SELECT add_retention_policy('log_index', INTERVAL '30 days', if_not_exists => TRUE);
@@ -182,7 +190,8 @@ DECLARE
 BEGIN
     FOREACH tbl IN ARRAY ARRAY[
         'system_metrics', 'log_index', 'sdk_events', 'spans',
-        'dependency_calls', 'sdk_metrics', 'deploy_events', 'metric_baselines'
+        'dependency_calls', 'sdk_metrics', 'deploy_events', 'metric_baselines',
+        'event_quota_usage'
     ] LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);

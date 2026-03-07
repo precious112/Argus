@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from argus_agent.auth.dependencies import require_role
@@ -17,6 +18,8 @@ from argus_agent.billing.polar_service import (
 )
 from argus_agent.billing.usage_guard import get_tenant_usage_summary
 from argus_agent.config import get_settings
+
+logger = logging.getLogger("argus.api.billing")
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -103,19 +106,26 @@ async def create_checkout(
         billing_interval = "month"
 
     success_url = f"{settings.deployment.frontend_url}/billing?upgraded=true"
-    cancel_url = f"{settings.deployment.frontend_url}/billing"
 
-    return await create_checkout_session(
-        tenant_id, success_url, cancel_url,
-        plan_id=plan_id, billing_interval=billing_interval,
-    )
+    try:
+        return await create_checkout_session(
+            tenant_id, success_url,
+            plan_id=plan_id, billing_interval=billing_interval,
+        )
+    except Exception:
+        logger.exception("Checkout failed for tenant %s", tenant_id)
+        raise HTTPException(status_code=502, detail="Failed to create checkout session")
 
 
 @router.post("/portal")
 async def customer_portal(user: dict = Depends(require_role("owner", "admin"))) -> dict[str, str]:
     """Create a Polar customer portal session for subscription management."""
     tenant_id = user.get("tenant_id", "default")
-    return await create_customer_portal_session(tenant_id)
+    try:
+        return await create_customer_portal_session(tenant_id)
+    except Exception:
+        logger.exception("Portal session failed for tenant %s", tenant_id)
+        raise HTTPException(status_code=502, detail="Failed to create portal session")
 
 
 @router.get("/payg")

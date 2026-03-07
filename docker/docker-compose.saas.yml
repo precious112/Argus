@@ -54,6 +54,7 @@ services:
       - ARGUS_LLM__MODEL=${ARGUS_LLM_MODEL:-gpt-4o}
       - ARGUS_SECURITY__SECRET_KEY=${ARGUS_SECRET_KEY:-}
       - ARGUS_DEPLOYMENT__POLAR_ACCESS_TOKEN=${ARGUS_POLAR_ACCESS_TOKEN:-}
+      - ARGUS_DEPLOYMENT__POLAR_SERVER=${ARGUS_POLAR_SERVER:-}
       - ARGUS_DEPLOYMENT__POLAR_WEBHOOK_SECRET=${ARGUS_POLAR_WEBHOOK_SECRET:-}
       - ARGUS_DEPLOYMENT__POLAR_TEAMS_PRODUCT_ID=${ARGUS_POLAR_TEAMS_PRODUCT_ID:-}
       - ARGUS_DEPLOYMENT__POLAR_TEAMS_ANNUAL_PRODUCT_ID=${ARGUS_DEPLOYMENT__POLAR_TEAMS_ANNUAL_PRODUCT_ID:-}
@@ -84,7 +85,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 60s
     restart: unless-stopped
 
   # ----------------------------------------------------------

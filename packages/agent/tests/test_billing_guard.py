@@ -196,7 +196,7 @@ async def test_event_ingest_under_quota_allows():
     """Events under plan quota should be allowed."""
     tenant = _mock_tenant(plan="teams")
     mock_repo = MagicMock()
-    mock_repo.count_events_since = MagicMock(return_value=50_000)
+    mock_repo.get_event_quota_count = MagicMock(return_value=50_000)
 
     with _ingest_ctx(tenant, None, mock_repo):
         await check_event_ingest_limit("t1")
@@ -207,7 +207,7 @@ async def test_event_ingest_over_quota_no_payg_rejects():
     """Events over plan quota without PAYG should raise 429."""
     tenant = _mock_tenant(plan="teams", payg_enabled=False)
     mock_repo = MagicMock()
-    mock_repo.count_events_since = MagicMock(return_value=110_000)
+    mock_repo.get_event_quota_count = MagicMock(return_value=110_000)
 
     with _ingest_ctx(tenant, None, mock_repo):
         with pytest.raises(HTTPException) as exc_info:
@@ -223,7 +223,7 @@ async def test_event_ingest_over_quota_payg_allows():
         plan="teams", payg_enabled=True, payg_budget=1000,
     )
     mock_repo = MagicMock()
-    mock_repo.count_events_since = MagicMock(return_value=110_000)
+    mock_repo.get_event_quota_count = MagicMock(return_value=110_000)
 
     with _ingest_ctx(tenant, None, mock_repo):
         await check_event_ingest_limit("t1")
@@ -237,7 +237,7 @@ async def test_event_ingest_payg_budget_exhausted_rejects():
         plan="teams", payg_enabled=True, payg_budget=100,
     )
     mock_repo = MagicMock()
-    mock_repo.count_events_since = MagicMock(return_value=110_000)
+    mock_repo.get_event_quota_count = MagicMock(return_value=110_000)
 
     with _ingest_ctx(tenant, None, mock_repo):
         with pytest.raises(HTTPException) as exc_info:
@@ -252,11 +252,11 @@ async def test_event_ingest_uses_subscription_period():
     tenant = _mock_tenant(plan="teams")
     sub = _mock_subscription(period_start=datetime(2026, 2, 15))
     mock_repo = MagicMock()
-    mock_repo.count_events_since = MagicMock(return_value=50_000)
+    mock_repo.get_event_quota_count = MagicMock(return_value=50_000)
 
     with _ingest_ctx(tenant, sub, mock_repo):
         await check_event_ingest_limit("t1")
-        mock_repo.count_events_since.assert_called_once_with(
+        mock_repo.get_event_quota_count.assert_called_once_with(
             "t1", datetime(2026, 2, 15),
         )
 
@@ -266,9 +266,9 @@ async def test_event_ingest_free_plan_uses_calendar_month():
     """Free plan events counted from calendar month start."""
     tenant = _mock_tenant(plan="free")
     mock_repo = MagicMock()
-    mock_repo.count_events_since = MagicMock(return_value=100)
+    mock_repo.get_event_quota_count = MagicMock(return_value=100)
 
     with _ingest_ctx(tenant, None, mock_repo):
         await check_event_ingest_limit("t1")
-        call_args = mock_repo.count_events_since.call_args[0]
+        call_args = mock_repo.get_event_quota_count.call_args[0]
         assert call_args[1].day == 1

@@ -413,6 +413,36 @@ class AlertFormatter:
             except Exception:
                 logger.exception("Investigation report send failed on %s", type(channel).__name__)
 
+    @staticmethod
+    async def _is_tenant_over_quota(items: list[DigestItem]) -> bool:
+        """Check if the tenant that generated these items is over event quota."""
+        try:
+            from argus_agent.config import get_settings
+
+            if get_settings().deployment.mode != "saas":
+                return False
+
+            from argus_agent.tenancy.context import get_tenant_id
+
+            # Extract tenant_id from the first item's event data
+            tenant_id = None
+            for item in items:
+                tenant_id = (item.event.data or {}).get("tenant_id")
+                if tenant_id:
+                    break
+            if not tenant_id:
+                tenant_id = get_tenant_id()
+            if tenant_id == "default":
+                return False
+
+            from argus_agent.billing.usage_guard import check_event_ingest_limit
+
+            await check_event_ingest_limit(tenant_id)
+            return False
+        except Exception:
+            # HTTPException (quota exceeded) or any error → suppress
+            return True
+
     async def _flush_loop(self) -> None:
         """Periodically flush the buffer."""
         while self._running:
@@ -431,6 +461,13 @@ class AlertFormatter:
             self._buffer.clear()
 
         if not items:
+            return
+
+        # In SaaS mode, drop the digest if the tenant is over quota
+        if await self._is_tenant_over_quota(items):
+            logger.info(
+                "Digest suppressed — tenant over quota (%d items dropped)", len(items),
+            )
             return
 
         groups = self._group_items(items)

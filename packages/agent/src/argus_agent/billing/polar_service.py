@@ -20,7 +20,10 @@ def _get_polar_client():  # type: ignore[no-untyped-def]
     from polar_sdk import Polar
 
     settings = get_settings()
-    return Polar(access_token=settings.deployment.polar_access_token)
+    kwargs: dict[str, Any] = {"access_token": settings.deployment.polar_access_token}
+    if settings.deployment.polar_server:
+        kwargs["server"] = settings.deployment.polar_server
+    return Polar(**kwargs)
 
 
 def _get_product_id(plan_id: str, billing_interval: str) -> str:
@@ -67,7 +70,6 @@ def _product_id_to_interval(product_id: str) -> str:
 async def create_checkout_session(
     tenant_id: str,
     success_url: str,
-    cancel_url: str,
     plan_id: str = "teams",
     billing_interval: str = "month",
 ) -> dict[str, str]:
@@ -75,17 +77,21 @@ async def create_checkout_session(
     polar = _get_polar_client()
     product_id = _get_product_id(plan_id, billing_interval)
 
-    result = polar.checkouts.custom.create(
-        request={
-            "product_id": product_id,
-            "success_url": success_url,
-            "metadata": {
-                "tenant_id": tenant_id,
-                "plan_id": plan_id,
-                "billing_interval": billing_interval,
+    try:
+        result = polar.checkouts.create(
+            request={
+                "products": [product_id],
+                "success_url": success_url,
+                "metadata": {
+                    "tenant_id": tenant_id,
+                    "plan_id": plan_id,
+                    "billing_interval": billing_interval,
+                },
             },
-        },
-    )
+        )
+    except Exception:
+        logger.exception("Polar checkout creation failed (product=%s)", product_id)
+        raise
 
     return {
         "checkout_url": result.url,
@@ -124,28 +130,36 @@ async def get_subscription_status(tenant_id: str) -> dict[str, Any] | None:
 
 async def handle_webhook_event(payload: bytes, headers: dict[str, str]) -> dict[str, str]:
     """Validate signature, parse event, and dispatch to handler."""
+    from polar_sdk.models import (
+        WebhookSubscriptionActivePayload,
+        WebhookSubscriptionCanceledPayload,
+        WebhookSubscriptionRevokedPayload,
+        WebhookSubscriptionUpdatedPayload,
+    )
     from polar_sdk.webhooks import validate_event
 
     settings = get_settings()
     event = validate_event(
-        payload=payload,
+        body=payload,
         headers=headers,
         secret=settings.deployment.polar_webhook_secret,
     )
 
-    event_type = event.type
+    # SDK returns typed pydantic models; field is 'TYPE' not 'type'
+    event_type = getattr(event, "TYPE", None) or type(event).__name__
     logger.info("Polar webhook received: %s", event_type)
 
-    handlers: dict[str, Any] = {
-        "subscription.active": _handle_subscription_active,
-        "subscription.canceled": _handle_subscription_canceled,
-        "subscription.revoked": _handle_subscription_revoked,
-        "subscription.updated": _handle_subscription_updated,
-    }
-
-    handler = handlers.get(event_type)
-    if handler:
-        await handler(event.data)
+    if isinstance(event, WebhookSubscriptionActivePayload):
+        await _handle_subscription_active(event.data)
+        return {"status": "processed", "event": event_type}
+    elif isinstance(event, WebhookSubscriptionCanceledPayload):
+        await _handle_subscription_canceled(event.data)
+        return {"status": "processed", "event": event_type}
+    elif isinstance(event, WebhookSubscriptionRevokedPayload):
+        await _handle_subscription_revoked(event.data)
+        return {"status": "processed", "event": event_type}
+    elif isinstance(event, WebhookSubscriptionUpdatedPayload):
+        await _handle_subscription_updated(event.data)
         return {"status": "processed", "event": event_type}
 
     logger.debug("Unhandled Polar event type: %s", event_type)
@@ -280,9 +294,13 @@ async def create_customer_portal_session(tenant_id: str) -> dict[str, str]:
             return {"portal_url": ""}
 
     polar = _get_polar_client()
-    result = polar.customer_sessions.create(
-        request={"customer_id": tenant.polar_customer_id},
-    )
+    try:
+        result = polar.customer_sessions.create(
+            request={"customer_id": tenant.polar_customer_id},
+        )
+    except Exception:
+        logger.exception("Polar customer portal session failed (tenant=%s)", tenant_id)
+        raise
     return {"portal_url": result.customer_portal_url}
 
 
@@ -298,7 +316,7 @@ def _parse_dt(data: Any, field: str) -> datetime | None:
     if val is None:
         return None
     if isinstance(val, datetime):
-        return val
+        return val.replace(tzinfo=None)
     try:
         return datetime.fromisoformat(str(val))
     except (ValueError, TypeError):

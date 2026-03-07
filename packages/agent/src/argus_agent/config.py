@@ -88,6 +88,7 @@ class DeploymentConfig(BaseModel):
     postgres_url: str = ""
     timescale_url: str = ""
     polar_access_token: str = ""
+    polar_server: str = ""  # "sandbox" or "production" (default: production)
     polar_webhook_secret: str = ""
     polar_teams_product_id: str = ""
     polar_teams_annual_product_id: str = ""

@@ -97,6 +97,110 @@ async def me(user: dict = Depends(get_current_user)):
     }
 
 
+@router.get("/organizations")
+async def list_organizations(user: dict = Depends(get_current_user)):
+    """List all organizations the current user belongs to (by email)."""
+    settings = get_settings()
+    if settings.deployment.mode != "saas":
+        return []
+
+    current_tenant = user.get("tenant_id", "default")
+
+    # Look up current user's email
+    async with get_session() as session:
+        result = await session.execute(
+            select(User).where(User.id == user["sub"])
+        )
+        current_user = result.scalar_one_or_none()
+
+    if not current_user or not current_user.email:
+        return []
+
+    # Find all active User records with the same email
+    from argus_agent.storage.saas_models import TeamMember, Tenant
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(User, TeamMember, Tenant)
+            .join(TeamMember, TeamMember.user_id == User.id)
+            .join(Tenant, Tenant.id == TeamMember.tenant_id)
+            .where(User.email == current_user.email, User.is_active.is_(True))
+        )
+        rows = result.all()
+
+    return [
+        {
+            "tenant_id": tenant.id,
+            "tenant_name": tenant.name,
+            "role": tm.role,
+            "is_current": tenant.id == current_tenant,
+        }
+        for _user, tm, tenant in rows
+    ]
+
+
+class SwitchOrgRequest(BaseModel):
+    tenant_id: str
+
+
+@router.post("/switch-org")
+async def switch_org(
+    body: SwitchOrgRequest,
+    response: Response,
+    user: dict = Depends(get_current_user),
+):
+    """Switch to a different organization by issuing a new JWT."""
+    settings = get_settings()
+    if settings.deployment.mode != "saas":
+        raise HTTPException(400, "Not available in self-hosted mode")
+
+    # Look up current user's email
+    async with get_session() as session:
+        result = await session.execute(
+            select(User).where(User.id == user["sub"])
+        )
+        current_user = result.scalar_one_or_none()
+
+    if not current_user or not current_user.email:
+        raise HTTPException(400, "Cannot switch org without email")
+
+    # Find the User record + TeamMember in the target tenant
+    from argus_agent.storage.saas_models import TeamMember
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(User, TeamMember)
+            .join(TeamMember, TeamMember.user_id == User.id)
+            .where(
+                User.email == current_user.email,
+                User.is_active.is_(True),
+                TeamMember.tenant_id == body.tenant_id,
+            )
+        )
+        row = result.first()
+
+    if not row:
+        raise HTTPException(403, "You are not a member of that organization")
+
+    target_user, tm = row
+    token = create_access_token(target_user.id, target_user.username, tm.tenant_id, tm.role)
+    max_age = settings.security.session_expiry_hours * 3600
+
+    response = Response(
+        content='{"status":"ok"}',
+        media_type="application/json",
+    )
+    response.set_cookie(
+        key="argus_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        path="/",
+        max_age=max_age,
+    )
+    return response
+
+
 # ---- Email Verification ----
 
 

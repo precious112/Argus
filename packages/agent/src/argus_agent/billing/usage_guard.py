@@ -134,7 +134,7 @@ async def check_event_ingest_limit(tenant_id: str, *, batch_size: int = 1) -> No
         from argus_agent.storage.repositories import get_metrics_repository
 
         repo = get_metrics_repository()
-        event_count = await asyncio.to_thread(repo.count_events_since, tenant_id, period_start)
+        event_count = await asyncio.to_thread(repo.get_event_quota_count, tenant_id, period_start)
     except Exception:
         logger.warning("Could not check event count, rejecting ingest", exc_info=True)
         raise HTTPException(503, "Billing check unavailable, try again")
@@ -168,7 +168,12 @@ async def check_event_ingest_limit(tenant_id: str, *, batch_size: int = 1) -> No
             "Increase your PAYG budget to continue ingesting events.",
         )
 
-    # Under PAYG budget → allow, check PAYG thresholds (fire-and-forget)
+    # Under PAYG budget → allow, report to Polar + check thresholds (fire-and-forget)
+    from argus_agent.billing.payg import report_payg_events_to_polar
+
+    asyncio.ensure_future(
+        report_payg_events_to_polar(tenant_id, batch_size)
+    )
     asyncio.ensure_future(
         _check_payg_thresholds(tenant_id, payg_spend_cents, budget_cents, period_start)
     )
@@ -242,7 +247,7 @@ async def get_tenant_usage_summary(tenant_id: str) -> dict[str, Any]:
         from argus_agent.storage.repositories import get_metrics_repository
 
         repo = get_metrics_repository()
-        events_count = await asyncio.to_thread(repo.count_events_since, tenant_id, period_start)
+        events_count = await asyncio.to_thread(repo.get_event_quota_count, tenant_id, period_start)
     except Exception:
         pass
 

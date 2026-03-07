@@ -15,6 +15,7 @@ from sqlalchemy import select
 from argus_agent.auth.dependencies import require_role
 from argus_agent.auth.jwt import create_access_token
 from argus_agent.auth.password import hash_password
+from argus_agent.config import get_settings
 from argus_agent.storage.models import User
 from argus_agent.storage.repositories import get_session
 from argus_agent.storage.saas_models import TeamInvitation, TeamMember
@@ -122,6 +123,30 @@ async def invite_member(
         await session.commit()
 
     logger.info("Invitation created for %s to tenant %s", body.email, tenant_id)
+
+    # Send invitation email via Resend
+    settings = get_settings()
+    accept_url = f"{settings.deployment.frontend_url}/accept-invite?token={raw_token}"
+
+    try:
+        import resend
+
+        resend.api_key = settings.deployment.resend_api_key
+        resend.Emails.send({
+            "from": settings.deployment.email_from,
+            "to": [body.email],
+            "subject": "You've been invited to join Argus",
+            "text": (
+                f"You've been invited to join a team on Argus as a {body.role}.\n\n"
+                f"Click the link below to accept the invitation:\n\n"
+                f"{accept_url}\n\n"
+                f"This invitation expires in 7 days.\n\n"
+                f"If you weren't expecting this, you can safely ignore this email."
+            ),
+        })
+    except Exception:
+        logger.warning("Failed to send invitation email to %s", body.email, exc_info=True)
+
     return {
         "id": invitation.id,
         "email": body.email,
@@ -260,6 +285,32 @@ async def revoke_invitation(
 # ---------------------------------------------------------------------------
 
 accept_router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@accept_router.get("/accept-invite/validate")
+async def validate_invite(token: str):
+    """Validate an invitation token and return its details."""
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(TeamInvitation).where(
+                TeamInvitation.token_hash == token_hash,
+                TeamInvitation.accepted_at.is_(None),
+            )
+        )
+        invitation = result.scalar_one_or_none()
+        if not invitation:
+            raise HTTPException(404, "Invalid or expired invitation")
+
+        if invitation.expires_at and invitation.expires_at < datetime.now(UTC).replace(tzinfo=None):
+            raise HTTPException(410, "Invitation has expired")
+
+    return {
+        "email": invitation.email,
+        "role": invitation.role,
+        "expires_at": invitation.expires_at.isoformat() if invitation.expires_at else None,
+    }
 
 
 @accept_router.post("/accept-invite")

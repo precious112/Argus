@@ -532,6 +532,7 @@ def create_app() -> FastAPI:
         "/api/v1/auth/logout",
         "/api/v1/auth/register",
         "/api/v1/auth/accept-invite",
+        "/api/v1/auth/accept-invite/validate",
         "/api/v1/billing/plans",
         "/api/v1/webhooks/polar",
         "/api/v1/auth/forgot-password",
@@ -543,6 +544,60 @@ def create_app() -> FastAPI:
         "/api/v1/ingest",
         "/api/v1/auth/oauth/",
     )
+
+    _user_cache_ttl = 60  # seconds
+
+    async def _verify_user_exists(user_id: str) -> bool:
+        """Check user still exists and is active, with Redis cache.
+
+        Only runs in SaaS mode — self-hosted skips verification.
+        """
+        if get_settings().deployment.mode != "saas":
+            return True
+
+        from argus_agent.auth.key_cache import _redis
+
+        # Check Redis cache first
+        if _redis is not None:
+            try:
+                cached = await _redis.get(f"user_active:{user_id}")
+                if cached == "1":
+                    return True
+                if cached == "0":
+                    return False
+            except Exception:
+                pass  # Redis down — fall through to DB
+
+        # DB lookup
+        try:
+            from sqlalchemy import select
+
+            from argus_agent.storage.models import User
+            from argus_agent.storage.repositories import get_session
+
+            async with get_session() as session:
+                result = await session.execute(
+                    select(User.id).where(
+                        User.id == user_id,
+                        User.is_active.is_(True),
+                    )
+                )
+                exists = result.scalar_one_or_none() is not None
+        except Exception:
+            return False
+
+        # Write result to Redis
+        if _redis is not None:
+            try:
+                await _redis.setex(
+                    f"user_active:{user_id}",
+                    _user_cache_ttl,
+                    "1" if exists else "0",
+                )
+            except Exception:
+                pass
+
+        return exists
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -560,9 +615,17 @@ def create_app() -> FastAPI:
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
         try:
             payload = decode_access_token(token)
-            request.state.user = payload
         except Exception:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+        # Verify the user still exists and is active
+        user_id = payload.get("sub", "")
+        if not await _verify_user_exists(user_id):
+            response = JSONResponse(
+                {"detail": "User no longer exists"}, status_code=401,
+            )
+            response.delete_cookie("argus_token", path="/")
+            return response
+        request.state.user = payload
         return await call_next(request)
 
     # Tenant context middleware

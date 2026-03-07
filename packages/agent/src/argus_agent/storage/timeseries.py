@@ -127,6 +127,15 @@ def init_timeseries(db_path: str) -> None:
         )
     """)
 
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS event_quota_usage (
+            tenant_id VARCHAR NOT NULL DEFAULT 'default',
+            period_start TIMESTAMP NOT NULL,
+            event_count BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY (tenant_id, period_start),
+        )
+    """)
+
     # Create indexes for common query patterns
     _conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_metrics_ts

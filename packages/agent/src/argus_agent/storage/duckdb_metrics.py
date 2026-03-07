@@ -348,6 +348,38 @@ class DuckDBMetricsRepository:
     ) -> str:
         return timeseries.compute_error_fingerprint(error_type, traceback_str)
 
+    # --- Event Quota Usage ---
+
+    def increment_event_quota(
+        self, tenant_id: str, period_start: datetime, count: int = 1,
+    ) -> None:
+        conn = timeseries.get_connection()
+        row = conn.execute(
+            "SELECT event_count FROM event_quota_usage "
+            "WHERE tenant_id = ? AND period_start = ?",
+            [tenant_id, period_start],
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE event_quota_usage SET event_count = event_count + ? "
+                "WHERE tenant_id = ? AND period_start = ?",
+                [count, tenant_id, period_start],
+            )
+        else:
+            conn.execute(
+                "INSERT INTO event_quota_usage VALUES (?, ?, ?)",
+                [tenant_id, period_start, count],
+            )
+
+    def get_event_quota_count(self, tenant_id: str, period_start: datetime) -> int:
+        conn = timeseries.get_connection()
+        row = conn.execute(
+            "SELECT event_count FROM event_quota_usage "
+            "WHERE tenant_id = ? AND period_start = ?",
+            [tenant_id, period_start],
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     # --- Raw Query Access ---
 
     def execute_raw(

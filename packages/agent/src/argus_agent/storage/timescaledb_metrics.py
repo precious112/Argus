@@ -1217,3 +1217,46 @@ class TimescaleDBMetricsRepository:
                     return int(row["cnt"]) if row else 0
 
         return self._run(_count())
+
+    def increment_event_quota(
+        self, tenant_id: str, period_start: datetime, count: int = 1,
+    ) -> None:
+        """Upsert the unified event quota counter for a tenant/period."""
+
+        async def _inc() -> None:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
+                safe_tid = tenant_id.replace("'", "''")
+                async with conn.transaction():
+                    await conn.execute(
+                        f"SET LOCAL app.current_tenant = '{safe_tid}'"
+                    )
+                    await conn.execute(
+                        "INSERT INTO event_quota_usage (tenant_id, period_start, event_count) "
+                        "VALUES ($1, $2, $3) "
+                        "ON CONFLICT (tenant_id, period_start) "
+                        "DO UPDATE SET event_count = event_quota_usage.event_count + $3",
+                        tenant_id, period_start, count,
+                    )
+
+        self._run(_inc())
+
+    def get_event_quota_count(self, tenant_id: str, period_start: datetime) -> int:
+        """Read the unified event quota counter for a tenant/period."""
+
+        async def _get() -> int:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
+                safe_tid = tenant_id.replace("'", "''")
+                async with conn.transaction():
+                    await conn.execute(
+                        f"SET LOCAL app.current_tenant = '{safe_tid}'"
+                    )
+                    row = await conn.fetchrow(
+                        "SELECT event_count FROM event_quota_usage "
+                        "WHERE tenant_id = $1 AND period_start = $2",
+                        tenant_id, period_start,
+                    )
+                    return int(row["event_count"]) if row else 0
+
+        return self._run(_get())
