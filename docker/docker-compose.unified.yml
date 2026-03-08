@@ -44,7 +44,6 @@ services:
       - ARGUS_LLM__PROVIDER=${ARGUS_LLM_PROVIDER:-openai}
       - ARGUS_LLM__API_KEY=${ARGUS_LLM_API_KEY:-}
       - ARGUS_LLM__MODEL=${ARGUS_LLM_MODEL:-gpt-4o}
-      - ARGUS_PUBLIC_URL=${ARGUS_PUBLIC_URL:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7600/api/v1/health"]
       interval: 30s
