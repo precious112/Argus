@@ -19,6 +19,7 @@ def _ensure_users_table(engine) -> None:  # type: ignore[no-untyped-def]
             conn.execute(text(
                 "CREATE TABLE users ("
                 "  id VARCHAR(36) PRIMARY KEY,"
+                "  tenant_id VARCHAR(36) NOT NULL DEFAULT 'default',"
                 "  username VARCHAR(150) UNIQUE NOT NULL,"
                 "  password_hash VARCHAR(255) NOT NULL,"
                 "  is_active BOOLEAN DEFAULT 1,"
@@ -64,8 +65,8 @@ def create_user(username: str, password: str) -> None:
 
         conn.execute(
             text(
-                "INSERT INTO users (id, username, password_hash, is_active, created_at) "
-                "VALUES (:id, :username, :password_hash, 1, CURRENT_TIMESTAMP)"
+                "INSERT INTO users (id, tenant_id, username, password_hash, is_active, created_at) "
+                "VALUES (:id, 'default', :username, :password_hash, 1, CURRENT_TIMESTAMP)"
             ),
             {"id": user_id, "username": username, "password_hash": pw_hash},
         )
