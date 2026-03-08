@@ -18,9 +18,20 @@ def db_path(tmp_path):
 def setup_db(db_path):
     """Set up a temp DuckDB with system_metrics and metric_baselines tables."""
     from argus_agent.storage import timeseries
+    from argus_agent.storage.duckdb_metrics import DuckDBMetricsRepository
+    from argus_agent.storage.repositories import set_metrics_repository
 
     timeseries.init_timeseries(db_path)
+
+    # Set up the metrics repository global so tracker uses execute_raw()
+    repo = DuckDBMetricsRepository()
+    # timeseries already initialized, don't re-init
+    set_metrics_repository(repo)
+
     yield
+
+    import argus_agent.storage.repositories as repo_mod
+    repo_mod._metrics_repo = None
     timeseries.close_timeseries()
 
 

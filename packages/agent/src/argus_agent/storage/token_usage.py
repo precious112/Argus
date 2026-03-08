@@ -8,10 +8,17 @@ from typing import Any
 
 from sqlalchemy import func, select, text
 
-from argus_agent.storage.database import get_session
+from argus_agent.config import get_settings
 from argus_agent.storage.models import TokenUsage
+from argus_agent.storage.repositories import get_session
+from argus_agent.tenancy.context import get_tenant_id
 
 logger = logging.getLogger("argus.storage.token_usage")
+
+
+def _is_postgres() -> bool:
+    return get_settings().deployment.mode == "saas"
+
 
 # Approximate cost per 1K tokens (input, output) for known models.
 # Rates derived from official per-MTok pricing ÷ 1000.
@@ -61,6 +68,13 @@ _STRFTIME_FORMATS: dict[str, str] = {
     "month": "%Y-%m",
 }
 
+_TO_CHAR_FORMATS: dict[str, str] = {
+    "hour": "YYYY-MM-DD HH24:00",
+    "day": "YYYY-MM-DD",
+    "week": "IYYY-IW",
+    "month": "YYYY-MM",
+}
+
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     rates = _COST_PER_1K.get(model)
@@ -89,6 +103,7 @@ class TokenUsageService:
         """Insert a token usage row. Returns the row ID."""
         async with get_session() as session:
             entry = TokenUsage(
+                tenant_id=get_tenant_id(),
                 provider=provider,
                 model=model,
                 prompt_tokens=prompt_tokens,
@@ -111,11 +126,15 @@ class TokenUsageService:
         source: str | None = None,
     ) -> list[dict[str, Any]]:
         """Aggregate token usage by time bucket."""
-        fmt = _STRFTIME_FORMATS.get(granularity, _STRFTIME_FORMATS["hour"])
-        since = since or datetime.now(UTC) - timedelta(hours=24)
+        since = since or datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=24)
 
         async with get_session() as session:
-            bucket_expr = func.strftime(fmt, TokenUsage.timestamp)
+            if _is_postgres():
+                fmt = _TO_CHAR_FORMATS.get(granularity, _TO_CHAR_FORMATS["hour"])
+                bucket_expr = func.to_char(TokenUsage.timestamp, fmt)
+            else:
+                fmt = _STRFTIME_FORMATS.get(granularity, _STRFTIME_FORMATS["hour"])
+                bucket_expr = func.strftime(fmt, TokenUsage.timestamp)
             stmt = (
                 select(
                     bucket_expr.label("bucket"),
@@ -155,7 +174,7 @@ class TokenUsageService:
         since: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Group usage by provider, model, or source."""
-        since = since or datetime.now(UTC) - timedelta(hours=24)
+        since = since or datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=24)
 
         col_map = {
             "provider": TokenUsage.provider,
@@ -193,7 +212,7 @@ class TokenUsageService:
 
     async def get_summary(self) -> dict[str, Any]:
         """Aggregate stats: totals, today, this week, this month, estimated cost."""
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = today_start - timedelta(days=now.weekday())
         month_start = today_start.replace(day=1)

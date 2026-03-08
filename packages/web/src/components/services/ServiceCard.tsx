@@ -16,9 +16,10 @@ interface ServiceCardProps {
 }
 
 export function ServiceCard({ service, onClick }: ServiceCardProps) {
+  const denominator = service.invocation_count || service.event_count;
   const errorRate =
-    service.invocation_count > 0
-      ? ((service.error_count / service.invocation_count) * 100).toFixed(1)
+    denominator > 0
+      ? ((service.error_count / denominator) * 100).toFixed(1)
       : "0.0";
 
   const isHealthy = service.error_count === 0;

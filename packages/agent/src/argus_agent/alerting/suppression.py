@@ -6,18 +6,19 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import AlertAcknowledgment, AlertRuleMute
+from argus_agent.storage.repositories import get_session
+from argus_agent.tenancy.context import get_tenant_id
 
 logger = logging.getLogger("argus.alerting.suppression")
 
 
-def _ensure_utc(dt: datetime) -> datetime:
-    """Ensure a datetime is UTC-aware (SQLite returns naive datetimes)."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=UTC)
+def _ensure_naive(dt: datetime) -> datetime:
+    """Strip timezone info for consistent naive-UTC comparisons."""
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
     return dt
 
 
@@ -44,25 +45,51 @@ class SuppressionService:
             row = result.scalar_one_or_none()
 
             if row is None:
-                row = AlertAcknowledgment(
-                    dedup_key=dedup_key,
-                    rule_id=rule_id,
-                    source=source,
-                    acknowledged_by=acknowledged_by,
-                    reason=reason,
-                    expires_at=expires_at,
-                    active=True,
-                )
-                session.add(row)
+                try:
+                    row = AlertAcknowledgment(
+                        tenant_id=get_tenant_id(),
+                        dedup_key=dedup_key,
+                        rule_id=rule_id,
+                        source=source,
+                        acknowledged_by=acknowledged_by,
+                        reason=reason,
+                        expires_at=expires_at,
+                        active=True,
+                    )
+                    session.add(row)
+                    await session.commit()
+                except Exception:
+                    # Row exists but RLS hid it from SELECT —
+                    # fall back to a raw UPDATE that bypasses ORM.
+                    await session.rollback()
+                    await session.execute(
+                        update(AlertAcknowledgment)
+                        .where(AlertAcknowledgment.dedup_key == dedup_key)
+                        .values(
+                            acknowledged_by=acknowledged_by,
+                            reason=reason,
+                            expires_at=expires_at,
+                            active=True,
+                        )
+                    )
+                    await session.commit()
             else:
                 row.acknowledged_by = acknowledged_by
                 row.reason = reason
                 row.expires_at = expires_at
                 row.active = True
+                await session.commit()
 
-            await session.commit()
-            await session.refresh(row)
-            return self._ack_to_dict(row)
+            # Re-fetch to return current state
+            result = await session.execute(
+                select(AlertAcknowledgment).where(
+                    AlertAcknowledgment.dedup_key == dedup_key,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row:
+                return self._ack_to_dict(row)
+            return {"dedup_key": dedup_key, "active": True}
 
     async def unacknowledge(self, dedup_key: str) -> bool:
         """Deactivate an acknowledgment."""
@@ -81,7 +108,7 @@ class SuppressionService:
 
     async def get_active_acknowledgments(self) -> list[dict[str, Any]]:
         """Return all active acknowledgments, auto-expiring stale ones."""
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         async with get_session() as session:
             stmt = select(AlertAcknowledgment).where(
                 AlertAcknowledgment.active.is_(True),
@@ -91,7 +118,7 @@ class SuppressionService:
 
             active = []
             for row in rows:
-                if row.expires_at is not None and now >= _ensure_utc(row.expires_at):
+                if row.expires_at is not None and now >= _ensure_naive(row.expires_at):
                     row.active = False
                     continue
                 active.append(self._ack_to_dict(row))
@@ -119,10 +146,11 @@ class SuppressionService:
 
             if row is None:
                 row = AlertRuleMute(
+                    tenant_id=get_tenant_id(),
                     rule_id=rule_id,
                     muted_by=muted_by,
                     reason=reason,
-                    expires_at=expires_at or datetime.now(UTC),
+                    expires_at=expires_at or datetime.now(UTC).replace(tzinfo=None),
                     active=True,
                 )
                 session.add(row)
@@ -153,7 +181,7 @@ class SuppressionService:
 
     async def get_active_mutes(self) -> list[dict[str, Any]]:
         """Return all active rule mutes, auto-expiring stale ones."""
-        now = datetime.now(UTC)
+        now = datetime.now(UTC).replace(tzinfo=None)
         async with get_session() as session:
             stmt = select(AlertRuleMute).where(
                 AlertRuleMute.active.is_(True),
@@ -163,7 +191,7 @@ class SuppressionService:
 
             active = []
             for row in rows:
-                if now >= _ensure_utc(row.expires_at):
+                if now >= _ensure_naive(row.expires_at):
                     row.active = False
                     continue
                 active.append(self._mute_to_dict(row))
@@ -184,12 +212,12 @@ class SuppressionService:
         for ack in acks:
             expires = None
             if ack["expires_at"]:
-                expires = _ensure_utc(datetime.fromisoformat(ack["expires_at"]))
+                expires = _ensure_naive(datetime.fromisoformat(ack["expires_at"]))
             engine._acknowledged_keys[ack["dedup_key"]] = expires
 
         mutes = await self.get_active_mutes()
         for mute in mutes:
-            expires = _ensure_utc(datetime.fromisoformat(mute["expires_at"]))
+            expires = _ensure_naive(datetime.fromisoformat(mute["expires_at"]))
             engine._muted_rules[mute["rule_id"]] = expires
 
         logger.info(

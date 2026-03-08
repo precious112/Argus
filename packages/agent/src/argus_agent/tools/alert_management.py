@@ -64,7 +64,7 @@ class AcknowledgeAlertTool(Tool):
         expires_hours = float(kwargs.get("expires_hours", 24))
         reason = kwargs.get("reason", "")
 
-        expires_at = datetime.now(UTC) + timedelta(hours=expires_hours)
+        expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=expires_hours)
 
         success = engine.acknowledge_alert(
             alert_id, acknowledged_by="ai", expires_at=expires_at,
@@ -146,7 +146,7 @@ class MuteAlertRuleTool(Tool):
         duration_hours = min(float(kwargs.get("duration_hours", 24)), 168)
         reason = kwargs.get("reason", "")
 
-        expires_at = datetime.now(UTC) + timedelta(hours=duration_hours)
+        expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=duration_hours)
         success = engine.mute_rule(rule_id, expires_at)
         if not success:
             return {"error": f"Rule {rule_id} not found"}

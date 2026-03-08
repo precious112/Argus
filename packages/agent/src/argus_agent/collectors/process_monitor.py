@@ -20,6 +20,7 @@ class ProcessMonitor:
 
     Detects: service crashes, restart loops, new processes, OOM kills.
     Tracks top processes by CPU and memory usage.
+    In SaaS mode, process data is collected via webhooks.
     """
 
     def __init__(self, interval: int | None = None) -> None:
@@ -27,6 +28,7 @@ class ProcessMonitor:
         self._interval = interval or settings.collector.process_interval
         self._running = False
         self._task: asyncio.Task[None] | None = None
+        self._is_saas = settings.deployment.mode == "saas"
 
         # State tracking
         self._known_pids: set[int] = set()
@@ -39,10 +41,14 @@ class ProcessMonitor:
         if self._running:
             return
         self._running = True
-        # Seed known PIDs on first run
-        self._known_pids = {p.pid for p in psutil.process_iter()}
+        # Seed known PIDs on first run (skip in SaaS mode — no local processes)
+        if not self._is_saas:
+            self._known_pids = {p.pid for p in psutil.process_iter()}
         self._task = asyncio.create_task(self._monitor_loop())
-        logger.info("Process monitor started (interval=%ds)", self._interval)
+        logger.info(
+            "Process monitor started (interval=%ds, saas=%s)",
+            self._interval, self._is_saas,
+        )
 
     async def stop(self) -> None:
         """Stop monitoring."""
@@ -71,6 +77,9 @@ class ProcessMonitor:
 
     async def check_once(self) -> dict[str, Any]:
         """Run one process check and return a snapshot."""
+        if self._is_saas:
+            return await self._check_remote()
+
         bus = get_event_bus()
         current_pids: set[int] = set()
         processes: list[dict[str, Any]] = []
@@ -100,9 +109,7 @@ class ProcessMonitor:
         # Detect disappeared processes (potential crashes)
         disappeared = self._known_pids - current_pids
         if disappeared and self._known_pids:
-            # Only flag if we have a previous baseline
             for pid in disappeared:
-                # We don't have the name anymore, just note it
                 pass
 
         # Detect restart loops by name
@@ -112,15 +119,11 @@ class ProcessMonitor:
             if name not in self._process_names:
                 self._process_names[name] = []
 
-            # Check if this is a recent start (create_time-based detection isn't
-            # reliable across platforms, so we track appearance)
             if proc_info["pid"] not in self._known_pids:
                 self._process_names[name].append(loop_time)
-                # Trim old entries
                 self._process_names[name] = [
                     t for t in self._process_names[name] if loop_time - t < self._restart_window
                 ]
-                # Check for restart loop
                 if len(self._process_names[name]) >= self._restart_threshold:
                     await bus.publish(
                         Event(
@@ -154,6 +157,86 @@ class ProcessMonitor:
         return {
             "total": len(processes),
             "processes": processes,
+        }
+
+    async def _check_remote(self) -> dict[str, Any]:
+        """SaaS mode: collect process data via webhooks."""
+        from argus_agent.collectors.remote import execute_remote_tool, get_webhook_tenants
+
+        bus = get_event_bus()
+        tenants = await get_webhook_tenants()
+        if not tenants:
+            return {"total": 0, "processes": []}
+
+        all_processes: list[dict[str, Any]] = []
+        loop_time = asyncio.get_event_loop().time()
+
+        for t in tenants:
+            result = await execute_remote_tool(t["tenant_id"], "process_list", {"limit": 100})
+            if not result:
+                continue
+
+            current_pids: set[int] = set()
+            for proc in result.get("processes", []):
+                pid = proc.get("pid", 0)
+                name = proc.get("name", "")
+                current_pids.add(pid)
+                all_processes.append({
+                    "pid": pid,
+                    "name": name,
+                    "status": proc.get("status", ""),
+                    "cpu_percent": proc.get("cpu_percent", 0.0) or 0.0,
+                    "memory_percent": proc.get("memory_percent", 0.0) or 0.0,
+                    "tenant_id": t["tenant_id"],
+                })
+
+                # Restart loop detection by name
+                if name not in self._process_names:
+                    self._process_names[name] = []
+
+                if pid not in self._known_pids:
+                    self._process_names[name].append(loop_time)
+                    self._process_names[name] = [
+                        ts for ts in self._process_names[name]
+                        if loop_time - ts < self._restart_window
+                    ]
+                    if len(self._process_names[name]) >= self._restart_threshold:
+                        await bus.publish(
+                            Event(
+                                source=EventSource.PROCESS_MONITOR,
+                                type=EventType.PROCESS_RESTART_LOOP,
+                                severity=EventSeverity.NOTABLE,
+                                message=f"Process '{name}' restarted "
+                                f"{len(self._process_names[name])} times in "
+                                f"{self._restart_window}s (tenant {t['tenant_id']})",
+                                data={
+                                    "name": name,
+                                    "restarts": len(self._process_names[name]),
+                                    "tenant_id": t["tenant_id"],
+                                },
+                            )
+                        )
+
+            self._known_pids = current_pids
+
+        # Sort by CPU usage
+        all_processes.sort(key=lambda p: p.get("cpu_percent", 0), reverse=True)
+
+        # Emit snapshot event
+        await bus.publish(
+            Event(
+                source=EventSource.PROCESS_MONITOR,
+                type=EventType.PROCESS_SNAPSHOT,
+                data={
+                    "total": len(all_processes),
+                    "top_cpu": all_processes[:10],
+                },
+            )
+        )
+
+        return {
+            "total": len(all_processes),
+            "processes": all_processes,
         }
 
 

@@ -10,8 +10,8 @@ from typing import Any
 from sqlalchemy import select
 
 from argus_agent.config import AlertConfig
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import NotificationChannelConfig
+from argus_agent.storage.repositories import get_session
 
 logger = logging.getLogger("argus.alerting.settings")
 
@@ -71,8 +71,11 @@ class NotificationSettingsService:
             row = result.scalar_one_or_none()
 
             if row is None:
+                from argus_agent.tenancy.context import get_tenant_id
+
                 row = NotificationChannelConfig(
                     id=str(uuid.uuid4()),
+                    tenant_id=get_tenant_id(),
                     channel_type=channel_type,
                     enabled=enabled,
                     config=config,

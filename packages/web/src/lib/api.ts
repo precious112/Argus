@@ -15,6 +15,8 @@ export async function apiFetch(
 
   if (res.status === 401 && typeof window !== "undefined") {
     window.location.href = "/login";
+    // Throw so calling code stops rendering with stale/empty data
+    throw new Error("Unauthorized — redirecting to login");
   }
 
   return res;

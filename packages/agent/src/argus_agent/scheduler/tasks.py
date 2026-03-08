@@ -12,7 +12,7 @@ import psutil
 from argus_agent.events.bus import get_event_bus
 from argus_agent.events.classifier import EventClassifier
 from argus_agent.events.types import Event, EventSeverity, EventSource, EventType
-from argus_agent.storage.timeseries import query_metrics, query_metrics_summary
+from argus_agent.storage.repositories import get_metrics_repository
 
 logger = logging.getLogger("argus.scheduler.tasks")
 
@@ -25,6 +25,11 @@ async def quick_health_check() -> None:
     Zero LLM cost. Checks CPU, memory, disk, and load against thresholds.
     Emits events for anything abnormal.
     """
+    from argus_agent.config import get_settings
+    if get_settings().deployment.mode == "saas":
+        await _remote_health_check()
+        return
+
     bus = get_event_bus()
     findings: list[str] = []
 
@@ -90,6 +95,84 @@ async def quick_health_check() -> None:
         )
 
 
+async def _remote_health_check() -> None:
+    """SaaS mode: health check via webhooks to tenant hosts."""
+    from argus_agent.collectors.remote import execute_remote_tool, get_webhook_tenants
+
+    bus = get_event_bus()
+    tenants = await get_webhook_tenants()
+    if not tenants:
+        await bus.publish(
+            Event(
+                source=EventSource.SCHEDULER,
+                type=EventType.HEALTH_CHECK,
+                message="No webhook tenants configured",
+            )
+        )
+        return
+
+    for t in tenants:
+        findings: list[str] = []
+        result = await execute_remote_tool(t["tenant_id"], "system_metrics", {})
+        if not result:
+            findings.append(f"WARNING: Could not reach tenant {t['tenant_id']}")
+        else:
+            cpu = result.get("cpu_percent", 0)
+            if cpu > 95:
+                findings.append(f"CRITICAL: CPU at {cpu}%")
+            elif cpu > 80:
+                findings.append(f"WARNING: CPU at {cpu}%")
+
+            mem = result.get("memory", {})
+            mem_pct = mem.get("percent", 0) if isinstance(mem, dict) else 0
+            if mem_pct > 95:
+                findings.append(f"CRITICAL: Memory at {mem_pct}%")
+            elif mem_pct > 85:
+                findings.append(f"WARNING: Memory at {mem_pct}%")
+
+            disk = result.get("disk", {})
+            disk_pct = disk.get("percent", 0) if isinstance(disk, dict) else 0
+            if disk_pct > 95:
+                findings.append(f"CRITICAL: Disk at {disk_pct}%")
+            elif disk_pct > 85:
+                findings.append(f"WARNING: Disk at {disk_pct}%")
+
+            load_avg = result.get("load_avg", [])
+            if isinstance(load_avg, list) and load_avg:
+                load1 = float(load_avg[0])
+                # Estimate CPU count from memory/disk presence (assume at least 1)
+                load_per_cpu = load1
+                if load_per_cpu > 3.0:
+                    findings.append(f"CRITICAL: Load at {load1:.2f}")
+                elif load_per_cpu > 1.5:
+                    findings.append(f"WARNING: Load at {load1:.2f}")
+
+        if findings:
+            severity = (
+                EventSeverity.URGENT
+                if any("CRITICAL" in f for f in findings)
+                else EventSeverity.NOTABLE
+            )
+            await bus.publish(
+                Event(
+                    source=EventSource.SCHEDULER,
+                    type=EventType.HEALTH_CHECK,
+                    severity=severity,
+                    message=f"[tenant {t['tenant_id']}] " + "; ".join(findings),
+                    data={"findings": findings, "tenant_id": t["tenant_id"]},
+                )
+            )
+        else:
+            await bus.publish(
+                Event(
+                    source=EventSource.SCHEDULER,
+                    type=EventType.HEALTH_CHECK,
+                    message=f"[tenant {t['tenant_id']}] All systems normal",
+                    data={"tenant_id": t["tenant_id"]},
+                )
+            )
+
+
 async def trend_analysis() -> None:
     """Tier 2: Statistical trend analysis (every 30 min).
 
@@ -99,13 +182,14 @@ async def trend_analysis() -> None:
     bus = get_event_bus()
     now = datetime.now(UTC)
     findings: list[dict[str, Any]] = []
+    repo = get_metrics_repository()
 
     key_metrics = ["cpu_percent", "memory_percent", "disk_percent"]
     for metric_name in key_metrics:
         # 24h baseline
-        baseline = query_metrics_summary(metric_name, since=now - timedelta(hours=24))
+        baseline = repo.query_metrics_summary(metric_name, since=now - timedelta(hours=24))
         # Last 30 min
-        recent = query_metrics_summary(metric_name, since=now - timedelta(minutes=30))
+        recent = repo.query_metrics_summary(metric_name, since=now - timedelta(minutes=30))
 
         if baseline.get("count", 0) < 10 or recent.get("count", 0) < 2:
             continue
@@ -129,7 +213,7 @@ async def trend_analysis() -> None:
             )
 
     # Check for rapid disk usage growth
-    disk_data = query_metrics(
+    disk_data = repo.query_metrics(
         "disk_percent",
         since=now - timedelta(hours=6),
         limit=500,

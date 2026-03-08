@@ -21,8 +21,8 @@ def client():
 
 class TestIngestEndpoint:
     def test_ingest_batch(self, client):
-        with patch("argus_agent.storage.timeseries.get_connection") as mock_conn:
-            mock_conn.return_value.execute = MagicMock()
+        mock_repo = MagicMock()
+        with patch("argus_agent.storage.repositories.get_metrics_repository", return_value=mock_repo):
             resp = client.post("/api/v1/ingest", json={
                 "events": [
                     {"type": "log", "service": "test-app", "data": {"message": "hello"}},
@@ -36,8 +36,8 @@ class TestIngestEndpoint:
             assert data["accepted"] == 2
 
     def test_ingest_empty_batch(self, client):
-        with patch("argus_agent.storage.timeseries.get_connection") as mock_conn:
-            mock_conn.return_value.execute = MagicMock()
+        mock_repo = MagicMock()
+        with patch("argus_agent.storage.repositories.get_metrics_repository", return_value=mock_repo):
             resp = client.post("/api/v1/ingest", json={
                 "events": [],
                 "sdk": "argus-python/0.1.0",
@@ -54,8 +54,8 @@ class TestIngestEndpoint:
         assert resp.status_code == 400
 
     def test_ingest_with_exception_event(self, client):
-        with patch("argus_agent.storage.timeseries.get_connection") as mock_conn:
-            mock_conn.return_value.execute = MagicMock()
+        mock_repo = MagicMock()
+        with patch("argus_agent.storage.repositories.get_metrics_repository", return_value=mock_repo):
             with patch("argus_agent.events.bus.get_event_bus") as mock_bus:
                 mock_bus.return_value.publish = MagicMock()
                 resp = client.post("/api/v1/ingest", json={
@@ -72,8 +72,7 @@ class TestIngestEndpoint:
                 assert resp.status_code == 200
 
     def test_ingest_duckdb_not_initialized(self, client):
-        patch_path = "argus_agent.storage.timeseries.get_connection"
-        with patch(patch_path, side_effect=RuntimeError("not init")):
+        with patch("argus_agent.storage.repositories.get_metrics_repository", side_effect=RuntimeError("not init")):
             resp = client.post("/api/v1/ingest", json={
                 "events": [{"type": "log", "data": {}}],
                 "sdk": "test",
@@ -96,8 +95,8 @@ class TestIngestEndpoint:
         assert batch.sdk == "test/0.1.0"
 
     def test_ingest_with_api_key_header(self, client):
-        with patch("argus_agent.storage.timeseries.get_connection") as mock_conn:
-            mock_conn.return_value.execute = MagicMock()
+        mock_repo = MagicMock()
+        with patch("argus_agent.storage.repositories.get_metrics_repository", return_value=mock_repo):
             resp = client.post(
                 "/api/v1/ingest",
                 json={"events": [{"type": "log", "data": {}}], "sdk": "test"},

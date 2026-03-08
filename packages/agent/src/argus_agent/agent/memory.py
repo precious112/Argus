@@ -7,8 +7,9 @@ import logging
 import uuid
 
 from argus_agent.llm.base import LLMMessage
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import Conversation, Message
+from argus_agent.storage.repositories import get_operational_repository
+from argus_agent.tenancy.context import get_tenant_id
 
 logger = logging.getLogger("argus.agent.memory")
 
@@ -25,16 +26,18 @@ class ConversationMemory:
         self.source = source
         self.messages: list[LLMMessage] = []
         self._persisted = False
+        self._loaded_count = 0  # Track how many messages were loaded from DB
 
     async def persist_conversation(self, title: str = "") -> None:
         """Create conversation record in the database."""
         if self._persisted:
             return
-        async with get_session() as session:
+        async with get_operational_repository().get_session() as session:
             conv = Conversation(
                 id=self.conversation_id,
                 title=title or "New conversation",
                 source=self.source,
+                tenant_id=get_tenant_id(),
             )
             session.add(conv)
             await session.commit()
@@ -50,7 +53,7 @@ class ConversationMemory:
     ) -> str:
         """Persist a single message to the database."""
         msg_id = str(uuid.uuid4())
-        async with get_session() as session:
+        async with get_operational_repository().get_session() as session:
             msg = Message(
                 id=msg_id,
                 conversation_id=self.conversation_id,
@@ -59,10 +62,53 @@ class ConversationMemory:
                 tool_calls=tool_calls,
                 tool_result=tool_result,
                 token_count=token_count,
+                tenant_id=get_tenant_id(),
             )
             session.add(msg)
             await session.commit()
         return msg_id
+
+    async def load_history(self) -> None:
+        """Load prior messages from the database into memory."""
+        from sqlalchemy import select
+
+        from argus_agent.storage.repositories import get_session
+
+        try:
+            async with get_session() as session:
+                result = await session.execute(
+                    select(Message)
+                    .where(Message.conversation_id == self.conversation_id)
+                    .order_by(Message.created_at)
+                )
+                rows = result.scalars().all()
+
+            for row in rows:
+                if row.role == "user":
+                    self.messages.append(LLMMessage(role="user", content=row.content))
+                elif row.role == "assistant":
+                    self.messages.append(LLMMessage(
+                        role="assistant",
+                        content=row.content,
+                        tool_calls=row.tool_calls or [],
+                    ))
+                elif row.role == "tool":
+                    self.messages.append(LLMMessage(
+                        role="tool",
+                        content=row.content,
+                        tool_call_id=row.id,
+                        name="",
+                    ))
+
+            self._loaded_count = len(self.messages)
+            if rows:
+                self._persisted = True
+                logger.debug(
+                    "Loaded %d prior messages for conversation %s",
+                    len(rows), self.conversation_id,
+                )
+        except Exception:
+            logger.debug("Could not load conversation history", exc_info=True)
 
     def add_user_message(self, content: str) -> None:
         """Add a user message to the conversation."""

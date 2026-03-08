@@ -160,6 +160,16 @@ def flush_sync() -> None:
         _client.flush_sync()
 
 
+def get_webhook_handler(
+    webhook_secret: str,
+    tools: dict[str, Any] | None = None,
+) -> "ArgusWebhookHandler":
+    """Create an ArgusWebhookHandler for receiving tool execution requests."""
+    from argus.webhook import ArgusWebhookHandler
+
+    return ArgusWebhookHandler(webhook_secret=webhook_secret, tools=tools)
+
+
 def shutdown() -> None:
     """Flush and close the SDK client."""
     global _client

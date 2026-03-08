@@ -95,17 +95,7 @@ class SDKTelemetryCollector:
 
         current_services = {s["service"] for s in summaries}
 
-        # Detect services that went silent
-        for svc in self._known_services - current_services:
-            if svc in self._known_services:
-                await bus.publish(Event(
-                    source=EventSource.SDK_TELEMETRY,
-                    type=EventType.SDK_SERVICE_SILENT,
-                    severity=EventSeverity.NOTABLE,
-                    message=f"Service '{svc}' has stopped sending telemetry",
-                    data={"service": svc},
-                ))
-
+        # NOTE: silence detection moved to HeartbeatMonitor (DB-seeded, survives restarts)
         self._known_services = current_services
 
         # Analyze each service

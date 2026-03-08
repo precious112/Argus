@@ -58,6 +58,8 @@ class WebSocketChannel(NotificationChannel):
 
     async def send(self, alert: Any, event: Any) -> bool:
         try:
+            from argus_agent.tenancy.context import get_tenant_id
+
             msg = ServerMessage(
                 type=ServerMessageType.ALERT,
                 data=AlertMessage(
@@ -69,7 +71,7 @@ class WebSocketChannel(NotificationChannel):
                     timestamp=alert.timestamp,
                 ).model_dump(mode="json"),
             )
-            await self._manager.broadcast(msg)
+            await self._manager.broadcast(msg, tenant_id=get_tenant_id())
             return True
         except Exception:
             logger.exception("WebSocket alert broadcast failed")
@@ -414,6 +416,110 @@ class SlackChannel(NotificationChannel):
             text="Argus test notification — Slack channel connected successfully.",
         )
         return {"ok": True, "team": auth["team"], "bot": auth["user"]}
+
+
+class PlatformEmailChannel(NotificationChannel):
+    """SaaS platform email alerts — sends to users who opted in via Resend API."""
+
+    def __init__(self, tenant_id: str) -> None:
+        self._tenant_id = tenant_id
+
+    async def _get_opted_in_users(self) -> list[tuple[str, str]]:
+        """Return list of (user_id, email) for users with email_alerts_enabled."""
+        try:
+            from sqlalchemy import select
+
+            from argus_agent.storage.models import User
+            from argus_agent.storage.postgres_operational import get_raw_session
+            from argus_agent.storage.saas_models import TeamMember
+
+            raw = get_raw_session()
+            if not raw:
+                return []
+            async with raw as session:
+                result = await session.execute(
+                    select(User.id, User.email).where(
+                        User.email_alerts_enabled.is_(True),
+                        User.is_active.is_(True),
+                        User.email != "",
+                        User.id.in_(
+                            select(TeamMember.user_id).where(
+                                TeamMember.tenant_id == self._tenant_id
+                            )
+                        ),
+                    )
+                )
+                return [(row[0], row[1]) for row in result.all()]
+        except Exception:
+            logger.exception("Failed to query opted-in users for tenant %s", self._tenant_id)
+            return []
+
+    async def send(self, alert: Any, event: Any) -> bool:
+        users = await self._get_opted_in_users()
+        if not users:
+            return True
+
+        from argus_agent.auth.email import send_email
+
+        severity = str(alert.severity)
+        subject = f"[Argus {severity}] {alert.rule_name}"
+        message = event.message or "No details available"
+
+        html = EmailChannel._render_html(
+            rule_name=alert.rule_name,
+            severity=severity,
+            source=str(event.source),
+            event_type=str(event.type),
+            timestamp=alert.timestamp.isoformat(),
+            message=message,
+            alert_id=alert.id,
+        )
+
+        plain = (
+            f"Alert: {alert.rule_name}\n"
+            f"Severity: {severity}\n"
+            f"Source: {event.source}\n"
+            f"Time: {alert.timestamp.isoformat()}\n\n"
+            f"{message}"
+        )
+
+        success = True
+        for _uid, email in users:
+            try:
+                if not await send_email(email, subject, plain, html=html):
+                    success = False
+            except Exception:
+                logger.exception("Platform email failed for %s", email)
+                success = False
+        return success
+
+    async def send_investigation_report(
+        self, title: str, summary: str, *, channel_metadata: dict[str, str] | None = None,
+    ) -> bool:
+        users = await self._get_opted_in_users()
+        if not users:
+            return True
+
+        from argus_agent.auth.email import send_email
+
+        subject = f"[Argus] AI Investigation Report — {title}"
+        plain = f"AI Investigation Report — {title}\n\n{summary}"
+        html = (
+            "<html><body>"
+            f"<h2>AI Investigation Report — {title}</h2>"
+            f"<p style='white-space:pre-wrap;'>{summary}</p>"
+            "</body></html>"
+        )
+
+        success = True
+        for _uid, email in users:
+            try:
+                if not await send_email(email, subject, plain, html=html):
+                    success = False
+            except Exception:
+                logger.exception("Platform email investigation report failed for %s", email)
+                success = False
+        return success
 
 
 class EmailChannel(NotificationChannel):

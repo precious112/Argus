@@ -21,8 +21,12 @@ from argus_agent.api.rest import router as rest_router
 from argus_agent.api.ws import router as ws_router
 from argus_agent.auth.jwt import decode_access_token
 from argus_agent.config import ensure_secret_key, get_settings
-from argus_agent.storage.database import close_db, init_db
-from argus_agent.storage.timeseries import close_timeseries, init_timeseries
+from argus_agent.storage.duckdb_metrics import DuckDBMetricsRepository
+from argus_agent.storage.repositories import (
+    set_metrics_repository,
+    set_operational_repository,
+)
+from argus_agent.storage.sqlite_operational import SQLiteOperationalRepository
 
 logger = logging.getLogger("argus")
 
@@ -39,8 +43,11 @@ _anomaly_detector = None
 _investigator = None
 _action_engine = None
 _sdk_telemetry_collector = None
+_heartbeat_monitor = None
 _soak_runner = None
 _alert_formatter = None
+_distributed_manager = None
+_redis_event_bus = None
 
 
 def _get_collectors():
@@ -83,6 +90,11 @@ def _get_alert_formatter():
     return _alert_formatter
 
 
+def _get_distributed_manager():
+    """Get the distributed connection manager (SaaS mode only)."""
+    return _distributed_manager
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
@@ -90,8 +102,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _security_scanner, _alert_engine, _token_budget
     global _baseline_tracker, _anomaly_detector, _investigator, _action_engine
     global _sdk_telemetry_collector, _soak_runner, _alert_formatter
+    global _distributed_manager, _redis_event_bus
 
     settings = get_settings()
+
+    # Configure logging in the worker process (basicConfig in main() only
+    # runs in the parent; uvicorn workers need their own setup)
+    logging.basicConfig(
+        level=logging.DEBUG if settings.debug else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        force=True,
+    )
 
     # Ensure data directory exists
     Path(settings.storage.data_dir).mkdir(parents=True, exist_ok=True)
@@ -99,9 +120,67 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Auto-generate JWT secret key if still using the default
     ensure_secret_key(settings)
 
-    # Initialize databases
-    await init_db(settings.storage.sqlite_path)
-    init_timeseries(settings.storage.duckdb_path)
+    # Initialize license manager
+    from argus_agent.licensing import init_license_manager
+
+    lm = init_license_manager(settings.license.key)
+    logger.info(
+        "Argus edition: %s (%d features enabled)",
+        lm.edition.value,
+        len(lm.get_enabled_features()),
+    )
+
+    # Initialize databases via repository pattern
+    if settings.deployment.mode == "saas":
+        # PostgreSQL + TimescaleDB + Redis
+        from argus_agent.auth.key_cache import init_key_cache
+        from argus_agent.storage.postgres_operational import PostgresOperationalRepository
+        from argus_agent.storage.timescaledb_metrics import TimescaleDBMetricsRepository
+
+        operational_repo = PostgresOperationalRepository()
+        await operational_repo.init(settings.deployment.postgres_url)
+        set_operational_repository(operational_repo)
+
+        metrics_repo = TimescaleDBMetricsRepository()
+        metrics_repo.init(settings.deployment.timescale_url)
+        set_metrics_repository(metrics_repo)
+
+        await init_key_cache(settings.deployment.redis_url)
+
+        # Redis EventBus for cross-process event distribution
+        import redis.asyncio as aioredis
+
+        from argus_agent.events.bus import init_redis_event_bus
+
+        _redis_events_conn = aioredis.from_url(
+            settings.deployment.redis_url, decode_responses=True
+        )
+        _redis_event_bus = init_redis_event_bus(_redis_events_conn)
+        await _redis_event_bus.start()
+
+        # Distributed ConnectionManager for cross-pod broadcasts
+        from argus_agent.queue.distributed_manager import DistributedConnectionManager
+
+        _redis_broadcast_conn = aioredis.from_url(
+            settings.deployment.redis_url, decode_responses=True
+        )
+        from argus_agent.api.ws import manager as _local_manager
+
+        _distributed_manager = DistributedConnectionManager(
+            _local_manager, _redis_broadcast_conn
+        )
+        await _distributed_manager.start()
+
+        logger.info("SaaS mode: PostgreSQL + TimescaleDB + Redis initialized")
+    else:
+        # Self-hosted: SQLite + DuckDB (unchanged)
+        operational_repo = SQLiteOperationalRepository()
+        await operational_repo.init(settings.storage.sqlite_path)
+        set_operational_repository(operational_repo)
+
+        metrics_repo = DuckDBMetricsRepository()
+        metrics_repo.init(settings.storage.duckdb_path)
+        set_metrics_repository(metrics_repo)
 
     # Apply DB-persisted LLM settings (overrides env/YAML defaults)
     from argus_agent.llm.settings import LLMSettingsService
@@ -130,6 +209,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from argus_agent.alerting.formatter import AlertFormatter
     from argus_agent.api.ws import manager
 
+    # Use distributed manager for SaaS cross-pod broadcasts, local otherwise
+    ws_mgr = _distributed_manager if _distributed_manager else manager
+
     _alert_formatter = AlertFormatter(
         channels=[],
         batch_window=settings.alerting.batch_window,
@@ -139,7 +221,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     _investigator = Investigator(
         budget=_token_budget,
-        ws_manager=manager,
+        ws_manager=ws_mgr,
         formatter=_alert_formatter,
     )
     await _investigator.start()
@@ -147,7 +229,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 3b. Action engine
     from argus_agent.actions.engine import ActionEngine
 
-    _action_engine = ActionEngine(ws_manager=manager)
+    _action_engine = ActionEngine(ws_manager=ws_mgr)
 
     # 4. Alert engine with channels (DB-backed)
     from argus_agent.alerting.engine import AlertEngine
@@ -203,11 +285,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _sdk_telemetry_collector.anomaly_detector = _anomaly_detector
     await _sdk_telemetry_collector.start()
 
+    # Start heartbeat monitor (DB-seeded, survives restarts)
+    from argus_agent.collectors.heartbeat_monitor import HeartbeatMonitor
+
+    _heartbeat_monitor = HeartbeatMonitor()
+    await _heartbeat_monitor.start()
+
     # Start scheduler with periodic tasks
     from argus_agent.scheduler.scheduler import Scheduler
     from argus_agent.scheduler.tasks import (
         quick_health_check,
-        quick_security_check,
         trend_analysis,
     )
 
@@ -221,12 +308,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _make_baseline_update_task(_baseline_tracker),
             interval_seconds=21600,
         )
-        _scheduler.register(
-            "security_check",
-            quick_security_check,
-            interval_seconds=300,
-        )
-
     # SDK baseline update (both modes)
     _scheduler.register(
         "sdk_baseline_update",
@@ -234,16 +315,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         interval_seconds=21600,  # 6h
     )
 
-    _scheduler.register(
-        "ai_periodic_review",
-        _investigator.periodic_review,
-        interval_seconds=21600,  # 6h
-    )
-    _scheduler.register(
-        "ai_daily_digest",
-        _investigator.daily_digest,
-        interval_seconds=86400,  # 24h
-    )
+    if settings.deployment.mode == "saas":
+        _scheduler.register(
+            "ai_periodic_review",
+            _make_tenant_aware_task(_investigator.periodic_review),
+            interval_seconds=21600,  # 6h
+        )
+        _scheduler.register(
+            "ai_daily_digest",
+            _make_tenant_aware_task(_investigator.daily_digest),
+            interval_seconds=86400,  # 24h
+        )
+    else:
+        _scheduler.register(
+            "ai_periodic_review",
+            _investigator.periodic_review,
+            interval_seconds=21600,  # 6h
+        )
+        _scheduler.register(
+            "ai_daily_digest",
+            _investigator.daily_digest,
+            interval_seconds=86400,  # 24h
+        )
     await _scheduler.start()
 
     # Soak test runner (opt-in via ARGUS_SOAK_ENABLED=true)
@@ -277,6 +370,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _scheduler.stop()
     if _sdk_telemetry_collector:
         await _sdk_telemetry_collector.stop()
+    if _heartbeat_monitor:
+        await _heartbeat_monitor.stop()
     if _security_scanner:
         await _security_scanner.stop()
     if _log_watcher:
@@ -286,9 +381,50 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if _metrics_collector:
         await _metrics_collector.stop()
 
-    await close_db()
-    close_timeseries()
+    # Clean up Redis in SaaS mode
+    if settings.deployment.mode == "saas":
+        if _distributed_manager:
+            await _distributed_manager.stop()
+        if _redis_event_bus:
+            _redis_event_bus.stop()
+
+        from argus_agent.auth.key_cache import close_key_cache
+
+        await close_key_cache()
+
+    await operational_repo.close()
+    metrics_repo.close()
     logger.info("Argus agent server stopped")
+
+
+def _make_tenant_aware_task(coro_fn):
+    """Wrap a periodic task to run once per tenant in SaaS mode."""
+    async def _wrapper():
+        from sqlalchemy import select
+
+        from argus_agent.storage.postgres_operational import get_raw_session
+        from argus_agent.storage.saas_models import Tenant
+        from argus_agent.tenancy.context import set_tenant_id
+
+        try:
+            raw = get_raw_session()
+            if not raw:
+                return
+            async with raw as session:
+                result = await session.execute(select(Tenant.id))
+                tenant_ids = [row[0] for row in result.all()]
+        except Exception:
+            logger.warning("Could not list tenants for periodic task, skipping", exc_info=True)
+            return
+
+        for tid in tenant_ids:
+            try:
+                set_tenant_id(tid)
+                await coro_fn()
+            except Exception:
+                logger.warning("Periodic task failed for tenant %s", tid, exc_info=True)
+
+    return _wrapper
 
 
 def _make_baseline_update_task(tracker):
@@ -356,6 +492,18 @@ def _register_all_tools(*, is_sdk_only: bool = False) -> None:
 
         register_alert_management_tools()
 
+        # Pro tools — only when licensed
+        try:
+            from argus_agent.licensing import has_feature
+            from argus_agent.licensing.editions import Feature
+
+            if has_feature(Feature.ADVANCED_INTEGRATIONS):
+                from argus_agent.pro.tools import register_pro_tools
+
+                register_pro_tools()
+        except ImportError:
+            pass
+
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -371,7 +519,12 @@ def create_app() -> FastAPI:
     # CORS for web UI
     cors_env = os.environ.get("ARGUS_CORS_ORIGINS", "")
     origins = [o.strip() for o in cors_env.split(",") if o.strip()] if cors_env else []
-    origins += ["http://localhost:3000", "http://127.0.0.1:3000"]
+    origins += [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
@@ -384,12 +537,82 @@ def create_app() -> FastAPI:
     auth_exempt = {
         "/health",
         "/api/v1/health",
+        "/api/v1/license",
+        "/api/v1/deployment-info",
         "/api/v1/auth/login",
         "/api/v1/auth/logout",
+        "/api/v1/auth/register",
+        "/api/v1/auth/accept-invite",
+        "/api/v1/auth/accept-invite/validate",
+        "/api/v1/billing/plans",
+        "/api/v1/webhooks/polar",
+        "/api/v1/auth/forgot-password",
+        "/api/v1/auth/reset-password",
+        "/api/v1/auth/verify-email",
+        "/api/v1/integrations/slack/callback",
     }
     auth_exempt_prefixes = (
         "/api/v1/ingest",
+        "/api/v1/auth/oauth/",
     )
+
+    _user_cache_ttl = 60  # seconds
+
+    async def _verify_user_exists(user_id: str) -> bool:
+        """Check user still exists and is active, with Redis cache.
+
+        Only runs in SaaS mode — self-hosted skips verification.
+        """
+        if get_settings().deployment.mode != "saas":
+            return True
+
+        from argus_agent.auth.key_cache import _redis
+
+        # Check Redis cache first
+        if _redis is not None:
+            try:
+                cached = await _redis.get(f"user_active:{user_id}")
+                if cached == "1":
+                    return True
+                if cached == "0":
+                    return False
+            except Exception:
+                pass  # Redis down — fall through to DB
+
+        # DB lookup — use raw session (no RLS) because this runs before
+        # tenant context is set and the user must be visible cross-tenant.
+        try:
+            from sqlalchemy import select
+            from sqlalchemy.ext.asyncio import AsyncSession as RawSession
+
+            from argus_agent.storage.models import User
+            from argus_agent.storage.postgres_operational import _engine
+
+            if not _engine:
+                return False
+            async with RawSession(_engine, expire_on_commit=False) as session:
+                result = await session.execute(
+                    select(User.id).where(
+                        User.id == user_id,
+                        User.is_active.is_(True),
+                    )
+                )
+                exists = result.scalar_one_or_none() is not None
+        except Exception:
+            return False
+
+        # Write result to Redis
+        if _redis is not None:
+            try:
+                await _redis.setex(
+                    f"user_active:{user_id}",
+                    _user_cache_ttl,
+                    "1" if exists else "0",
+                )
+            except Exception:
+                pass
+
+        return exists
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -406,16 +629,78 @@ def create_app() -> FastAPI:
         if not token:
             return JSONResponse({"detail": "Not authenticated"}, status_code=401)
         try:
-            decode_access_token(token)
+            payload = decode_access_token(token)
         except Exception:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+        # Verify the user still exists and is active
+        user_id = payload.get("sub", "")
+        if not await _verify_user_exists(user_id):
+            response = JSONResponse(
+                {"detail": "User no longer exists"}, status_code=401,
+            )
+            response.delete_cookie("argus_token", path="/")
+            return response
+        request.state.user = payload
+        from argus_agent.tenancy.context import set_tenant_id
+        set_tenant_id(payload.get("tenant_id", "default"))
         return await call_next(request)
+
+    # Tenant context middleware
+    from argus_agent.tenancy.middleware import TenantMiddleware
+
+    settings = get_settings()
+    app.add_middleware(
+        TenantMiddleware,
+        is_saas=settings.deployment.mode == "saas",
+    )
 
     # API routes
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(rest_router, prefix="/api/v1")
     app.include_router(ws_router, prefix="/api/v1")
     app.include_router(ingest_router, prefix="/api/v1")
+
+    # SaaS-only routers
+    if settings.deployment.mode == "saas":
+        from argus_agent.api.billing import router as billing_router
+        from argus_agent.api.email_integration import router as email_integration_router
+        from argus_agent.api.investigations import router as investigations_router
+        from argus_agent.api.keys import router as keys_router
+        from argus_agent.api.llm_keys import router as llm_keys_router
+        from argus_agent.api.onboarding import router as onboarding_router
+        from argus_agent.api.registration import router as reg_router
+        from argus_agent.api.service_config import (
+            escalation_router,
+        )
+        from argus_agent.api.service_config import (
+            router as service_config_router,
+        )
+        from argus_agent.api.slack_integration import router as slack_integration_router
+        from argus_agent.api.team import (
+            accept_router,
+        )
+        from argus_agent.api.team import (
+            router as team_router,
+        )
+        from argus_agent.api.webhook_config import router as webhook_config_router
+        from argus_agent.api.webhooks import router as webhooks_router
+        from argus_agent.auth.oauth import router as oauth_router
+
+        app.include_router(reg_router, prefix="/api/v1")
+        app.include_router(team_router, prefix="/api/v1")
+        app.include_router(keys_router, prefix="/api/v1")
+        app.include_router(accept_router, prefix="/api/v1")
+        app.include_router(billing_router, prefix="/api/v1")
+        app.include_router(webhooks_router, prefix="/api/v1")
+        app.include_router(webhook_config_router, prefix="/api/v1")
+        app.include_router(oauth_router, prefix="/api/v1")
+        app.include_router(onboarding_router, prefix="/api/v1")
+        app.include_router(llm_keys_router, prefix="/api/v1")
+        app.include_router(service_config_router, prefix="/api/v1")
+        app.include_router(escalation_router, prefix="/api/v1")
+        app.include_router(investigations_router, prefix="/api/v1")
+        app.include_router(email_integration_router, prefix="/api/v1")
+        app.include_router(slack_integration_router, prefix="/api/v1")
 
     # Serve static web UI in production
     static_dir = Path(__file__).parent / "static"

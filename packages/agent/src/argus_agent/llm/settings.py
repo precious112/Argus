@@ -7,8 +7,8 @@ from typing import Any
 
 from sqlalchemy import select
 
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import AppConfig
+from argus_agent.storage.repositories import get_session
 
 logger = logging.getLogger("argus.llm.settings")
 
@@ -47,7 +47,9 @@ class LLMSettingsService:
                 row = result.scalar_one_or_none()
 
                 if row is None:
-                    row = AppConfig(key=db_key, value=str(value))
+                    from argus_agent.tenancy.context import get_tenant_id
+
+                    row = AppConfig(key=db_key, value=str(value), tenant_id=get_tenant_id())
                     session.add(row)
                 else:
                     row.value = str(value)

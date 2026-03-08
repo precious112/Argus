@@ -74,9 +74,9 @@ class FunctionMetricsTool(Tool):
         )
 
         try:
-            from argus_agent.storage.timeseries import query_function_metrics
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            buckets = query_function_metrics(
+            buckets = get_metrics_repository().query_function_metrics(
                 service=service,
                 function_name=function_name,
                 since_minutes=since_minutes,

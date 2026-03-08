@@ -5,26 +5,9 @@ from __future__ import annotations
 import uuid
 
 import click
-from sqlalchemy import create_engine, inspect, text
 
 from argus_agent.auth.password import hash_password
 from argus_agent.config import load_config
-
-
-def _ensure_users_table(engine) -> None:  # type: ignore[no-untyped-def]
-    """Create the users table if it doesn't exist."""
-    insp = inspect(engine)
-    if not insp.has_table("users"):
-        with engine.begin() as conn:
-            conn.execute(text(
-                "CREATE TABLE users ("
-                "  id VARCHAR(36) PRIMARY KEY,"
-                "  username VARCHAR(150) UNIQUE NOT NULL,"
-                "  password_hash VARCHAR(255) NOT NULL,"
-                "  is_active BOOLEAN DEFAULT 1,"
-                "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
-                ")"
-            ))
 
 
 @click.group()
@@ -43,32 +26,34 @@ def cli() -> None:
 )
 def create_user(username: str, password: str) -> None:
     """Create a new Argus user."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from argus_agent.storage.models import Base, User
+
     settings = load_config()
     db_url = f"sqlite:///{settings.storage.sqlite_path}"
     engine = create_engine(db_url)
 
-    _ensure_users_table(engine)
+    # Create all tables from the ORM models (no-op if they exist)
+    Base.metadata.create_all(engine)
 
-    user_id = str(uuid.uuid4())
     pw_hash = hash_password(password)
 
-    with engine.begin() as conn:
-        # Check if user already exists
-        result = conn.execute(
-            text("SELECT id FROM users WHERE username = :u"),
-            {"u": username},
-        )
-        if result.fetchone():
+    with Session(engine) as session:
+        existing = session.query(User).filter_by(username=username).first()
+        if existing:
             click.echo(f"Error: User '{username}' already exists.", err=True)
             raise SystemExit(1)
 
-        conn.execute(
-            text(
-                "INSERT INTO users (id, username, password_hash, is_active, created_at) "
-                "VALUES (:id, :username, :password_hash, 1, CURRENT_TIMESTAMP)"
-            ),
-            {"id": user_id, "username": username, "password_hash": pw_hash},
+        user = User(
+            id=str(uuid.uuid4()),
+            tenant_id="default",
+            username=username,
+            password_hash=pw_hash,
         )
+        session.add(user)
+        session.commit()
 
     click.echo(f"User '{username}' created successfully.")
 

@@ -42,4 +42,9 @@ alerting:
   webhook_urls: []
   email_enabled: false
 
+# License key for Pro/Enterprise features (open-core model).
+# Generate a key with the keygen utility or set ARGUS_LICENSE__KEY env var.
+# license:
+#   key: "eyJ..."
+
 debug: false

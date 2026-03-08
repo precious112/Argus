@@ -8,7 +8,7 @@ from typing import Any
 
 import psutil
 
-from argus_agent.storage.timeseries import query_metrics, query_metrics_summary
+from argus_agent.storage.repositories import get_metrics_repository
 from argus_agent.tools.base import Tool, ToolRisk
 
 logger = logging.getLogger("argus.tools.metrics")
@@ -89,15 +89,17 @@ class SystemMetricsTool(Tool):
 
             if metric == "all":
                 # Summary for key metrics
+                repo = get_metrics_repository()
                 result: dict[str, Any] = {"time_range": time_range, "metrics": {}}
                 for m in ("cpu_percent", "memory_percent", "disk_percent", "load_1m"):
-                    result["metrics"][m] = query_metrics_summary(m, since=since)
+                    result["metrics"][m] = repo.query_metrics_summary(m, since=since)
                 return result
 
+            repo = get_metrics_repository()
             data: dict[str, Any] = {"metric": metric, "time_range": time_range}
             if include_summary:
-                data["summary"] = query_metrics_summary(metric, since=since)
-            data["data_points"] = query_metrics(metric, since=since, limit=100)
+                data["summary"] = repo.query_metrics_summary(metric, since=since)
+            data["data_points"] = repo.query_metrics(metric, since=since, limit=100)
             data["display_type"] = "metrics_chart"
             return data
 

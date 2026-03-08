@@ -34,12 +34,56 @@ class IngestBatch(BaseModel):
     service: str = ""
 
 
+async def _validate_ingest_key(x_argus_key: str | None) -> None:
+    """Validate the API key in SaaS mode. No-op in self-hosted mode."""
+    from argus_agent.config import get_settings
+
+    settings = get_settings()
+    if settings.deployment.mode != "saas":
+        return  # Self-hosted: no key validation
+
+    if not x_argus_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
+    from argus_agent.auth.api_keys import hash_api_key, validate_api_key
+    from argus_agent.auth.key_cache import cache_key_result, get_cached_key
+    from argus_agent.tenancy.context import set_tenant_id
+
+    key_hash = hash_api_key(x_argus_key)
+
+    # Try cache first
+    cached = await get_cached_key(key_hash)
+    if cached is not None:
+        if cached.get("_invalid"):
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        set_tenant_id(cached["tenant_id"])
+        return
+
+    # Cache miss — check DB
+    result = await validate_api_key(x_argus_key)
+    await cache_key_result(key_hash, result)
+
+    if result is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    set_tenant_id(result["tenant_id"])
+
+
 @router.post("/ingest")
 async def ingest_telemetry(
     batch: IngestBatch,
     x_argus_key: str | None = Header(None),
 ) -> dict[str, Any]:
     """Receive batched telemetry events from SDKs."""
+    # Validate API key in SaaS mode (sets tenant context)
+    await _validate_ingest_key(x_argus_key)
+
+    # Enforce event quota in SaaS mode
+    from argus_agent.billing.usage_guard import check_event_ingest_limit
+    from argus_agent.tenancy.context import get_tenant_id
+
+    await check_event_ingest_limit(get_tenant_id(), batch_size=len(batch.events))
+
     if len(batch.events) > MAX_EVENTS_PER_BATCH:
         raise HTTPException(
             status_code=400,
@@ -50,20 +94,17 @@ async def ingest_telemetry(
     stored = 0
 
     try:
-        from argus_agent.storage.timeseries import get_connection
+        from argus_agent.storage.repositories import get_metrics_repository
 
-        conn = get_connection()
+        repo = get_metrics_repository()
         for ev in batch.events:
             ev_service = ev.service or service
 
             # Store in sdk_events for backward compatibility
-            conn.execute(
-                "INSERT INTO sdk_events VALUES (?, ?, ?, ?)",
-                [ev.timestamp, ev_service, ev.type, json.dumps(ev.data)],
-            )
+            repo.insert_sdk_event(ev.timestamp, ev_service, ev.type, json.dumps(ev.data))
 
             # Route to specialised Phase 1 tables
-            _route_event(conn, ev, ev_service)
+            _route_event(repo, ev, ev_service)
 
             stored += 1
     except RuntimeError:
@@ -71,6 +112,23 @@ async def ingest_telemetry(
         logger.warning("DuckDB not initialized, events dropped")
     except Exception:
         logger.exception("Failed to store SDK events")
+
+    # Increment unified event quota counter
+    try:
+        from argus_agent.billing.usage_guard import (
+            _billing_period_start,
+            _get_tenant_and_subscription,
+        )
+
+        tenant_id = get_tenant_id()
+        if tenant_id != "default" and stored > 0:
+            _, sub = await _get_tenant_and_subscription(tenant_id)
+            period_start = _billing_period_start(sub)
+            from argus_agent.storage.repositories import get_metrics_repository as _get_repo
+
+            _get_repo().increment_event_quota(tenant_id, period_start, stored)
+    except Exception:
+        logger.debug("Failed to increment event quota counter")
 
     # Classify error events through the event bus
     try:
@@ -107,7 +165,7 @@ async def ingest_telemetry(
 
 
 def _route_event(
-    conn: Any,
+    repo: Any,
     ev: TelemetryEvent,
     service: str,
 ) -> None:
@@ -115,71 +173,57 @@ def _route_event(
     d = ev.data
 
     if ev.type == "span":
-        conn.execute(
-            "INSERT INTO spans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                ev.timestamp,
-                d.get("trace_id", ""),
-                d.get("span_id", ""),
-                d.get("parent_span_id"),
-                service,
-                d.get("name", ""),
-                d.get("kind", "internal"),
-                d.get("duration_ms"),
-                d.get("status", "ok"),
-                d.get("error_type"),
-                d.get("error_message"),
-                json.dumps(d),
-            ],
+        repo.insert_span(
+            trace_id=d.get("trace_id", ""),
+            span_id=d.get("span_id", ""),
+            service=service,
+            name=d.get("name", ""),
+            kind=d.get("kind", "internal"),
+            parent_span_id=d.get("parent_span_id"),
+            duration_ms=d.get("duration_ms"),
+            status=d.get("status", "ok"),
+            error_type=d.get("error_type"),
+            error_message=d.get("error_message"),
+            data=d,
+            timestamp=ev.timestamp,
         )
 
     elif ev.type == "dependency":
-        conn.execute(
-            "INSERT INTO dependency_calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                ev.timestamp,
-                d.get("trace_id"),
-                d.get("span_id"),
-                d.get("parent_span_id"),
-                service,
-                d.get("dep_type", "unknown"),
-                d.get("target", ""),
-                d.get("operation", ""),
-                d.get("duration_ms"),
-                d.get("status", "ok"),
-                d.get("status_code"),
-                d.get("error_message"),
-                json.dumps(d),
-            ],
+        repo.insert_dependency_call(
+            service=service,
+            dep_type=d.get("dep_type", "unknown"),
+            target=d.get("target", ""),
+            trace_id=d.get("trace_id"),
+            span_id=d.get("span_id"),
+            parent_span_id=d.get("parent_span_id"),
+            operation=d.get("operation", ""),
+            duration_ms=d.get("duration_ms"),
+            status=d.get("status", "ok"),
+            status_code=d.get("status_code"),
+            error_message=d.get("error_message"),
+            data=d,
+            timestamp=ev.timestamp,
         )
 
     elif ev.type == "runtime_metric":
-        conn.execute(
-            "INSERT INTO sdk_metrics VALUES (?, ?, ?, ?, ?)",
-            [
-                ev.timestamp,
-                service,
-                d.get("metric_name", ""),
-                d.get("value", 0),
-                json.dumps(d.get("labels", {})),
-            ],
+        repo.insert_sdk_metric(
+            service=service,
+            metric_name=d.get("metric_name", ""),
+            value=d.get("value", 0),
+            labels=d.get("labels", {}),
+            timestamp=ev.timestamp,
         )
 
     elif ev.type == "deploy":
-        from argus_agent.storage.timeseries import get_previous_deploy_version
-
-        prev = get_previous_deploy_version(service)
-        conn.execute(
-            "INSERT INTO deploy_events VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                ev.timestamp,
-                service,
-                d.get("version", ""),
-                d.get("git_sha", ""),
-                d.get("environment", ""),
-                prev or "",
-                json.dumps(d),
-            ],
+        prev = repo.get_previous_deploy_version(service)
+        repo.insert_deploy_event(
+            service=service,
+            version=d.get("version", ""),
+            git_sha=d.get("git_sha", ""),
+            environment=d.get("environment", ""),
+            previous_version=prev or "",
+            data=d,
+            timestamp=ev.timestamp,
         )
 
 

@@ -50,9 +50,9 @@ class TraceTimelineTool(Tool):
 
         limit = 200
         try:
-            from argus_agent.storage.timeseries import query_trace
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            spans = query_trace(trace_id, limit=limit)
+            spans = get_metrics_repository().query_trace(trace_id, limit=limit)
         except RuntimeError:
             return {"error": "Time-series store not initialized", "spans": []}
 
@@ -140,13 +140,14 @@ class SlowTraceAnalysisTool(Tool):
         )
 
         try:
-            from argus_agent.storage.timeseries import query_slow_spans, query_trace_summary
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            slow = query_slow_spans(
+            repo = get_metrics_repository()
+            slow = repo.query_slow_spans(
                 service=service, since_minutes=since_minutes, limit=limit,
                 since_dt=since_dt, until_dt=until_dt,
             )
-            summary = query_trace_summary(
+            summary = repo.query_trace_summary(
                 service=service, since_minutes=since_minutes,
                 since_dt=since_dt, until_dt=until_dt,
             )
@@ -223,9 +224,9 @@ class RequestMetricsTool(Tool):
             kwargs.get("since_minutes", 60), kwargs.get("since"), kwargs.get("until"),
         )
         try:
-            from argus_agent.storage.timeseries import query_request_metrics
+            from argus_agent.storage.repositories import get_metrics_repository
 
-            buckets = query_request_metrics(
+            buckets = get_metrics_repository().query_request_metrics(
                 service=kwargs.get("service", ""),
                 path=kwargs.get("path", ""),
                 method=kwargs.get("method", ""),

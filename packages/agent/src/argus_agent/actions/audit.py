@@ -7,8 +7,8 @@ from typing import Any
 
 from sqlalchemy import select
 
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import AuditLog
+from argus_agent.storage.repositories import get_session
 
 logger = logging.getLogger("argus.actions.audit")
 
@@ -27,8 +27,11 @@ class AuditLogger:
         conversation_id: str = "",
     ) -> int:
         """Log an action to the audit trail. Returns the entry ID."""
+        from argus_agent.tenancy.context import get_tenant_id
+
         async with get_session() as session:
             entry = AuditLog(
+                tenant_id=get_tenant_id(),
                 action=action,
                 command=command,
                 result=result,

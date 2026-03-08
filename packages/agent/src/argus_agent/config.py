@@ -74,6 +74,50 @@ class SecurityConfig(BaseModel):
     lockout_minutes: int = 15
 
 
+class LicenseConfig(BaseModel):
+    """License key configuration for open-core feature gating."""
+
+    key: str = ""
+
+
+class DeploymentConfig(BaseModel):
+    """Deployment mode configuration for SaaS vs self-hosted."""
+
+    mode: str = "self_hosted"  # "self_hosted" | "saas"
+    redis_url: str = ""
+    postgres_url: str = ""
+    timescale_url: str = ""
+    polar_access_token: str = ""
+    polar_server: str = ""  # "sandbox" or "production" (default: production)
+    polar_webhook_secret: str = ""
+    polar_teams_product_id: str = ""
+    polar_teams_annual_product_id: str = ""
+    polar_business_product_id: str = ""
+    polar_business_annual_product_id: str = ""
+    polar_payg_meter_id: str = ""  # deprecated — replaced by prepaid credits
+    polar_payg_credits_product_id: str = ""
+    payg_rate_cents_per_1k: int = 30  # $0.30 per 1K events
+    stripe_secret_key: str = ""
+    billing_provider: str = "polar"  # "polar" | "stripe"
+    smtp_url: str = ""
+    frontend_url: str = "http://localhost:3000"
+    # External API base URL (for Slack OAuth callback, Polar webhooks, etc.)
+    # If empty, falls back to frontend_url.
+    api_base_url: str = ""
+    # OAuth providers (leave empty to disable)
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    # Resend API (SaaS email transport, falls back to SMTP)
+    resend_api_key: str = ""
+    email_from: str = "Argus <noreply@argus.dev>"
+    # Slack App (SaaS OAuth bot integration)
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_signing_secret: str = ""
+
+
 class AlertConfig(BaseModel):
     """Alerting configuration."""
 
@@ -104,6 +148,8 @@ class Settings(BaseSettings):
     collector: CollectorConfig = Field(default_factory=CollectorConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     alerting: AlertConfig = Field(default_factory=AlertConfig)
+    license: LicenseConfig = Field(default_factory=LicenseConfig)
+    deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
 
     debug: bool = False
     host_root: str = ""

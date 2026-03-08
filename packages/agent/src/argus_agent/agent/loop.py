@@ -18,6 +18,63 @@ logger = logging.getLogger("argus.agent.loop")
 MAX_TOOL_ROUNDS = 20
 
 
+async def _try_remote_execute(
+    tool_name: str,
+    tool_args: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Attempt to execute a tool via remote webhook in SaaS mode.
+
+    Returns None if the tool should be executed locally.
+    """
+    try:
+        from argus_agent.tenancy.context import get_tenant_id
+        from argus_agent.webhooks.tool_router import execute_tool as remote_execute
+
+        tenant_id = get_tenant_id()
+        return await remote_execute(tool_name, tool_args, tenant_id)
+    except Exception:
+        logger.debug("Remote tool routing skipped for %s", tool_name, exc_info=True)
+        return None
+
+
+async def _has_remote_webhook(tool_name: str) -> bool:
+    """Check if a remote webhook is configured for this tool."""
+    try:
+        from argus_agent.tenancy.context import get_tenant_id
+        from argus_agent.webhooks.tool_router import _get_active_webhook
+
+        webhook = await _get_active_webhook(get_tenant_id(), tool_name)
+        return webhook is not None
+    except Exception:
+        return False
+
+
+async def _request_remote_approval(args: dict[str, Any]) -> dict[str, Any] | None:
+    """Request user approval for a remote run_command via ActionEngine.
+
+    Returns None if approved, or an error dict if rejected/failed.
+    """
+    try:
+        from argus_agent.main import _get_action_engine
+
+        engine = _get_action_engine()
+        if engine is None:
+            return None  # No engine — allow without approval
+
+        command = args.get("command", [])
+        if isinstance(command, str):
+            command = command.split()
+        description = args.get("reason", "") or f"Execute on remote server: {' '.join(command)}"
+
+        result = await engine.propose_action(command=command, description=description)
+        if not result.approved:
+            return {"error": result.error or "Action rejected by user"}
+        return None  # Approved
+    except Exception:
+        logger.debug("Remote approval check failed, allowing", exc_info=True)
+        return None
+
+
 def _coerce_args(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
     """Coerce tool arguments to match declared schema types.
 
@@ -196,14 +253,33 @@ class AgentLoop:
                         {"id": tool_call_id, "name": tool_name, "arguments": args},
                     )
 
-                    # Execute the tool
+                    # Execute the tool — try remote webhook first (SaaS mode)
                     tool = get_tool(tool_name)
                     if tool is None:
                         tool_result = {"error": f"Unknown tool: {tool_name}"}
                     else:
                         try:
                             args = _coerce_args(tool, args)
-                            tool_result = await tool.execute(**args)
+
+                            # Route to remote SDK webhook if configured
+                            # For run_command via webhook, get approval first
+                            if tool_name == "run_command" and await _has_remote_webhook(tool_name):
+                                approval = await _request_remote_approval(args)
+                                if approval is None:
+                                    # Approval granted — dispatch to webhook
+                                    remote_result = await _try_remote_execute(tool_name, args)
+                                    tool_result = (
+                                        remote_result if remote_result is not None
+                                        else {"error": "Webhook dispatch failed"}
+                                    )
+                                else:
+                                    tool_result = approval  # rejection or error
+                            else:
+                                remote_result = await _try_remote_execute(tool_name, args)
+                                if remote_result is not None:
+                                    tool_result = remote_result
+                                else:
+                                    tool_result = await tool.execute(**args)
                         except Exception as e:
                             logger.exception("Tool execution error: %s", tool_name)
                             tool_result = {"error": f"Tool execution failed: {e}"}

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
+import { useDeployment } from "@/hooks/useDeployment";
 
 const API =
   process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:7600/api/v1";
@@ -715,6 +716,7 @@ function EmailSection({
 /*  Main Page                                                          */
 /* ------------------------------------------------------------------ */
 export default function SettingsPage() {
+  const { isSaaS } = useDeployment();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [notifConfigs, setNotifConfigs] = useState<ChannelConfig[]>([]);
   const [error, setError] = useState("");
@@ -769,8 +771,8 @@ export default function SettingsPage() {
     <div className="mx-auto max-w-2xl p-8">
       <h2 className="mb-6 text-xl font-semibold">Settings</h2>
 
-      {/* LLM Provider — editable */}
-      <LLMSection initial={settings.llm} onSaved={loadSettings} />
+      {/* LLM Provider — editable (self-hosted only; SaaS uses /settings/llm) */}
+      {!isSaaS && <LLMSection initial={settings.llm} onSaved={loadSettings} />}
 
       {/* Budget — editable */}
       {settings.budget && Object.keys(settings.budget).length > 0 && (
@@ -796,11 +798,14 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* Notifications — editable */}
-      <h3 className="mb-3 text-lg font-semibold">Notifications</h3>
-
-      <SlackSection initial={slackCfg} onSaved={reloadNotifs} />
-      <EmailSection initial={emailCfg} onSaved={reloadNotifs} />
+      {/* Notifications — editable (self-hosted only; SaaS uses /integrations) */}
+      {!isSaaS && (
+        <>
+          <h3 className="mb-3 text-lg font-semibold">Notifications</h3>
+          <SlackSection initial={slackCfg} onSaved={reloadNotifs} />
+          <EmailSection initial={emailCfg} onSaved={reloadNotifs} />
+        </>
+      )}
 
       {/* Server */}
       <section className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-4">

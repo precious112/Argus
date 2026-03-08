@@ -36,6 +36,7 @@ class InvestigationRequest:
     event: Event
     alert_id: str = ""
     channel_metadata: dict[str, str] = field(default_factory=dict)
+    tenant_id: str = "default"
 
 
 class Investigator:
@@ -140,6 +141,10 @@ class Investigator:
             logger.debug("Investigation worker %d stopped", worker_id)
 
     async def _run_investigation(self, request: InvestigationRequest) -> None:
+        from argus_agent.tenancy.context import set_tenant_id
+
+        set_tenant_id(request.tenant_id)
+
         event = request.event
         investigation_id = str(uuid.uuid4())
 

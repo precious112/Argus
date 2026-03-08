@@ -9,13 +9,20 @@ import jwt
 from argus_agent.config import get_settings
 
 
-def create_access_token(user_id: str, username: str) -> str:
+def create_access_token(
+    user_id: str,
+    username: str,
+    tenant_id: str = "default",
+    role: str = "member",
+) -> str:
     """Create a signed JWT access token."""
     settings = get_settings()
     expires = datetime.now(UTC) + timedelta(hours=settings.security.session_expiry_hours)
     payload = {
         "sub": user_id,
         "username": username,
+        "tenant_id": tenant_id,
+        "role": role,
         "exp": expires,
         "iat": datetime.now(UTC),
     }

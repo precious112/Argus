@@ -22,8 +22,11 @@ async def _init_db(monkeypatch):
 
     # Monkey-patch get_session to use our in-memory DB
     import argus_agent.storage.database as db_mod
+    import argus_agent.storage.repositories as repo_mod
+    from argus_agent.storage.sqlite_operational import SQLiteOperationalRepository
 
     monkeypatch.setattr(db_mod, "_session_factory", factory)
+    monkeypatch.setattr(repo_mod, "_operational_repo", SQLiteOperationalRepository())
 
     yield
 

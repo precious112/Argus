@@ -88,6 +88,7 @@ class LogWatcher:
 
     Uses polling (cross-platform). Detects error patterns, indexes metadata
     in DuckDB, emits events to the event bus.
+    In SaaS mode, log data is collected via webhooks.
     """
 
     def __init__(self, poll_interval: float = 2.0) -> None:
@@ -97,6 +98,7 @@ class LogWatcher:
         self._task: asyncio.Task[None] | None = None
         self._files: dict[str, WatchedFile] = {}
         self._host_root = settings.collector.host_root
+        self._is_saas = settings.deployment.mode == "saas"
 
         # Error burst detection
         self._error_timestamps: list[float] = []
@@ -104,9 +106,10 @@ class LogWatcher:
         self._error_burst_threshold = 10
         self._known_error_patterns: set[str] = set()
 
-        # Initialize watched files
-        for log_path in settings.collector.log_paths:
-            self._add_file(log_path)
+        # Initialize watched files (skip in SaaS mode — no local files)
+        if not self._is_saas:
+            for log_path in settings.collector.log_paths:
+                self._add_file(log_path)
 
     def _resolve_path(self, file_path: str) -> Path:
         """Resolve path with optional host root prefix."""
@@ -162,6 +165,10 @@ class LogWatcher:
 
     async def _poll_files(self) -> None:
         """Check all watched files for new lines."""
+        if self._is_saas:
+            await self._poll_remote()
+            return
+
         bus = get_event_bus()
         now = datetime.now(UTC)
 
@@ -229,6 +236,79 @@ class LogWatcher:
                                 message=f"New error pattern in {file_path}: {line[:100]}",
                                 data={
                                     "file": file_path,
+                                    "pattern": pattern,
+                                    "line": line[:200],
+                                },
+                            )
+                        )
+
+
+    async def _poll_remote(self) -> None:
+        """SaaS mode: search logs via webhook on tenant hosts."""
+        from argus_agent.collectors.remote import execute_remote_tool, get_webhook_tenants
+
+        bus = get_event_bus()
+        tenants = await get_webhook_tenants()
+        if not tenants:
+            return
+
+        for t in tenants:
+            result = await execute_remote_tool(
+                t["tenant_id"], "log_search",
+                {"pattern": "ERROR|FATAL|CRITICAL", "path": "/var/log/syslog", "limit": 50},
+            )
+            if not result:
+                continue
+
+            loop_time = asyncio.get_event_loop().time()
+
+            for line in result.get("matches", []):
+                if not line.strip():
+                    continue
+
+                severity = _detect_severity(line)
+
+                # Track errors for burst detection
+                if severity == "ERROR":
+                    self._error_timestamps.append(loop_time)
+                    self._error_timestamps = [
+                        ts for ts in self._error_timestamps
+                        if loop_time - ts < self._error_burst_window
+                    ]
+
+                    if len(self._error_timestamps) >= self._error_burst_threshold:
+                        await bus.publish(
+                            Event(
+                                source=EventSource.LOG_WATCHER,
+                                type=EventType.ERROR_BURST,
+                                severity=EventSeverity.URGENT,
+                                message=f"Error burst: {len(self._error_timestamps)} errors "
+                                f"in {self._error_burst_window}s (tenant {t['tenant_id']})",
+                                data={
+                                    "tenant_id": t["tenant_id"],
+                                    "count": len(self._error_timestamps),
+                                    "last_error": line[:200],
+                                },
+                            )
+                        )
+                        self._error_timestamps.clear()
+
+                    # New error pattern?
+                    pattern = _normalize_error(line)
+                    if pattern and pattern not in self._known_error_patterns:
+                        self._known_error_patterns.add(pattern)
+                        await bus.publish(
+                            Event(
+                                source=EventSource.LOG_WATCHER,
+                                type=EventType.NEW_ERROR_PATTERN,
+                                severity=EventSeverity.NOTABLE,
+                                message=(
+                            f"New error pattern "
+                            f"(tenant {t['tenant_id']}): "
+                            f"{line[:80]}"
+                        ),
+                                data={
+                                    "tenant_id": t["tenant_id"],
                                     "pattern": pattern,
                                     "line": line[:200],
                                 },

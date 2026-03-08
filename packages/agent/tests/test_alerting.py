@@ -92,7 +92,10 @@ async def test_dedup_within_cooldown(bus: EventBus):
     await bus.publish(event)
     await bus.publish(event)  # same type — should be deduped
 
-    # Different event type matching the same rule — also deduped
+    # Same event type again — still deduped
+    assert len(engine.get_active_alerts()) == 1
+
+    # Different event type produces a separate alert (different dedup key)
     mem_event = Event(
         source=EventSource.SYSTEM_METRICS,
         type=EventType.MEMORY_HIGH,
@@ -101,12 +104,16 @@ async def test_dedup_within_cooldown(bus: EventBus):
     )
     await bus.publish(mem_event)
 
-    assert len(engine.get_active_alerts()) == 1
+    assert len(engine.get_active_alerts()) == 2
 
 
 @pytest.mark.asyncio
 async def test_dedup_across_event_types(bus: EventBus):
-    """CPU_HIGH then MEMORY_HIGH on the same rule produces only 1 alert."""
+    """CPU_HIGH then MEMORY_HIGH produce separate alerts (different dedup keys).
+
+    System metric events are keyed by event type so that acknowledging
+    CPU_HIGH doesn't suppress MEMORY_HIGH, even under the same rule.
+    """
     rule = AlertRule(
         id="resource_warning",
         name="Resource Warning",
@@ -135,8 +142,11 @@ async def test_dedup_across_event_types(bus: EventBus):
     await bus.publish(mem_event)
 
     alerts = engine.get_active_alerts()
-    assert len(alerts) == 1
-    assert alerts[0].rule_name == "Resource Warning"
+    assert len(alerts) == 2
+
+    # Duplicate CPU_HIGH is still deduped within cooldown
+    await bus.publish(cpu_event)
+    assert len(engine.get_active_alerts()) == 2
 
 
 @pytest.mark.asyncio

@@ -7,8 +7,8 @@ from typing import Any
 
 from sqlalchemy import func, select, update
 
-from argus_agent.storage.database import get_session
 from argus_agent.storage.models import AlertHistory
+from argus_agent.storage.repositories import get_session
 
 logger = logging.getLogger("argus.storage.alert_history")
 
@@ -23,8 +23,11 @@ class AlertHistoryService:
 
         Returns the row ID.
         """
+        from argus_agent.tenancy.context import get_tenant_id
+
         async with get_session() as session:
             entry = AlertHistory(
+                tenant_id=get_tenant_id(),
                 alert_id=alert.id,
                 rule_id=alert.rule_id,
                 rule_name=alert.rule_name,
@@ -34,6 +37,7 @@ class AlertHistoryService:
                 message=event.message,
                 event_type=str(event.type),
                 source=str(event.source),
+                dedup_key=getattr(alert, "dedup_key", "") or "",
                 status=str(alert.status),
             )
             session.add(entry)
@@ -98,6 +102,7 @@ class AlertHistoryService:
                 "message": row.message,
                 "source": row.source,
                 "event_type": row.event_type,
+                "dedup_key": row.dedup_key or "",
                 "timestamp": row.timestamp.isoformat() if row.timestamp else None,
                 "resolved": row.resolved,
                 "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,

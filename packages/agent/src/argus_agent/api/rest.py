@@ -12,14 +12,40 @@ from argus_agent import __version__
 router = APIRouter(tags=["api"])
 
 
+@router.get("/deployment-info")
+async def deployment_info() -> dict[str, Any]:
+    """Return deployment mode info (auth-exempt, used by frontend)."""
+    from argus_agent.config import get_settings
+
+    settings = get_settings()
+    is_saas = settings.deployment.mode == "saas"
+    return {
+        "mode": settings.deployment.mode,
+        "billing_provider": settings.deployment.billing_provider if is_saas else None,
+        "registration_enabled": is_saas,
+    }
+
+
 @router.get("/health")
 async def health_check() -> dict[str, Any]:
     """Health check endpoint."""
+    from argus_agent.licensing import get_license_manager
+
+    mgr = get_license_manager()
     return {
         "status": "healthy",
         "version": __version__,
-        "timestamp": datetime.now(UTC).isoformat(),
+        "edition": mgr.edition.value,
+        "timestamp": datetime.now(UTC).replace(tzinfo=None).isoformat(),
     }
+
+
+@router.get("/license")
+async def license_info() -> dict[str, Any]:
+    """Return current license edition, features, and metadata."""
+    from argus_agent.licensing import get_license_manager
+
+    return get_license_manager().to_dict()
 
 
 @router.get("/status")
@@ -116,6 +142,15 @@ async def list_alerts(
     include_resolved = resolved is None or resolved
     alerts = engine.get_active_alerts(include_resolved=include_resolved)
 
+    # In SaaS mode, filter in-memory alerts by tenant
+    from argus_agent.config import get_settings as _gs
+
+    if _gs().deployment.mode == "saas":
+        from argus_agent.tenancy.context import get_tenant_id
+
+        current_tenant = get_tenant_id()
+        alerts = [a for a in alerts if (a.event.data or {}).get("tenant_id") == current_tenant]
+
     all_items = []
     for a in alerts:
         if severity and str(a.severity) != severity:
@@ -177,7 +212,7 @@ async def resolve_alert(alert_id: str) -> dict[str, Any]:
             alert_id,
             status="resolved",
             resolved=True,
-            resolved_at=datetime.now(UTC),
+            resolved_at=datetime.now(UTC).replace(tzinfo=None),
         )
         if not success:
             raise HTTPException(status_code=404, detail="Alert not found or already resolved")
@@ -191,7 +226,7 @@ async def resolve_alert(alert_id: str) -> dict[str, Any]:
             alert_id,
             status="resolved",
             resolved=True,
-            resolved_at=datetime.now(UTC),
+            resolved_at=datetime.now(UTC).replace(tzinfo=None),
         )
     except Exception:
         pass  # Don't break the endpoint if DB write fails
@@ -213,7 +248,7 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
     expires_hours = float(body.get("expires_hours", 24))
     reason = body.get("reason", "")
 
-    expires_at = datetime.now(UTC) + timedelta(hours=expires_hours)
+    expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=expires_hours)
 
     # Try in-memory first
     success = engine.acknowledge_alert(alert_id, acknowledged_by="user", expires_at=expires_at)
@@ -240,7 +275,7 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
         if db_alert is None:
             raise HTTPException(status_code=404, detail="Alert not found")
 
-        dedup_key = f"{db_alert['source']}:{db_alert['rule_id']}"
+        dedup_key = db_alert.get("dedup_key") or f"{db_alert['source']}:{db_alert['rule_id']}"
         svc = SuppressionService()
         await svc.acknowledge(
             dedup_key=dedup_key,
@@ -260,7 +295,7 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
         await AlertHistoryService().update_status(
             alert_id,
             status="acknowledged",
-            acknowledged_at=datetime.now(UTC),
+            acknowledged_at=datetime.now(UTC).replace(tzinfo=None),
             acknowledged_by="user",
         )
     except Exception:
@@ -299,7 +334,7 @@ async def unacknowledge_alert(alert_id: str) -> dict[str, Any]:
         if db_alert is None or db_alert.get("status") != "acknowledged":
             raise HTTPException(status_code=404, detail="Alert not found or not acknowledged")
 
-        dedup_key = f"{db_alert['source']}:{db_alert['rule_id']}"
+        dedup_key = db_alert.get("dedup_key") or f"{db_alert['source']}:{db_alert['rule_id']}"
         svc = SuppressionService()
         await svc.unacknowledge(dedup_key)
         # Also remove from in-memory engine
@@ -335,7 +370,7 @@ async def mute_rule(rule_id: str, body: dict[str, Any] | None = None) -> dict[st
     duration_hours = min(float(body.get("duration_hours", 24)), 168)
     reason = body.get("reason", "")
 
-    expires_at = datetime.now(UTC) + timedelta(hours=duration_hours)
+    expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=duration_hours)
 
     success = engine.mute_rule(rule_id, expires_at)
     if not success:
@@ -479,9 +514,11 @@ async def get_logs(
 ) -> dict[str, Any]:
     """Get recent log entries from DuckDB."""
     try:
-        from argus_agent.storage.timeseries import query_log_entries
+        from argus_agent.storage.repositories import get_metrics_repository
 
-        entries = query_log_entries(severity=severity, limit=min(limit, 200))
+        entries = get_metrics_repository().query_log_entries(
+            severity=severity, limit=min(limit, 200),
+        )
         return {"entries": entries, "count": len(entries)}
     except RuntimeError:
         return {"entries": [], "count": 0, "error": "Storage not initialized"}
@@ -530,9 +567,9 @@ async def ask_question(
 async def list_services() -> dict[str, Any]:
     """List all services sending SDK telemetry with health summary."""
     try:
-        from argus_agent.storage.timeseries import query_service_summary
+        from argus_agent.storage.repositories import get_metrics_repository
 
-        summaries = query_service_summary(since_minutes=1440)
+        summaries = get_metrics_repository().query_service_summary(since_minutes=1440)
         return {"services": summaries, "count": len(summaries)}
     except RuntimeError:
         return {"services": [], "count": 0, "error": "Storage not initialized"}
@@ -546,17 +583,15 @@ async def service_metrics(
 ) -> dict[str, Any]:
     """Get aggregated metrics for a specific service."""
     try:
-        from argus_agent.storage.timeseries import (
-            query_error_groups,
-            query_function_metrics,
-        )
+        from argus_agent.storage.repositories import get_metrics_repository
 
-        buckets = query_function_metrics(
+        repo = get_metrics_repository()
+        buckets = repo.query_function_metrics(
             service=service,
             since_minutes=since_minutes,
             interval_minutes=interval_minutes,
         )
-        errors = query_error_groups(service=service, since_minutes=since_minutes)
+        errors = repo.query_error_groups(service=service, since_minutes=since_minutes)
 
         return {
             "service": service,
@@ -842,7 +877,7 @@ async def analytics_usage(
     if granularity not in ("hour", "day", "week", "month"):
         raise HTTPException(status_code=400, detail="Invalid granularity")
 
-    since = datetime.now(UTC) - timedelta(hours=since_hours)
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=since_hours)
     svc = TokenUsageService()
     data = await svc.get_usage_over_time(
         granularity=granularity, since=since,
@@ -862,7 +897,7 @@ async def analytics_breakdown(
     if group_by not in ("provider", "model", "source"):
         raise HTTPException(status_code=400, detail="Invalid group_by")
 
-    since = datetime.now(UTC) - timedelta(hours=since_hours)
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=since_hours)
     svc = TokenUsageService()
     data = await svc.get_usage_by_dimension(dimension=group_by, since=since)
     return {"group_by": group_by, "data": data}
