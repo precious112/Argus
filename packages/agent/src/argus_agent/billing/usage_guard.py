@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import logging
+import math
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -59,11 +61,45 @@ async def _get_tenant_and_subscription(
 
 
 def _billing_period_start(sub: Subscription | None) -> datetime:
-    """Return the start of the current billing period."""
-    if sub and sub.current_period_start:
-        return sub.current_period_start
+    """Return the start of the current monthly billing sub-period.
+
+    For yearly subscriptions, compute which monthly sub-period we're in
+    based on the anchor day-of-month from current_period_start.
+    Monthly and free subs use current_period_start directly or calendar month.
+    """
     now = datetime.now(UTC).replace(tzinfo=None)
-    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    if not sub or not sub.current_period_start:
+        # No subscription — use calendar month start
+        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    if sub.billing_interval != "year":
+        # Monthly sub — use period start directly
+        return sub.current_period_start
+
+    # Yearly subscription — compute monthly sub-period anchor
+    anchor_day = sub.current_period_start.day
+    year = now.year
+    month = now.month
+
+    # Clamp anchor day to max days in current month
+    max_day = calendar.monthrange(year, month)[1]
+    clamped_day = min(anchor_day, max_day)
+
+    period_start = now.replace(day=clamped_day, hour=0, minute=0, second=0, microsecond=0)
+
+    # If we haven't reached the anchor day this month, go back to previous month
+    if now < period_start:
+        if month == 1:
+            year -= 1
+            month = 12
+        else:
+            month -= 1
+        max_day = calendar.monthrange(year, month)[1]
+        clamped_day = min(anchor_day, max_day)
+        period_start = datetime(year, month, clamped_day, 0, 0, 0)
+
+    return period_start
 
 
 async def check_team_member_limit(request: Request) -> None:
@@ -120,7 +156,7 @@ async def check_api_key_limit(request: Request) -> None:
 
 
 async def check_event_ingest_limit(tenant_id: str, *, batch_size: int = 1) -> None:
-    """Check quota; allow if under plan limit. If over, check PAYG budget."""
+    """Check quota; allow if under plan limit. If over, deduct from prepaid credits."""
     if not _is_saas():
         return
 
@@ -139,43 +175,42 @@ async def check_event_ingest_limit(tenant_id: str, *, batch_size: int = 1) -> No
         logger.warning("Could not check event count, rejecting ingest", exc_info=True)
         raise HTTPException(503, "Billing check unavailable, try again")
 
-    # Under plan quota (accounting for batch size) → allow
+    # Under plan quota (accounting for batch size) -> allow
     if event_count + batch_size <= limits.monthly_event_limit:
+        has_credits = (tenant.payg_credit_balance_cents > 0) if tenant else False
         asyncio.ensure_future(
             _check_quota_thresholds(
                 tenant_id, event_count, limits.monthly_event_limit, period_start,
+                has_credits=has_credits,
             )
         )
         return
 
-    # Over plan quota — check PAYG
-    if not tenant or not tenant.payg_enabled or tenant.payg_monthly_budget_cents <= 0:
+    # Over plan quota — check prepaid credits
+    if not tenant or tenant.payg_credit_balance_cents <= 0:
         raise HTTPException(
             429,
             f"Monthly event limit reached ({event_count:,}/{limits.monthly_event_limit:,}). "
-            "Enable Pay-As-You-Go or upgrade your plan.",
+            "Purchase credits or upgrade your plan.",
         )
 
-    # Calculate PAYG spend
-    overage_events = event_count - limits.monthly_event_limit
-    payg_spend_cents = overage_events * PAYG_RATE_CENTS_PER_EVENT
-    budget_cents = tenant.payg_monthly_budget_cents
+    # Calculate cost and deduct from prepaid credits
+    batch_overage = batch_size
+    cost_cents = max(1, math.ceil(batch_overage * PAYG_RATE_CENTS_PER_EVENT))
 
-    if payg_spend_cents >= budget_cents:
+    from argus_agent.billing.payg import deduct_credits
+
+    success = await deduct_credits(tenant_id, cost_cents, batch_overage)
+    if not success:
         raise HTTPException(
             429,
-            f"PAYG budget exhausted (${payg_spend_cents / 100:.2f}/${budget_cents / 100:.2f}). "
-            "Increase your PAYG budget to continue ingesting events.",
+            "Insufficient credits for overage events. "
+            "Purchase more credits to continue ingesting.",
         )
 
-    # Under PAYG budget → allow, report to Polar + check thresholds (fire-and-forget)
-    from argus_agent.billing.payg import report_payg_events_to_polar
-
+    # Fire-and-forget credit threshold check
     asyncio.ensure_future(
-        report_payg_events_to_polar(tenant_id, batch_size)
-    )
-    asyncio.ensure_future(
-        _check_payg_thresholds(tenant_id, payg_spend_cents, budget_cents, period_start)
+        _check_credit_thresholds(tenant_id, period_start)
     )
 
 
@@ -251,11 +286,10 @@ async def get_tenant_usage_summary(tenant_id: str) -> dict[str, Any]:
     except Exception:
         pass
 
-    # Compute PAYG fields
+    # Compute credit/overage fields
     overage_events = max(0, events_count - limits.monthly_event_limit)
-    payg_spend_cents = overage_events * PAYG_RATE_CENTS_PER_EVENT
-    payg_enabled = tenant.payg_enabled if tenant else False
-    payg_budget_cents = tenant.payg_monthly_budget_cents if tenant else 0
+    overage_cost_cents = math.ceil(overage_events * PAYG_RATE_CENTS_PER_EVENT)
+    credit_balance = tenant.payg_credit_balance_cents if tenant else 0
 
     return {
         "plan": plan,
@@ -269,11 +303,11 @@ async def get_tenant_usage_summary(tenant_id: str) -> dict[str, Any]:
         "daily_ai_messages": limits.daily_ai_messages,
         "billing_period_start": period_start.isoformat(),
         "billing_period_end": period_end.isoformat() if period_end else None,
-        "payg": {
-            "enabled": payg_enabled,
-            "budget_cents": payg_budget_cents,
-            "spent_cents": round(payg_spend_cents, 2),
+        "credits": {
+            "balance_cents": credit_balance,
+            "balance_dollars": credit_balance / 100,
             "overage_events": overage_events,
+            "overage_cost_cents": overage_cost_cents,
             "rate_per_1k_cents": 30,
         },
         "features": {
@@ -295,7 +329,12 @@ async def _has_notification_been_sent(
     tenant_id: str, threshold: str, period_start: datetime
 ) -> bool:
     """Check if a notification has already been sent for this threshold/cycle."""
-    async with get_session() as session:
+    from argus_agent.storage.postgres_operational import get_raw_session
+
+    raw = get_raw_session()
+    if not raw:
+        return False
+    async with raw as session:
         result = await session.execute(
             select(func.count())
             .select_from(UsageNotification)
@@ -312,7 +351,12 @@ async def _record_notification(
     tenant_id: str, threshold: str, period_start: datetime
 ) -> None:
     """Record that a threshold notification was sent."""
-    async with get_session() as session:
+    from argus_agent.storage.postgres_operational import get_raw_session
+
+    raw = get_raw_session()
+    if not raw:
+        return
+    async with raw as session:
         session.add(
             UsageNotification(
                 id=str(uuid.uuid4()),
@@ -327,8 +371,12 @@ async def _record_notification(
 async def _get_tenant_owner_emails(tenant_id: str) -> list[str]:
     """Get email addresses for tenant owners/admins."""
     from argus_agent.storage.models import User
+    from argus_agent.storage.postgres_operational import get_raw_session
 
-    async with get_session() as session:
+    raw = get_raw_session()
+    if not raw:
+        return []
+    async with raw as session:
         result = await session.execute(
             select(User.email)
             .join(TeamMember, TeamMember.user_id == User.id)
@@ -357,7 +405,12 @@ async def _send_threshold_notification(
             return
 
         # Get tenant name
-        async with get_session() as session:
+        from argus_agent.storage.postgres_operational import get_raw_session as _raw
+
+        raw = _raw()
+        if not raw:
+            return
+        async with raw as session:
             tenant = await session.get(Tenant, tenant_id)
             tenant_name = tenant.name if tenant else "Your organization"
 
@@ -375,7 +428,8 @@ async def _send_threshold_notification(
 
 
 async def _check_quota_thresholds(
-    tenant_id: str, event_count: int, limit: int, period_start: datetime
+    tenant_id: str, event_count: int, limit: int, period_start: datetime,
+    *, has_credits: bool = False,
 ) -> None:
     """Check and fire quota threshold notifications."""
     if limit <= 0:
@@ -384,13 +438,9 @@ async def _check_quota_thresholds(
     ratio = event_count / limit
 
     if ratio >= 1.0:
-        # Fetch PAYG status to include in notification
-        async with get_session() as session:
-            tenant = await session.get(Tenant, tenant_id)
-        payg_enabled = tenant.payg_enabled if tenant else False
         await _send_threshold_notification(
             tenant_id, "quota_100", period_start,
-            current=event_count, limit=limit, payg_enabled=payg_enabled,
+            current=event_count, limit=limit, has_credits=has_credits,
         )
     elif ratio >= 0.80:
         await _send_threshold_notification(
@@ -399,24 +449,29 @@ async def _check_quota_thresholds(
         )
 
 
-async def _check_payg_thresholds(
-    tenant_id: str, spend_cents: float, budget_cents: int, period_start: datetime
+async def _check_credit_thresholds(
+    tenant_id: str, period_start: datetime,
 ) -> None:
-    """Check and fire PAYG budget threshold notifications."""
-    if budget_cents <= 0:
+    """Check and fire credit balance threshold notifications."""
+    from argus_agent.storage.postgres_operational import get_raw_session
+
+    raw = get_raw_session()
+    if not raw:
+        return
+    async with raw as session:
+        tenant = await session.get(Tenant, tenant_id)
+    if not tenant:
         return
 
-    ratio = spend_cents / budget_cents
-    budget_str = f"{budget_cents / 100:.2f}"
-    spent_str = f"{spend_cents / 100:.2f}"
+    balance = tenant.payg_credit_balance_cents
 
-    if ratio >= 1.0:
+    if balance <= 10:  # $0.10
         await _send_threshold_notification(
-            tenant_id, "payg_100", period_start,
-            budget=budget_str, spent=spent_str,
+            tenant_id, "credits_near_zero", period_start,
+            balance_cents=balance,
         )
-    elif ratio >= 0.80:
+    elif balance <= 100:  # $1.00
         await _send_threshold_notification(
-            tenant_id, "payg_80", period_start,
-            budget=budget_str, spent=spent_str,
+            tenant_id, "credits_low", period_start,
+            balance_cents=balance,
         )

@@ -107,6 +107,10 @@ async def validate_api_key(plain_key: str) -> dict[str, Any] | None:
         if row is None:
             return None
 
+        # Switch RLS context to the key's tenant so the UPDATE is allowed
+        safe_tid = row.tenant_id.replace("'", "''")
+        await session.execute(text(f"SET LOCAL app.current_tenant = '{safe_tid}'"))  # noqa: S608
+
         # Update last_used_at
         row.last_used_at = datetime.now(UTC).replace(tzinfo=None)
         await session.commit()

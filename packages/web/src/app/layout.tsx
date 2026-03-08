@@ -6,7 +6,13 @@ import { Providers } from "@/components/providers/Providers";
 export const metadata: Metadata = {
   title: "Argus - AI-Native Observability",
   description: "AI-native observability, monitoring, and security platform",
-  icons: { icon: "/favicon.png" },
+  icons: {
+    icon: [
+      { url: "/favicon.png", sizes: "256x256", type: "image/png" },
+      { url: "/favicon.png", sizes: "48x48", type: "image/png" },
+    ],
+    apple: { url: "/favicon.png", sizes: "256x256", type: "image/png" },
+  },
 };
 
 export default function RootLayout({

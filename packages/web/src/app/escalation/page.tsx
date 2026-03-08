@@ -53,7 +53,7 @@ export default function EscalationPage() {
     fetchPolicies();
     apiFetch(`${API_BASE}/api/v1/team/members`)
       .then((r) => r.json())
-      .then((d) => setTeamMembers(d.members || []))
+      .then((d) => setTeamMembers(Array.isArray(d) ? d : d.members || []))
       .catch(() => {});
   }, [fetchPolicies]);
 

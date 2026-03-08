@@ -73,6 +73,12 @@ async def slack_callback(
             f"{settings.deployment.frontend_url}/integrations?slack=error",
             status_code=302,
         )
+    except Exception:
+        logger.exception("Slack OAuth callback unexpected error")
+        return RedirectResponse(
+            f"{settings.deployment.frontend_url}/integrations?slack=error",
+            status_code=302,
+        )
 
     return RedirectResponse(
         f"{settings.deployment.frontend_url}/integrations?slack=connected",

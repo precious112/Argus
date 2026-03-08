@@ -141,6 +141,11 @@ async def exchange_code(code: str, state: str) -> SlackInstallation:
     enc_key = _derive_key(settings.security.secret_key, tenant_id)
     encrypted_token = _encrypt(bot_token, enc_key)
 
+    # Set tenant context for RLS (callback is auth-exempt, so middleware doesn't set it)
+    from argus_agent.tenancy.context import set_tenant_id
+
+    set_tenant_id(tenant_id)
+
     # Upsert installation
     async with get_session() as session:
         result = await session.execute(

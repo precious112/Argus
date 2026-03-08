@@ -23,10 +23,13 @@ async def get_webhook_tenants() -> list[dict[str, Any]]:
     try:
         from sqlalchemy import select
 
-        from argus_agent.storage.repositories import get_session
+        from argus_agent.storage.postgres_operational import get_raw_session
         from argus_agent.storage.saas_models import WebhookConfig
 
-        async with get_session() as session:
+        raw = get_raw_session()
+        if not raw:
+            return []
+        async with raw as session:
             result = await session.execute(
                 select(WebhookConfig).where(
                     WebhookConfig.is_active.is_(True),
@@ -62,6 +65,12 @@ async def execute_remote_tool(
     Returns the tool result dict, or ``None`` on failure.
     """
     try:
+        # Set tenant context so RLS-scoped queries inside execute_tool
+        # (e.g. _get_active_webhook) can find the webhook config rows.
+        from argus_agent.tenancy.context import set_tenant_id
+
+        set_tenant_id(tenant_id)
+
         from argus_agent.webhooks.tool_router import execute_tool
 
         result = await execute_tool(

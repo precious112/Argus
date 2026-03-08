@@ -20,6 +20,18 @@ interface SlackChannel {
   is_private: boolean;
 }
 
+interface EmailAlertStatus {
+  enabled: boolean;
+  email: string;
+}
+
+const EmailIcon = () => (
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="2" y="4" width="20" height="16" rx="2" />
+    <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
+  </svg>
+);
+
 const SlackIcon = () => (
   <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
     <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zm-1.27 0a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.163 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.163 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.163 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zm0-1.27a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.315A2.528 2.528 0 0 1 24 15.163a2.528 2.528 0 0 1-2.522 2.523h-6.315z" />
@@ -53,6 +65,28 @@ function IntegrationsContent() {
   const [toast, setToast] = useState<string | null>(null);
   const [showChannelPicker, setShowChannelPicker] = useState(false);
 
+  // Email alert state
+  const [emailStatus, setEmailStatus] = useState<EmailAlertStatus>({ enabled: false, email: "" });
+  const [emailLoading, setEmailLoading] = useState(true);
+  const [emailToggling, setEmailToggling] = useState(false);
+  const [emailTesting, setEmailTesting] = useState(false);
+  const [emailTestResult, setEmailTestResult] = useState<string | null>(null);
+
+  const fetchEmailStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/v1/integrations/email/status`, {
+        credentials: "include",
+      });
+      if (res.ok) {
+        setEmailStatus(await res.json());
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setEmailLoading(false);
+    }
+  }, []);
+
   const fetchStatus = useCallback(async () => {
     try {
       const res = await fetch(`${apiBase}/api/v1/integrations/slack/status`, {
@@ -70,7 +104,8 @@ function IntegrationsContent() {
 
   useEffect(() => {
     fetchStatus();
-  }, [fetchStatus]);
+    fetchEmailStatus();
+  }, [fetchStatus, fetchEmailStatus]);
 
   // Show toast on redirect from OAuth
   useEffect(() => {
@@ -90,6 +125,44 @@ function IntegrationsContent() {
       return () => clearTimeout(t);
     }
   }, [toast]);
+
+  async function handleEmailToggle() {
+    setEmailToggling(true);
+    try {
+      const res = await fetch(`${apiBase}/api/v1/integrations/email/toggle`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !emailStatus.enabled }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setEmailStatus((prev) => ({ ...prev, enabled: data.enabled }));
+        setToast(data.enabled ? "Email alerts enabled." : "Email alerts disabled.");
+      }
+    } catch {
+      setToast("Failed to update email preference.");
+    } finally {
+      setEmailToggling(false);
+    }
+  }
+
+  async function handleEmailTest() {
+    setEmailTesting(true);
+    setEmailTestResult(null);
+    try {
+      const res = await fetch(`${apiBase}/api/v1/integrations/email/test`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const data = await res.json();
+      setEmailTestResult(data.ok ? "Test email sent!" : `Error: ${data.error}`);
+    } catch {
+      setEmailTestResult("Failed to send test email.");
+    } finally {
+      setEmailTesting(false);
+    }
+  }
 
   async function handleConnect() {
     try {
@@ -298,6 +371,79 @@ function IntegrationsContent() {
               {testResult && (
                 <span className={`text-xs ${testResult.startsWith("Error") ? "text-red-400" : "text-emerald-400"}`}>
                   {testResult}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Email Card */}
+      <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-6 max-w-2xl mt-6">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="text-blue-400">
+            <EmailIcon />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold">Email Alerts</h2>
+            <p className="text-sm text-[var(--muted)]">
+              Receive alert notifications at your email address.
+            </p>
+          </div>
+          <div className="ml-auto">
+            {emailLoading ? (
+              <span className="text-xs text-[var(--muted)]">Loading...</span>
+            ) : emailStatus.enabled ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                Enabled
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-gray-500/10 px-2.5 py-0.5 text-xs font-medium text-gray-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-gray-500" />
+                Disabled
+              </span>
+            )}
+          </div>
+        </div>
+
+        {!emailLoading && (
+          <div className="space-y-4">
+            {emailStatus.email && (
+              <div className="text-sm">
+                <span className="text-[var(--muted)]">Email:</span>{" "}
+                <span className="font-medium">{emailStatus.email}</span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-3 pt-2 border-t border-[var(--border)]">
+              <button
+                onClick={handleEmailToggle}
+                disabled={emailToggling}
+                className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors disabled:opacity-50 ${
+                  emailStatus.enabled
+                    ? "border border-[var(--border)] hover:bg-[var(--card)]"
+                    : "bg-blue-600 text-white hover:bg-blue-700"
+                }`}
+              >
+                {emailToggling
+                  ? "Updating..."
+                  : emailStatus.enabled
+                    ? "Disable"
+                    : "Enable"}
+              </button>
+              {emailStatus.enabled && (
+                <button
+                  onClick={handleEmailTest}
+                  disabled={emailTesting}
+                  className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--card)] transition-colors disabled:opacity-50"
+                >
+                  {emailTesting ? "Sending..." : "Test"}
+                </button>
+              )}
+              {emailTestResult && (
+                <span className={`text-xs ${emailTestResult.startsWith("Error") ? "text-red-400" : "text-emerald-400"}`}>
+                  {emailTestResult}
                 </span>
               )}
             </div>

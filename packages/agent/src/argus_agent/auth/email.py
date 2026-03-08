@@ -15,13 +15,13 @@ from sqlalchemy import select, update
 
 from argus_agent.config import get_settings
 from argus_agent.storage.models import User
-from argus_agent.storage.repositories import get_session
+from argus_agent.storage.postgres_operational import get_raw_session
 from argus_agent.storage.saas_models import EmailVerificationToken, PasswordResetToken
 
 logger = logging.getLogger("argus.auth.email")
 
 
-async def _send_via_resend(to: str, subject: str, body: str) -> bool:
+async def _send_via_resend(to: str, subject: str, body: str, *, html: str = "") -> bool:
     """Send an email via Resend API. Returns True on success."""
     settings = get_settings()
     resend.api_key = settings.deployment.resend_api_key
@@ -33,6 +33,8 @@ async def _send_via_resend(to: str, subject: str, body: str) -> bool:
             "subject": subject,
             "text": body,
         }
+        if html:
+            params["html"] = html
         await asyncio.to_thread(resend.Emails.send, params)
         return True
     except Exception:
@@ -40,7 +42,7 @@ async def _send_via_resend(to: str, subject: str, body: str) -> bool:
         return False
 
 
-async def _send_via_smtp(to: str, subject: str, body: str) -> bool:
+async def _send_via_smtp(to: str, subject: str, body: str, *, html: str = "") -> bool:
     """Send an email via SMTP. Returns True on success."""
     settings = get_settings()
     smtp_url = settings.deployment.smtp_url
@@ -64,6 +66,8 @@ async def _send_via_smtp(to: str, subject: str, body: str) -> bool:
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(body)
+    if html:
+        msg.add_alternative(html, subtype="html")
 
     try:
         await aiosmtplib.send(
@@ -81,16 +85,16 @@ async def _send_via_smtp(to: str, subject: str, body: str) -> bool:
         return False
 
 
-async def send_email(to: str, subject: str, body: str) -> bool:
+async def send_email(to: str, subject: str, body: str, *, html: str = "") -> bool:
     """Send an email. Uses Resend API in SaaS mode (with SMTP fallback), SMTP only otherwise."""
     settings = get_settings()
 
     if settings.deployment.mode == "saas" and settings.deployment.resend_api_key:
-        if await _send_via_resend(to, subject, body):
+        if await _send_via_resend(to, subject, body, html=html):
             return True
         logger.warning("Resend failed, falling back to SMTP for %s", to)
 
-    return await _send_via_smtp(to, subject, body)
+    return await _send_via_smtp(to, subject, body, html=html)
 
 
 async def send_verification_email(user_id: str, email: str) -> str | None:
@@ -98,7 +102,10 @@ async def send_verification_email(user_id: str, email: str) -> str | None:
     settings = get_settings()
     token = secrets.token_urlsafe(32)
 
-    async with get_session() as session:
+    raw = get_raw_session()
+    if not raw:
+        return None
+    async with raw as session:
         # Deactivate any existing tokens for this user
         await session.execute(
             update(EmailVerificationToken)
@@ -137,7 +144,10 @@ async def send_verification_email(user_id: str, email: str) -> str | None:
 
 async def verify_email_token(token: str) -> dict:
     """Verify an email token. Returns ok/error dict."""
-    async with get_session() as session:
+    raw = get_raw_session()
+    if not raw:
+        return {"ok": False, "error": "Database not initialized"}
+    async with raw as session:
         result = await session.execute(
             select(EmailVerificationToken).where(
                 EmailVerificationToken.token == token,
@@ -169,7 +179,10 @@ async def send_password_reset_email(email: str) -> bool:
     """Generate a password reset token and send the email."""
     settings = get_settings()
 
-    async with get_session() as session:
+    raw = get_raw_session()
+    if not raw:
+        return True  # Fail silently — don't reveal DB status
+    async with raw as session:
         result = await session.execute(
             select(User).where(User.email == email, User.is_active.is_(True))
         )
@@ -218,7 +231,10 @@ async def send_password_reset_email(email: str) -> bool:
 
 async def verify_reset_token(token: str) -> dict:
     """Verify a password reset token. Returns {"ok": True, "user_id": ...} or error."""
-    async with get_session() as session:
+    raw = get_raw_session()
+    if not raw:
+        return {"ok": False, "error": "Database not initialized"}
+    async with raw as session:
         result = await session.execute(
             select(PasswordResetToken).where(
                 PasswordResetToken.token == token,
@@ -238,7 +254,10 @@ async def verify_reset_token(token: str) -> dict:
 
 async def consume_reset_token(token: str, new_password_hash: str) -> dict:
     """Use a reset token to change the user's password."""
-    async with get_session() as session:
+    raw = get_raw_session()
+    if not raw:
+        return {"ok": False, "error": "Database not initialized"}
+    async with raw as session:
         result = await session.execute(
             select(PasswordResetToken).where(
                 PasswordResetToken.token == token,
@@ -267,52 +286,53 @@ async def consume_reset_token(token: str, new_password_hash: str) -> dict:
 
 
 async def send_usage_notification_email(
-    to: str, tenant_name: str, threshold: str, **kwargs: str | int | float
+    to: str, tenant_name: str, threshold: str, **kwargs: str | int | float | bool
 ) -> bool:
     """Send a usage threshold notification email.
 
-    *threshold* is one of: quota_80, quota_100, payg_80, payg_100.
+    *threshold* is one of: quota_80, quota_100, credits_low, credits_near_zero.
     Extra keyword args are interpolated into the message body.
     """
     subjects: dict[str, str] = {
         "quota_80": f"[Argus] {tenant_name}: 80% of monthly event quota used",
         "quota_100": f"[Argus] {tenant_name}: Monthly event quota exceeded",
-        "payg_80": f"[Argus] {tenant_name}: 80% of PAYG budget used",
-        "payg_100": f"[Argus] {tenant_name}: PAYG budget exhausted",
+        "credits_low": f"[Argus] {tenant_name}: Credit balance below $1.00",
+        "credits_near_zero": f"[Argus] {tenant_name}: Credit balance nearly exhausted",
     }
 
     current = kwargs.get("current", 0)
     limit = kwargs.get("limit", 0)
-    budget = kwargs.get("budget", 0)
-    spent = kwargs.get("spent", 0)
-    payg_enabled = kwargs.get("payg_enabled", False)
+    has_credits = kwargs.get("has_credits", False)
+    balance_cents = kwargs.get("balance_cents", 0)
 
     bodies: dict[str, str] = {
         "quota_80": (
             f"You've used 80% of your monthly event quota "
             f"({current:,}/{limit:,}).\n\n"
-            "Consider enabling Pay-As-You-Go to avoid disruption when "
+            "Consider purchasing prepaid credits to avoid disruption when "
             "you reach your limit."
         ),
         "quota_100": (
             f"You've exceeded your plan quota ({current:,}/{limit:,} events).\n\n"
             + (
-                "Pay-As-You-Go is now active. Events beyond your plan quota "
-                "are being charged at $0.30 per 1,000 events."
-                if payg_enabled
-                else "Event ingestion is now blocked. Enable Pay-As-You-Go or "
+                "Prepaid credits are being used for overage events "
+                "at $0.30 per 1,000 events."
+                if has_credits
+                else "Event ingestion is now blocked. Purchase credits or "
                 "upgrade your plan to continue ingesting events."
             )
         ),
-        "payg_80": (
-            f"You've used 80% of your PAYG budget "
-            f"(${spent}/${budget}).\n\n"
-            "Increase your budget to avoid event rejection when it's exhausted."
+        "credits_low": (
+            f"Your credit balance is below $1.00 "
+            f"(${int(balance_cents) / 100:.2f} remaining).\n\n"
+            "Purchase more credits to avoid event rejection when your "
+            "balance runs out."
         ),
-        "payg_100": (
-            f"Your PAYG budget is exhausted (${spent}/${budget}).\n\n"
-            "Events are now being rejected. Increase your PAYG budget to "
-            "resume ingesting events."
+        "credits_near_zero": (
+            f"Your credit balance is nearly exhausted "
+            f"(${int(balance_cents) / 100:.2f} remaining).\n\n"
+            "Events will be rejected once your credits run out. "
+            "Purchase more credits now to continue ingesting."
         ),
     }
 

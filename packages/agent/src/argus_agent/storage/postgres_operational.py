@@ -8,6 +8,7 @@ policies filter rows transparently.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
@@ -20,6 +21,13 @@ logger = logging.getLogger("argus.storage.postgres")
 
 _engine: AsyncEngine | None = None
 _session_factory: sessionmaker | None = None
+
+
+def get_raw_session() -> AsyncSession | None:
+    """Return a raw AsyncSession WITHOUT RLS for cross-tenant admin queries."""
+    if not _engine:
+        return None
+    return AsyncSession(_engine, expire_on_commit=False)
 
 
 class PostgresOperationalRepository:
@@ -65,6 +73,9 @@ class PostgresOperationalRepository:
         except Exception:
             logger.debug("create_all skipped (tables likely already exist)", exc_info=True)
 
+        # Enable RLS on all tables (idempotent safety net)
+        await self._ensure_rls()
+
         logger.info("PostgreSQL operational repository initialized")
 
     async def close(self) -> None:
@@ -97,6 +108,10 @@ class PostgresOperationalRepository:
             connection.execute(
                 text(f"SET LOCAL app.current_tenant = '{safe_tid}'"),
             )
+            # Switch to non-superuser role so RLS policies are enforced.
+            # Superusers bypass RLS — SET LOCAL ROLE drops privileges for
+            # this transaction only, reverting automatically on commit.
+            connection.execute(text("SET LOCAL ROLE argus_app"))
 
         return session
 
@@ -105,7 +120,6 @@ class PostgresOperationalRepository:
         """Run Alembic migrations with advisory lock to prevent races."""
         try:
             import asyncpg
-
             from alembic import command
             from alembic.config import Config
 
@@ -121,7 +135,10 @@ class PostgresOperationalRepository:
                     return
 
                 alembic_cfg = Config()
-                alembic_cfg.set_main_option("script_location", "alembic")
+                _pkg_root = Path(__file__).resolve().parents[3]
+                alembic_cfg.set_main_option(
+                    "script_location", str(_pkg_root / "alembic"),
+                )
                 alembic_cfg.set_main_option("sqlalchemy.url", url)
                 command.upgrade(alembic_cfg, "head")
                 logger.info("Alembic migrations applied successfully")
@@ -130,3 +147,155 @@ class PostgresOperationalRepository:
                 await lock_conn.close()
         except Exception:
             logger.warning("Alembic migration skipped (non-fatal)", exc_info=True)
+
+    async def _ensure_rls(self) -> None:
+        """Enable RLS + create tenant isolation policies on all tables.
+
+        Idempotent safety net that runs after create_all() to guarantee
+        RLS is active even if Alembic migrations were skipped.
+        Uses PL/pgSQL DO blocks so missing tables are silently skipped.
+        """
+        if _engine is None:
+            return
+
+        # Tables with standard tenant_id column
+        _std = [
+            "conversations", "messages", "sessions", "audit_log",
+            "alert_history", "investigations", "app_config",
+            "notification_channel_configs", "token_usage",
+            "alert_acknowledgments", "alert_rule_mutes",
+            "webhook_configs", "team_members", "team_invitations",
+            "subscriptions", "tenant_llm_configs", "service_configs",
+            "escalation_policies", "slack_installations",
+            "usage_notifications", "event_quota_usage",
+        ]
+
+        try:
+            async with _engine.begin() as conn:
+                # -- Create non-superuser role for RLS enforcement.
+                # Superusers bypass RLS, so application queries use
+                # SET LOCAL ROLE argus_app to drop privileges per-tx.
+                await conn.execute(text(
+                    "DO $$ BEGIN "
+                    "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'argus_app') "
+                    "THEN CREATE ROLE argus_app NOLOGIN; END IF; "
+                    "END $$"
+                ))
+                await conn.execute(text(
+                    "GRANT USAGE ON SCHEMA public TO argus_app"
+                ))
+                await conn.execute(text(
+                    "GRANT ALL ON ALL TABLES IN SCHEMA public TO argus_app"
+                ))
+                await conn.execute(text(
+                    "GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO argus_app"
+                ))
+                await conn.execute(text(
+                    "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                    "GRANT ALL ON TABLES TO argus_app"
+                ))
+                await conn.execute(text(
+                    "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                    "GRANT ALL ON SEQUENCES TO argus_app"
+                ))
+
+                # -- Standard tenant_id tables (skips missing)
+                tables_arr = ", ".join(f"'{t}'" for t in _std)
+                await conn.execute(text(
+                    f"DO $$ DECLARE t text; BEGIN "
+                    f"FOR t IN SELECT unnest(ARRAY[{tables_arr}]) LOOP "
+                    f"IF EXISTS (SELECT 1 FROM information_schema.tables "
+                    f"WHERE table_schema='public' AND table_name=t) THEN "
+                    f"EXECUTE format("
+                    f"'ALTER TABLE %I ENABLE ROW LEVEL SECURITY',t);"
+                    f"EXECUTE format("
+                    f"'ALTER TABLE %I FORCE ROW LEVEL SECURITY',t);"
+                    f"EXECUTE format("
+                    f"'DROP POLICY IF EXISTS tenant_isolation ON %I',t);"
+                    f"EXECUTE format("
+                    f"'CREATE POLICY tenant_isolation ON %I "
+                    f"USING (tenant_id = current_setting("
+                    f"''app.current_tenant'', true)) "
+                    f"WITH CHECK (tenant_id = current_setting("
+                    f"''app.current_tenant'', true))',t);"
+                    f"END IF; END LOOP; END $$"
+                ))
+
+                # -- tenants: uses `id` instead of tenant_id
+                await conn.execute(text("""
+                    DO $$ BEGIN
+                        ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
+                        ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
+                        DROP POLICY IF EXISTS tenant_isolation ON tenants;
+                        CREATE POLICY tenant_isolation ON tenants
+                            USING (id = current_setting('app.current_tenant', true))
+                            WITH CHECK (id = current_setting('app.current_tenant', true));
+                    END $$
+                """))
+
+                # -- users: global identity — visible via team_members
+                await conn.execute(text("""
+                    DO $$ BEGIN
+                        ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+                        ALTER TABLE users FORCE ROW LEVEL SECURITY;
+                        DROP POLICY IF EXISTS tenant_isolation ON users;
+                        DROP POLICY IF EXISTS user_read ON users;
+                        DROP POLICY IF EXISTS user_write ON users;
+                        DROP POLICY IF EXISTS user_modify ON users;
+                        DROP POLICY IF EXISTS user_delete ON users;
+                        CREATE POLICY user_read ON users FOR SELECT
+                            USING (id IN (
+                                SELECT user_id FROM team_members
+                                WHERE tenant_id = current_setting('app.current_tenant', true)
+                            ));
+                        CREATE POLICY user_write ON users FOR INSERT
+                            WITH CHECK (true);
+                        CREATE POLICY user_modify ON users FOR UPDATE
+                            USING (true) WITH CHECK (true);
+                        CREATE POLICY user_delete ON users FOR DELETE
+                            USING (true);
+                    END $$
+                """))
+
+                # -- api_keys: dual policies (tenant + key lookup)
+                await conn.execute(text("""
+                    DO $$ BEGIN
+                        ALTER TABLE api_keys ENABLE ROW LEVEL SECURITY;
+                        ALTER TABLE api_keys FORCE ROW LEVEL SECURITY;
+                        DROP POLICY IF EXISTS tenant_isolation ON api_keys;
+                        DROP POLICY IF EXISTS api_key_lookup ON api_keys;
+                        CREATE POLICY tenant_isolation ON api_keys
+                            USING (tenant_id = current_setting('app.current_tenant', true))
+                            WITH CHECK (tenant_id = current_setting('app.current_tenant', true));
+                        CREATE POLICY api_key_lookup ON api_keys FOR SELECT
+                            USING (current_setting('app.current_tenant', true) = '' OR
+                                   tenant_id = current_setting('app.current_tenant', true));
+                    END $$
+                """))
+
+                # -- Token tables: user_id via team_members
+                await conn.execute(text(
+                    "DO $$ DECLARE t text; BEGIN "
+                    "FOR t IN SELECT unnest(ARRAY["
+                    "'email_verification_tokens',"
+                    "'password_reset_tokens']) LOOP "
+                    "IF EXISTS (SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name=t) THEN "
+                    "EXECUTE format("
+                    "'ALTER TABLE %I ENABLE ROW LEVEL SECURITY',t);"
+                    "EXECUTE format("
+                    "'ALTER TABLE %I FORCE ROW LEVEL SECURITY',t);"
+                    "EXECUTE format("
+                    "'DROP POLICY IF EXISTS tenant_isolation ON %I',t);"
+                    "EXECUTE format("
+                    "'CREATE POLICY tenant_isolation ON %I "
+                    "USING (user_id IN ("
+                    "SELECT user_id FROM team_members "
+                    "WHERE tenant_id = current_setting("
+                    "''app.current_tenant'', true)))',t);"
+                    "END IF; END LOOP; END $$"
+                ))
+
+            logger.info("RLS policies ensured on all tables")
+        except Exception:
+            logger.warning("Failed to ensure RLS policies", exc_info=True)

@@ -209,10 +209,34 @@ async def _oauth_login_or_register(
     display_name: str,
     response: Response,
 ) -> Response:
-    """Find existing user or create new one, then issue JWT cookie."""
+    """Find existing user or create new one, then issue JWT cookie.
+
+    Uses raw engine session (no RLS) so the global User lookup works
+    regardless of current tenant context.
+    """
     settings = get_settings()
 
-    async with get_session() as session:
+    # In SaaS mode, use raw engine session for cross-tenant user lookup
+    if settings.deployment.mode == "saas":
+        from argus_agent.storage.postgres_operational import _engine
+
+        if not _engine:
+            raise HTTPException(500, "Database not initialized")
+
+        from sqlalchemy.ext.asyncio import AsyncSession as RawSession
+
+        session_factory = lambda: RawSession(_engine, expire_on_commit=False)  # noqa: E731
+    else:
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _rls_session():
+            async with get_session() as s:
+                yield s
+
+        session_factory = _rls_session  # noqa: E731
+
+    async with session_factory() as session:
         # 1. Check for existing OAuth user
         result = await session.execute(
             select(User).where(
@@ -228,7 +252,7 @@ async def _oauth_login_or_register(
             tm = await session.execute(
                 select(TeamMember).where(TeamMember.user_id == user.id)
             )
-            member = tm.scalar_one_or_none()
+            member = tm.scalars().first()
             tenant_id = member.tenant_id if member else "default"
             role = member.role if member else "member"
 
@@ -263,7 +287,7 @@ async def _oauth_login_or_register(
             tm = await session.execute(
                 select(TeamMember).where(TeamMember.user_id == existing_user.id)
             )
-            member = tm.scalar_one_or_none()
+            member = tm.scalars().first()
             tenant_id = member.tenant_id if member else "default"
             role = member.role if member else "member"
 

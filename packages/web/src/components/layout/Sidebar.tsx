@@ -13,6 +13,7 @@ const HIDDEN_PATHS = [
   "/reset-password",
   "/verify-email",
   "/onboarding",
+  "/accept-invite",
 ];
 
 const STORAGE_KEY = "argus-sidebar-collapsed";
@@ -214,6 +215,9 @@ export function Sidebar() {
 
   const [collapsed, setCollapsed] = useState(false);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
+  const [showNewOrgForm, setShowNewOrgForm] = useState(false);
+  const [newOrgName, setNewOrgName] = useState("");
+  const [creatingOrg, setCreatingOrg] = useState(false);
 
   useEffect(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -246,6 +250,33 @@ export function Sidebar() {
     router.push("/login");
   }
 
+  async function handleCreateOrg() {
+    if (!newOrgName.trim() || creatingOrg) return;
+    setCreatingOrg(true);
+    try {
+      const res = await fetch(`${apiBase}/api/v1/auth/create-org`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ org_name: newOrgName.trim() }),
+      });
+      if (!res.ok) return;
+      const { tenant_id } = await res.json();
+      // Switch into the new org
+      const switchRes = await fetch(`${apiBase}/api/v1/auth/switch-org`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenant_id }),
+      });
+      if (switchRes.ok) window.location.href = "/";
+    } finally {
+      setCreatingOrg(false);
+      setShowNewOrgForm(false);
+      setNewOrgName("");
+    }
+  }
+
   function toggleCollapse() {
     const next = !collapsed;
     setCollapsed(next);
@@ -262,7 +293,7 @@ export function Sidebar() {
     >
       {/* Logo */}
       <div className="flex h-14 items-center gap-2 border-b border-[var(--border)] px-4">
-        <img src="/argus-logo.png" alt="Argus" className="h-7 flex-shrink-0 object-contain" />
+        <img src="/favicon.png" alt="Argus" className="h-8 w-8 flex-shrink-0" />
         {!collapsed && (
           <span className="text-lg font-semibold tracking-tight">Argus</span>
         )}
@@ -309,28 +340,38 @@ export function Sidebar() {
       {/* Bottom section */}
       <div className="border-t border-[var(--border)] px-2 py-3 space-y-2">
         {/* Org switcher */}
-        {isSaaS && orgs.length > 1 && !collapsed && (
-          <select
-            value={orgs.find((o) => o.is_current)?.tenant_id ?? ""}
-            onChange={async (e) => {
-              const tid = e.target.value;
-              if (!tid) return;
-              const res = await fetch(`${apiBase}/api/v1/auth/switch-org`, {
-                method: "POST",
-                credentials: "include",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tenant_id: tid }),
-              });
-              if (res.ok) window.location.href = "/";
-            }}
-            className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1.5 text-xs text-[var(--foreground)] outline-none"
-          >
-            {orgs.map((o) => (
-              <option key={o.tenant_id} value={o.tenant_id}>
-                {o.tenant_name}{o.is_current ? " (current)" : ""}
-              </option>
-            ))}
-          </select>
+        {isSaaS && orgs.length > 0 && !collapsed && (
+          orgs.length > 1 ? (
+            <select
+              value={orgs.find((o) => o.is_current)?.tenant_id ?? ""}
+              onChange={async (e) => {
+                const tid = e.target.value;
+                if (!tid) return;
+                const res = await fetch(`${apiBase}/api/v1/auth/switch-org`, {
+                  method: "POST",
+                  credentials: "include",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ tenant_id: tid }),
+                });
+                if (res.ok) window.location.href = "/";
+              }}
+              className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1.5 text-xs text-[var(--foreground)] outline-none"
+            >
+              {orgs.map((o) => (
+                <option key={o.tenant_id} value={o.tenant_id}>
+                  {o.tenant_name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1.5">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-[var(--muted)]">
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <polyline points="9 22 9 12 15 12 15 22" />
+              </svg>
+              <span className="truncate text-xs text-[var(--foreground)]">{orgs[0].tenant_name}</span>
+            </div>
+          )
         )}
         {isSaaS && orgs.length > 1 && collapsed && (
           <button
@@ -341,13 +382,48 @@ export function Sidebar() {
             }}
             className="flex w-full items-center justify-center rounded-md px-2 py-2 text-sm text-[var(--muted)] transition-colors hover:bg-[var(--card)] hover:text-[var(--foreground)]"
           >
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-              <circle cx="9" cy="7" r="4" />
-              <line x1="19" y1="8" x2="19" y2="14" />
-              <line x1="22" y1="11" x2="16" y2="11" />
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              <polyline points="9 22 9 12 15 12 15 22" />
             </svg>
           </button>
+        )}
+        {/* New Organization */}
+        {isSaaS && !collapsed && (
+          showNewOrgForm ? (
+            <div className="flex gap-1">
+              <input
+                type="text"
+                placeholder="Org name"
+                value={newOrgName}
+                onChange={(e) => setNewOrgName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleCreateOrg();
+                  if (e.key === "Escape") { setShowNewOrgForm(false); setNewOrgName(""); }
+                }}
+                autoFocus
+                className="flex-1 min-w-0 rounded border border-[var(--border)] bg-transparent px-2 py-1 text-xs text-[var(--foreground)] focus:border-argus-500 focus:outline-none"
+              />
+              <button
+                onClick={handleCreateOrg}
+                disabled={creatingOrg || !newOrgName.trim()}
+                className="rounded bg-argus-600 px-2 py-1 text-xs text-white hover:bg-argus-500 disabled:opacity-50"
+              >
+                {creatingOrg ? "..." : "Create"}
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowNewOrgForm(true)}
+              className="flex w-full items-center gap-2 rounded-md border border-dashed border-[var(--border)] px-2 py-1.5 text-xs text-[var(--muted)] transition-colors hover:border-argus-500 hover:text-[var(--foreground)]"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              New Organization
+            </button>
+          )
         )}
         {/* Logout */}
         <button

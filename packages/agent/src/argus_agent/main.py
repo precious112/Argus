@@ -106,6 +106,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     settings = get_settings()
 
+    # Configure logging in the worker process (basicConfig in main() only
+    # runs in the parent; uvicorn workers need their own setup)
+    logging.basicConfig(
+        level=logging.DEBUG if settings.debug else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        force=True,
+    )
+
     # Ensure data directory exists
     Path(settings.storage.data_dir).mkdir(parents=True, exist_ok=True)
 
@@ -394,12 +402,15 @@ def _make_tenant_aware_task(coro_fn):
     async def _wrapper():
         from sqlalchemy import select
 
-        from argus_agent.storage.repositories import get_session
+        from argus_agent.storage.postgres_operational import get_raw_session
         from argus_agent.storage.saas_models import Tenant
         from argus_agent.tenancy.context import set_tenant_id
 
         try:
-            async with get_session() as session:
+            raw = get_raw_session()
+            if not raw:
+                return
+            async with raw as session:
                 result = await session.execute(select(Tenant.id))
                 tenant_ids = [row[0] for row in result.all()]
         except Exception:
@@ -568,14 +579,18 @@ def create_app() -> FastAPI:
             except Exception:
                 pass  # Redis down — fall through to DB
 
-        # DB lookup
+        # DB lookup — use raw session (no RLS) because this runs before
+        # tenant context is set and the user must be visible cross-tenant.
         try:
             from sqlalchemy import select
+            from sqlalchemy.ext.asyncio import AsyncSession as RawSession
 
             from argus_agent.storage.models import User
-            from argus_agent.storage.repositories import get_session
+            from argus_agent.storage.postgres_operational import _engine
 
-            async with get_session() as session:
+            if not _engine:
+                return False
+            async with RawSession(_engine, expire_on_commit=False) as session:
                 result = await session.execute(
                     select(User.id).where(
                         User.id == user_id,
@@ -626,6 +641,8 @@ def create_app() -> FastAPI:
             response.delete_cookie("argus_token", path="/")
             return response
         request.state.user = payload
+        from argus_agent.tenancy.context import set_tenant_id
+        set_tenant_id(payload.get("tenant_id", "default"))
         return await call_next(request)
 
     # Tenant context middleware
@@ -646,6 +663,7 @@ def create_app() -> FastAPI:
     # SaaS-only routers
     if settings.deployment.mode == "saas":
         from argus_agent.api.billing import router as billing_router
+        from argus_agent.api.email_integration import router as email_integration_router
         from argus_agent.api.investigations import router as investigations_router
         from argus_agent.api.keys import router as keys_router
         from argus_agent.api.llm_keys import router as llm_keys_router
@@ -681,6 +699,7 @@ def create_app() -> FastAPI:
         app.include_router(service_config_router, prefix="/api/v1")
         app.include_router(escalation_router, prefix="/api/v1")
         app.include_router(investigations_router, prefix="/api/v1")
+        app.include_router(email_integration_router, prefix="/api/v1")
         app.include_router(slack_integration_router, prefix="/api/v1")
 
     # Serve static web UI in production

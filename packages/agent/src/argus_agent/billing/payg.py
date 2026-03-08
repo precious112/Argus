@@ -1,137 +1,141 @@
-"""Pay-As-You-Go budget management and Polar metered billing."""
+"""Prepaid credit balance management for PAYG overages."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 
-from argus_agent.billing.plans import PAYG_RATE_CENTS_PER_EVENT, get_plan_limits
-from argus_agent.config import get_settings
 from argus_agent.storage.repositories import get_session
-from argus_agent.storage.saas_models import Subscription, Tenant
+from argus_agent.storage.saas_models import CreditTransaction, Tenant
 
-logger = logging.getLogger("argus.billing.payg")
-
-
-async def set_payg_budget(tenant_id: str, budget_cents: int) -> dict[str, Any]:
-    """Enable/update PAYG budget. Set to 0 to disable.
-
-    Returns the updated PAYG configuration.
-    """
-    async with get_session() as session:
-        tenant = await session.get(Tenant, tenant_id)
-        if not tenant:
-            raise HTTPException(404, "Tenant not found")
-
-        if tenant.plan == "free":
-            raise HTTPException(
-                403, "Pay-As-You-Go is only available on paid plans. Upgrade to Teams or Business."
-            )
-
-        if budget_cents < 0:
-            raise HTTPException(400, "Budget must be >= 0")
-
-        tenant.payg_enabled = budget_cents > 0
-        tenant.payg_monthly_budget_cents = budget_cents
-        tenant.updated_at = datetime.now(UTC).replace(tzinfo=None)
-        await session.commit()
-
-    return await get_payg_status(tenant_id)
+logger = logging.getLogger("argus.billing.credits")
 
 
-async def get_payg_status(tenant_id: str) -> dict[str, Any]:
-    """Return current PAYG state: enabled, budget, spend, remaining."""
+def _get_raw_session():
+    """Get a raw session without RLS for system-level credit operations."""
+    from argus_agent.storage.postgres_operational import get_raw_session
+
+    session = get_raw_session()
+    if session is None:
+        raise RuntimeError("PostgreSQL engine not initialized")
+    return session
+
+
+async def get_credit_status(tenant_id: str) -> dict[str, Any]:
+    """Return current credit balance and recent transactions."""
     async with get_session() as session:
         tenant = await session.get(Tenant, tenant_id)
         if not tenant:
             return {
-                "enabled": False,
-                "budget_cents": 0,
-                "spent_cents": 0,
-                "remaining_cents": 0,
-                "overage_events": 0,
-                "rate_per_1k_cents": 30,
+                "balance_cents": 0,
+                "balance_dollars": 0.0,
+                "recent_transactions": [],
             }
 
-        # Get billing period start
         result = await session.execute(
-            select(Subscription)
-            .where(
-                Subscription.tenant_id == tenant_id,
-                Subscription.status.in_(["active", "canceled"]),
-            )
-            .order_by(Subscription.created_at.desc())
-            .limit(1)
+            select(CreditTransaction)
+            .where(CreditTransaction.tenant_id == tenant_id)
+            .order_by(CreditTransaction.created_at.desc())
+            .limit(10)
         )
-        sub = result.scalar_one_or_none()
-
-    if sub and sub.current_period_start:
-        period_start = sub.current_period_start
-    else:
-        now = datetime.now(UTC).replace(tzinfo=None)
-        period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    limits = get_plan_limits(tenant.plan)
-
-    # Count events in current billing period
-    events_count = 0
-    try:
-        from argus_agent.storage.repositories import get_metrics_repository
-
-        repo = get_metrics_repository()
-        events_count = await asyncio.to_thread(repo.get_event_quota_count, tenant_id, period_start)
-    except Exception:
-        pass
-
-    overage_events = max(0, events_count - limits.monthly_event_limit)
-    spend_cents = round(overage_events * PAYG_RATE_CENTS_PER_EVENT, 2)
-    budget_cents = tenant.payg_monthly_budget_cents
-    remaining = max(0, budget_cents - spend_cents) if tenant.payg_enabled else 0
+        txns = result.scalars().all()
 
     return {
-        "enabled": tenant.payg_enabled,
-        "budget_cents": budget_cents,
-        "spent_cents": spend_cents,
-        "remaining_cents": round(remaining, 2),
-        "overage_events": overage_events,
-        "rate_per_1k_cents": 30,
+        "balance_cents": tenant.payg_credit_balance_cents,
+        "balance_dollars": tenant.payg_credit_balance_cents / 100,
+        "recent_transactions": [
+            {
+                "id": tx.id,
+                "amount_cents": tx.amount_cents,
+                "balance_after_cents": tx.balance_after_cents,
+                "tx_type": tx.tx_type,
+                "description": tx.description,
+                "polar_order_id": tx.polar_order_id,
+                "created_at": tx.created_at.isoformat() if tx.created_at else None,
+            }
+            for tx in txns
+        ],
     }
 
 
-async def report_payg_events_to_polar(tenant_id: str, overage_events: int) -> None:
-    """Report overage event count to Polar meter for end-of-cycle invoicing.
-
-    This is a best-effort operation — failures are logged but don't block ingest.
-    """
-    settings = get_settings()
-    meter_id = settings.deployment.polar_payg_meter_id
-    if not meter_id:
-        return
-
-    async with get_session() as session:
-        tenant = await session.get(Tenant, tenant_id)
-        if not tenant or not tenant.polar_customer_id:
-            return
-
-    try:
-        from argus_agent.billing.polar_service import _get_polar_client
-
-        polar = _get_polar_client()
-        polar.events.ingest(
-            request={
-                "events": [
-                    {
-                        "customer_id": tenant.polar_customer_id,
-                        "name": "payg_overage_events",
-                        "metadata": {"count": overage_events},
-                    }
-                ],
-            }
+async def add_credits(
+    tenant_id: str,
+    amount_cents: int,
+    polar_order_id: str = "",
+    description: str = "",
+) -> int:
+    """Add credits to tenant balance. Returns new balance."""
+    async with _get_raw_session() as session:
+        result = await session.execute(
+            text(
+                "UPDATE tenants "
+                "SET payg_credit_balance_cents = payg_credit_balance_cents + :amount, "
+                "    updated_at = :now "
+                "WHERE id = :tid "
+                "RETURNING payg_credit_balance_cents"
+            ),
+            {
+                "amount": amount_cents,
+                "now": datetime.now(UTC).replace(tzinfo=None),
+                "tid": tenant_id,
+            },
         )
-    except Exception:
-        logger.warning("Failed to report PAYG events to Polar for %s", tenant_id, exc_info=True)
+        row = result.fetchone()
+        if not row:
+            logger.warning("add_credits: tenant %s not found", tenant_id)
+            return 0
+        new_balance = row[0]
+
+        session.add(CreditTransaction(
+            id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
+            amount_cents=amount_cents,
+            balance_after_cents=new_balance,
+            tx_type="purchase",
+            description=description or f"Credit purchase (${amount_cents / 100:.2f})",
+            polar_order_id=polar_order_id,
+        ))
+        await session.commit()
+
+    logger.info(
+        "Added %d cents to tenant %s (new balance: %d cents, order: %s)",
+        amount_cents, tenant_id, new_balance, polar_order_id,
+    )
+    return new_balance
+
+
+async def deduct_credits(
+    tenant_id: str, cost_cents: int, overage_events: int,
+) -> bool:
+    """Deduct credits for overage events. Returns True on success, False if insufficient."""
+    async with _get_raw_session() as session:
+        result = await session.execute(
+            text(
+                "UPDATE tenants "
+                "SET payg_credit_balance_cents = payg_credit_balance_cents - :cost, "
+                "    updated_at = :now "
+                "WHERE id = :tid AND payg_credit_balance_cents >= :cost "
+                "RETURNING payg_credit_balance_cents"
+            ),
+            {"cost": cost_cents, "now": datetime.now(UTC).replace(tzinfo=None), "tid": tenant_id},
+        )
+        row = result.fetchone()
+        if not row:
+            return False
+        new_balance = row[0]
+
+        session.add(CreditTransaction(
+            id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
+            amount_cents=-cost_cents,
+            balance_after_cents=new_balance,
+            tx_type="overage_deduction",
+            description=f"{overage_events} overage events ({cost_cents}c)",
+        ))
+        await session.commit()
+
+    return True

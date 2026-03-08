@@ -133,6 +133,7 @@ class SecurityScanner:
         from argus_agent.collectors.remote import get_webhook_tenants
 
         tenants = await get_webhook_tenants()
+        logger.info("REMOTE_SECURITY webhook_tenants=%d", len(tenants))
         if not tenants:
             logger.debug("No webhook tenants configured — skipping remote scan")
             self._last_results = results
@@ -154,6 +155,10 @@ class SecurityScanner:
             try:
                 findings = await check_fn(tenants)
                 results["checks"][name] = findings
+                logger.info(
+                    "REMOTE_SECURITY_CHECK name=%s findings=%d",
+                    name, len(findings.get("events", [])),
+                )
 
                 for finding in findings.get("events", []):
                     # Set tenant context so alerts route to the correct tenant

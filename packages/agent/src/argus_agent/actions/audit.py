@@ -27,8 +27,11 @@ class AuditLogger:
         conversation_id: str = "",
     ) -> int:
         """Log an action to the audit trail. Returns the entry ID."""
+        from argus_agent.tenancy.context import get_tenant_id
+
         async with get_session() as session:
             entry = AuditLog(
+                tenant_id=get_tenant_id(),
                 action=action,
                 command=command,
                 result=result,

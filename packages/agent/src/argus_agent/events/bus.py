@@ -46,6 +46,14 @@ class EventBus:
 
     async def publish(self, event: Event) -> None:
         """Publish an event to all matching subscribers."""
+        # Auto-inject tenant context so downstream handlers know the origin tenant
+        if "tenant_id" not in (event.data or {}):
+            from argus_agent.tenancy.context import get_tenant_id
+
+            if event.data is None:
+                event.data = {}
+            event.data["tenant_id"] = get_tenant_id()
+
         self._recent_events.append(event)
         if len(self._recent_events) > self._max_recent:
             self._recent_events = self._recent_events[-self._max_recent :]

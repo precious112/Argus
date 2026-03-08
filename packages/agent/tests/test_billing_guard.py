@@ -10,6 +10,7 @@ import pytest
 from fastapi import HTTPException
 
 from argus_agent.billing.usage_guard import (
+    _billing_period_start,
     check_api_key_limit,
     check_event_ingest_limit,
     check_team_member_limit,
@@ -36,22 +37,25 @@ def _mock_session_with_count(count: int):
     return mock_session
 
 
-def _mock_tenant(plan: str = "teams", payg_enabled: bool = False, payg_budget: int = 0):
+def _mock_tenant(plan: str = "teams", credit_balance: int = 0):
     """Create a mock Tenant object."""
     tenant = MagicMock()
     tenant.plan = plan
-    tenant.payg_enabled = payg_enabled
-    tenant.payg_monthly_budget_cents = payg_budget
+    tenant.payg_credit_balance_cents = credit_balance
     tenant.name = "Test Org"
     return tenant
 
 
-def _mock_subscription(period_start: datetime | None = None):
+def _mock_subscription(
+    period_start: datetime | None = None,
+    billing_interval: str = "month",
+):
     """Create a mock Subscription object."""
     sub = MagicMock()
     sub.current_period_start = period_start
     sub.current_period_end = None
     sub.status = "active"
+    sub.billing_interval = billing_interval
     return sub
 
 
@@ -163,7 +167,7 @@ async def test_api_key_limit_free_under_limit():
         await check_api_key_limit(_mock_request())
 
 
-# --- Event ingest limit + PAYG tests ---
+# --- Event ingest limit + credit tests ---
 
 _REPO_P = "argus_agent.storage.repositories.get_metrics_repository"
 _SUB_P = f"{_P}._get_tenant_and_subscription"
@@ -203,9 +207,9 @@ async def test_event_ingest_under_quota_allows():
 
 
 @pytest.mark.asyncio
-async def test_event_ingest_over_quota_no_payg_rejects():
-    """Events over plan quota without PAYG should raise 429."""
-    tenant = _mock_tenant(plan="teams", payg_enabled=False)
+async def test_event_ingest_over_quota_no_credits_rejects():
+    """Events over plan quota without credits should raise 429."""
+    tenant = _mock_tenant(plan="teams", credit_balance=0)
     mock_repo = MagicMock()
     mock_repo.get_event_quota_count = MagicMock(return_value=110_000)
 
@@ -213,37 +217,42 @@ async def test_event_ingest_over_quota_no_payg_rejects():
         with pytest.raises(HTTPException) as exc_info:
             await check_event_ingest_limit("t1")
         assert exc_info.value.status_code == 429
-        assert "Pay-As-You-Go" in str(exc_info.value.detail)
+        assert "credits" in str(exc_info.value.detail).lower()
 
 
 @pytest.mark.asyncio
-async def test_event_ingest_over_quota_payg_allows():
-    """Events over plan quota with PAYG budget should be allowed."""
-    tenant = _mock_tenant(
-        plan="teams", payg_enabled=True, payg_budget=1000,
-    )
+async def test_event_ingest_over_quota_with_credits_allows():
+    """Events over plan quota with credits should be allowed (deduction succeeds)."""
+    tenant = _mock_tenant(plan="teams", credit_balance=1000)
     mock_repo = MagicMock()
     mock_repo.get_event_quota_count = MagicMock(return_value=110_000)
 
     with _ingest_ctx(tenant, None, mock_repo):
-        await check_event_ingest_limit("t1")
-
-
-@pytest.mark.asyncio
-async def test_event_ingest_payg_budget_exhausted_rejects():
-    """Events rejected when PAYG budget is exhausted."""
-    # $1=100c. 10K overage * 0.03c/event = 300c > 100c budget
-    tenant = _mock_tenant(
-        plan="teams", payg_enabled=True, payg_budget=100,
-    )
-    mock_repo = MagicMock()
-    mock_repo.get_event_quota_count = MagicMock(return_value=110_000)
-
-    with _ingest_ctx(tenant, None, mock_repo):
-        with pytest.raises(HTTPException) as exc_info:
+        with patch(
+            "argus_agent.billing.payg.deduct_credits",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
             await check_event_ingest_limit("t1")
-        assert exc_info.value.status_code == 429
-        assert "PAYG budget exhausted" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_event_ingest_credits_insufficient_rejects():
+    """Events rejected when credit deduction fails (insufficient balance)."""
+    tenant = _mock_tenant(plan="teams", credit_balance=1)
+    mock_repo = MagicMock()
+    mock_repo.get_event_quota_count = MagicMock(return_value=110_000)
+
+    with _ingest_ctx(tenant, None, mock_repo):
+        with patch(
+            "argus_agent.billing.payg.deduct_credits",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await check_event_ingest_limit("t1")
+            assert exc_info.value.status_code == 429
+            assert "Insufficient credits" in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
@@ -272,3 +281,69 @@ async def test_event_ingest_free_plan_uses_calendar_month():
         await check_event_ingest_limit("t1")
         call_args = mock_repo.get_event_quota_count.call_args[0]
         assert call_args[1].day == 1
+
+
+# --- _billing_period_start yearly sub-period tests ---
+
+
+def test_billing_period_no_subscription():
+    """No subscription returns first of current month."""
+    result = _billing_period_start(None)
+    assert result.day == 1
+
+
+def test_billing_period_monthly_sub():
+    """Monthly subscription returns period_start directly."""
+    sub = _mock_subscription(
+        period_start=datetime(2026, 2, 15),
+        billing_interval="month",
+    )
+    result = _billing_period_start(sub)
+    assert result == datetime(2026, 2, 15)
+
+
+def test_billing_period_yearly_sub_same_month():
+    """Yearly sub started Jan 15 — March query returns Mar 15 if past anchor."""
+    sub = _mock_subscription(
+        period_start=datetime(2026, 1, 15),
+        billing_interval="year",
+    )
+    # Mock now to March 20
+    with patch(f"{_P}.datetime") as mock_dt:
+        now = datetime(2026, 3, 20, 12, 0, 0)
+        mock_dt.now.return_value = now
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+        result = _billing_period_start(sub)
+    assert result == datetime(2026, 3, 15, 0, 0, 0)
+
+
+def test_billing_period_yearly_sub_before_anchor():
+    """Yearly sub started Jan 31 — in Feb (before anchor), should return Jan 28/31."""
+    sub = _mock_subscription(
+        period_start=datetime(2026, 1, 31),
+        billing_interval="year",
+    )
+    # Mock now to Feb 10 (before Feb 28 anchor)
+    with patch(f"{_P}.datetime") as mock_dt:
+        now = datetime(2026, 2, 10, 12, 0, 0)
+        mock_dt.now.return_value = now
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+        result = _billing_period_start(sub)
+    # Jan 31 anchor clamped to Jan 31 (previous month)
+    assert result == datetime(2026, 1, 31, 0, 0, 0)
+
+
+def test_billing_period_yearly_sub_day_clamping():
+    """Yearly sub started Jan 31 — Feb should clamp to Feb 28."""
+    sub = _mock_subscription(
+        period_start=datetime(2026, 1, 31),
+        billing_interval="year",
+    )
+    # Mock now to March 1 (past Feb 28 anchor for previous sub-period)
+    with patch(f"{_P}.datetime") as mock_dt:
+        now = datetime(2026, 3, 1, 12, 0, 0)
+        mock_dt.now.return_value = now
+        mock_dt.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+        result = _billing_period_start(sub)
+    # Feb 28 (clamped from 31)
+    assert result == datetime(2026, 2, 28, 0, 0, 0)

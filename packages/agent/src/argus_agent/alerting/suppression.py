@@ -6,10 +6,11 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from argus_agent.storage.models import AlertAcknowledgment, AlertRuleMute
 from argus_agent.storage.repositories import get_session
+from argus_agent.tenancy.context import get_tenant_id
 
 logger = logging.getLogger("argus.alerting.suppression")
 
@@ -44,25 +45,51 @@ class SuppressionService:
             row = result.scalar_one_or_none()
 
             if row is None:
-                row = AlertAcknowledgment(
-                    dedup_key=dedup_key,
-                    rule_id=rule_id,
-                    source=source,
-                    acknowledged_by=acknowledged_by,
-                    reason=reason,
-                    expires_at=expires_at,
-                    active=True,
-                )
-                session.add(row)
+                try:
+                    row = AlertAcknowledgment(
+                        tenant_id=get_tenant_id(),
+                        dedup_key=dedup_key,
+                        rule_id=rule_id,
+                        source=source,
+                        acknowledged_by=acknowledged_by,
+                        reason=reason,
+                        expires_at=expires_at,
+                        active=True,
+                    )
+                    session.add(row)
+                    await session.commit()
+                except Exception:
+                    # Row exists but RLS hid it from SELECT —
+                    # fall back to a raw UPDATE that bypasses ORM.
+                    await session.rollback()
+                    await session.execute(
+                        update(AlertAcknowledgment)
+                        .where(AlertAcknowledgment.dedup_key == dedup_key)
+                        .values(
+                            acknowledged_by=acknowledged_by,
+                            reason=reason,
+                            expires_at=expires_at,
+                            active=True,
+                        )
+                    )
+                    await session.commit()
             else:
                 row.acknowledged_by = acknowledged_by
                 row.reason = reason
                 row.expires_at = expires_at
                 row.active = True
+                await session.commit()
 
-            await session.commit()
-            await session.refresh(row)
-            return self._ack_to_dict(row)
+            # Re-fetch to return current state
+            result = await session.execute(
+                select(AlertAcknowledgment).where(
+                    AlertAcknowledgment.dedup_key == dedup_key,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row:
+                return self._ack_to_dict(row)
+            return {"dedup_key": dedup_key, "active": True}
 
     async def unacknowledge(self, dedup_key: str) -> bool:
         """Deactivate an acknowledgment."""
@@ -119,6 +146,7 @@ class SuppressionService:
 
             if row is None:
                 row = AlertRuleMute(
+                    tenant_id=get_tenant_id(),
                     rule_id=rule_id,
                     muted_by=muted_by,
                     reason=reason,

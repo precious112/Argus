@@ -9,12 +9,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from argus_agent.auth.dependencies import require_role
-from argus_agent.billing.payg import get_payg_status, set_payg_budget
+from argus_agent.billing.payg import get_credit_status
 from argus_agent.billing.plans import PLAN_LIMITS, PLAN_PRICING
 from argus_agent.billing.polar_service import (
     create_checkout_session,
+    create_credit_checkout_session,
     create_customer_portal_session,
     get_subscription_status,
+    upgrade_subscription,
 )
 from argus_agent.billing.usage_guard import get_tenant_usage_summary
 from argus_agent.config import get_settings
@@ -29,8 +31,8 @@ class CheckoutRequest(BaseModel):
     billing_interval: str = "month"
 
 
-class PaygBudgetRequest(BaseModel):
-    budget_dollars: float = 0.0
+class CreditCheckoutRequest(BaseModel):
+    amount_dollars: float
 
 
 @router.get("/plans")
@@ -69,6 +71,7 @@ async def list_plans() -> dict[str, Any]:
         "pricing": pricing,
         "payg": {
             "rate_per_1k_dollars": 0.30,
+            "model": "prepaid_credits",
             "available_on": ["teams", "business"],
         },
     }
@@ -92,8 +95,8 @@ async def billing_status(user: dict = Depends(require_role("owner", "admin"))) -
 async def create_checkout(
     body: CheckoutRequest | None = None,
     user: dict = Depends(require_role("owner", "admin")),
-) -> dict[str, str]:
-    """Create a Polar checkout session for the specified plan and interval."""
+) -> dict[str, Any]:
+    """Create a Polar checkout session, or upgrade an existing subscription."""
     settings = get_settings()
     tenant_id = user.get("tenant_id", "default")
 
@@ -104,6 +107,19 @@ async def create_checkout(
         plan_id = "teams"
     if billing_interval not in ("month", "year"):
         billing_interval = "month"
+
+    # Check for existing active subscription
+    existing = await get_subscription_status(tenant_id)
+    if existing and existing["status"] == "active" and existing["plan_id"] != plan_id:
+        try:
+            return await upgrade_subscription(
+                tenant_id, plan_id, billing_interval=billing_interval,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception:
+            logger.exception("Upgrade failed for tenant %s", tenant_id)
+            raise HTTPException(status_code=502, detail="Failed to upgrade subscription")
 
     success_url = f"{settings.deployment.frontend_url}/billing?upgraded=true"
 
@@ -128,34 +144,34 @@ async def customer_portal(user: dict = Depends(require_role("owner", "admin"))) 
         raise HTTPException(status_code=502, detail="Failed to create portal session")
 
 
-@router.get("/payg")
-async def get_payg(user: dict = Depends(require_role("owner", "admin"))) -> dict[str, Any]:
-    """Get current PAYG configuration and spend."""
+@router.get("/credits")
+async def get_credits(user: dict = Depends(require_role("owner", "admin"))) -> dict[str, Any]:
+    """Get current credit balance and recent transactions."""
     tenant_id = user.get("tenant_id", "default")
-    status = await get_payg_status(tenant_id)
-    return {
-        "enabled": status["enabled"],
-        "budget_dollars": status["budget_cents"] / 100,
-        "spent_dollars": status["spent_cents"] / 100,
-        "remaining_dollars": status["remaining_cents"] / 100,
-        "overage_events": status["overage_events"],
-        "rate_per_1k_dollars": 0.30,
-    }
+    return await get_credit_status(tenant_id)
 
 
-@router.put("/payg")
-async def update_payg(
-    body: PaygBudgetRequest,
+@router.post("/credits/checkout")
+async def create_credit_checkout(
+    body: CreditCheckoutRequest,
     user: dict = Depends(require_role("owner", "admin")),
 ) -> dict[str, Any]:
-    """Set PAYG budget. Set budget_dollars to 0 to disable."""
+    """Create a Polar checkout to purchase prepaid credits."""
+    settings = get_settings()
     tenant_id = user.get("tenant_id", "default")
-    budget_cents = int(body.budget_dollars * 100)
-    result = await set_payg_budget(tenant_id, budget_cents)
-    return {
-        "enabled": result["enabled"],
-        "budget_dollars": result["budget_cents"] / 100,
-        "spent_dollars": result["spent_cents"] / 100,
-        "remaining_dollars": result["remaining_cents"] / 100,
-        "overage_events": result["overage_events"],
-    }
+
+    if body.amount_dollars < 5:
+        raise HTTPException(400, "Minimum credit purchase is $5")
+    if body.amount_dollars > 500:
+        raise HTTPException(400, "Maximum credit purchase is $500")
+
+    amount_cents = int(body.amount_dollars * 100)
+    success_url = f"{settings.deployment.frontend_url}/billing?credits_purchased=true"
+
+    try:
+        return await create_credit_checkout_session(tenant_id, amount_cents, success_url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception:
+        logger.exception("Credit checkout failed for tenant %s", tenant_id)
+        raise HTTPException(502, "Failed to create credit checkout session")

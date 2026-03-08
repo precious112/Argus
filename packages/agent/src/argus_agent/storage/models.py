@@ -50,7 +50,8 @@ class User(Base):
 
     __tablename__ = "users"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "username", name="uq_user_tenant_username"),
+        UniqueConstraint("username", name="uq_user_username"),
+        UniqueConstraint("email", name="uq_user_email"),
         {},
     )
 
@@ -63,6 +64,7 @@ class User(Base):
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     oauth_provider: Mapped[str] = mapped_column(String(20), default="")  # google, github
     oauth_id: Mapped[str] = mapped_column(String(255), default="")
+    email_alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 

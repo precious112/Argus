@@ -25,13 +25,19 @@ interface PlanPricing {
   [planId: string]: { monthly: number; annual: number };
 }
 
-interface PaygInfo {
-  enabled: boolean;
-  budget_dollars: number;
-  spent_dollars: number;
-  remaining_dollars: number;
-  overage_events: number;
-  rate_per_1k_dollars: number;
+interface CreditTransaction {
+  id: string;
+  amount_cents: number;
+  balance_after_cents: number;
+  tx_type: string;
+  description: string;
+  created_at: string | null;
+}
+
+interface CreditsInfo {
+  balance_cents: number;
+  balance_dollars: number;
+  recent_transactions: CreditTransaction[];
 }
 
 interface BillingStatus {
@@ -44,11 +50,11 @@ interface BillingStatus {
   data_retention_days: number;
   billing_period_start: string | null;
   billing_period_end: string | null;
-  payg: {
-    enabled: boolean;
-    budget_cents: number;
-    spent_cents: number;
+  credits: {
+    balance_cents: number;
+    balance_dollars: number;
     overage_events: number;
+    overage_cost_cents: number;
     rate_per_1k_cents: number;
   };
   features: Record<string, boolean>;
@@ -91,6 +97,8 @@ function XIcon() {
   return <span className="text-[var(--muted)]">&#10007;</span>;
 }
 
+const CREDIT_PRESETS = [5, 10, 25, 50];
+
 export default function BillingPage() {
   return (
     <Suspense
@@ -108,25 +116,27 @@ export default function BillingPage() {
 function BillingContent() {
   const searchParams = useSearchParams();
   const upgraded = searchParams.get("upgraded") === "true";
+  const creditsPurchased = searchParams.get("credits_purchased") === "true";
 
   const [plans, setPlans] = useState<PlanInfo[]>([]);
   const [pricing, setPricing] = useState<PlanPricing>({});
   const [status, setStatus] = useState<BillingStatus | null>(null);
-  const [paygStatus, setPaygStatus] = useState<PaygInfo | null>(null);
+  const [creditsInfo, setCreditsInfo] = useState<CreditsInfo | null>(null);
   const [error, setError] = useState("");
+  const [successMsg, setSuccessMsg] = useState("");
   const [loading, setLoading] = useState(true);
   const [checkoutLoading, setCheckoutLoading] = useState("");
   const [billingInterval, setBillingInterval] = useState<"month" | "year">("month");
-  const [paygBudget, setPaygBudget] = useState("");
-  const [paygSaving, setPaygSaving] = useState(false);
+  const [buyAmount, setBuyAmount] = useState(10);
+  const [buyLoading, setBuyLoading] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [plansRes, statusRes, paygRes] = await Promise.all([
+      const [plansRes, statusRes, creditsRes] = await Promise.all([
         fetch(`${apiBase}/api/v1/billing/plans`, { credentials: "include" }),
         fetch(`${apiBase}/api/v1/billing/status`, { credentials: "include" }),
-        fetch(`${apiBase}/api/v1/billing/payg`, { credentials: "include" }),
+        fetch(`${apiBase}/api/v1/billing/credits`, { credentials: "include" }),
       ]);
       if (plansRes.ok) {
         const data = await plansRes.json();
@@ -136,8 +146,8 @@ function BillingContent() {
       if (statusRes.ok) {
         setStatus(await statusRes.json());
       }
-      if (paygRes.ok) {
-        setPaygStatus(await paygRes.json());
+      if (creditsRes.ok) {
+        setCreditsInfo(await creditsRes.json());
       }
     } catch {
       setError("Failed to load billing data");
@@ -149,14 +159,15 @@ function BillingContent() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   useEffect(() => {
-    if (paygStatus) {
-      setPaygBudget(paygStatus.budget_dollars > 0 ? paygStatus.budget_dollars.toString() : "");
+    if (creditsPurchased) {
+      setSuccessMsg("Credits purchased successfully!");
     }
-  }, [paygStatus]);
+  }, [creditsPurchased]);
 
   async function handleCheckout(planId: string) {
     setCheckoutLoading(planId);
     setError("");
+    setSuccessMsg("");
     try {
       const res = await fetch(`${apiBase}/api/v1/billing/checkout`, {
         method: "POST",
@@ -170,7 +181,10 @@ function BillingContent() {
         return;
       }
       const data = await res.json();
-      if (data.checkout_url) {
+      if (data.upgraded) {
+        setSuccessMsg(`Successfully upgraded to ${data.plan_id}!`);
+        fetchData();
+      } else if (data.checkout_url) {
         window.location.href = data.checkout_url;
       }
     } catch {
@@ -197,29 +211,29 @@ function BillingContent() {
     }
   }
 
-  async function handleSavePayg() {
-    setPaygSaving(true);
+  async function handleBuyCredits() {
+    setBuyLoading(true);
     setError("");
     try {
-      const budgetDollars = paygBudget ? parseFloat(paygBudget) : 0;
-      const res = await fetch(`${apiBase}/api/v1/billing/payg`, {
-        method: "PUT",
+      const res = await fetch(`${apiBase}/api/v1/billing/credits/checkout`, {
+        method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ budget_dollars: budgetDollars }),
+        body: JSON.stringify({ amount_dollars: buyAmount }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(data.detail || "Failed to update PAYG settings");
+        setError(data.detail || "Failed to create credit checkout");
         return;
       }
       const data = await res.json();
-      setPaygStatus(data);
-      fetchData();
+      if (data.checkout_url) {
+        window.location.href = data.checkout_url;
+      }
     } catch {
-      setError("Failed to update PAYG settings");
+      setError("Failed to create credit checkout");
     } finally {
-      setPaygSaving(false);
+      setBuyLoading(false);
     }
   }
 
@@ -241,7 +255,8 @@ function BillingContent() {
   const eventUsagePct = status
     ? Math.min((status.monthly_events.current / status.monthly_events.limit) * 100, 100)
     : 0;
-  const paygActive = status?.payg?.enabled && status.monthly_events.current > status.monthly_events.limit;
+  const hasCredits = (status?.credits?.balance_cents ?? 0) > 0;
+  const overageActive = status && status.monthly_events.current > status.monthly_events.limit && hasCredits;
 
   function planPrice(planId: string): string {
     const p = pricing[planId];
@@ -263,9 +278,9 @@ function BillingContent() {
     <div className="mx-auto max-w-5xl space-y-6 p-6">
       <h1 className="text-xl font-semibold">Billing &amp; Plans</h1>
 
-      {upgraded && (
+      {(upgraded || successMsg) && (
         <div className="rounded border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-400">
-          Your plan has been upgraded successfully!
+          {successMsg || "Your plan has been upgraded successfully!"}
         </div>
       )}
 
@@ -283,15 +298,15 @@ function BillingContent() {
           ({status.monthly_events.current.toLocaleString()}/{status.monthly_events.limit.toLocaleString()}).
         </div>
       )}
-      {status && eventUsagePct >= 100 && paygActive && (
+      {status && eventUsagePct >= 100 && overageActive && (
         <div className="rounded border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-          Plan quota exceeded — PAYG active (${(status.payg.spent_cents / 100).toFixed(2)} spent on overages).
+          Plan quota exceeded — credits being used for overages (${(status.credits.overage_cost_cents / 100).toFixed(2)} spent).
         </div>
       )}
-      {status && eventUsagePct >= 100 && !status.payg.enabled && (
+      {status && eventUsagePct >= 100 && !hasCredits && (
         <div className="rounded border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
           Monthly event limit reached — events are being rejected.
-          {isPaid ? " Enable Pay-As-You-Go below to continue ingesting." : " Upgrade your plan for higher limits."}
+          {isPaid ? " Purchase credits below to continue ingesting." : " Upgrade your plan for higher limits."}
         </div>
       )}
 
@@ -379,49 +394,78 @@ function BillingContent() {
         </div>
       )}
 
-      {/* PAYG settings (paid plans only) */}
+      {/* Prepaid Credits (paid plans only) */}
       {isPaid && (
         <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-4">
-          <h2 className="mb-1 text-sm font-medium">Pay-As-You-Go (PAYG)</h2>
+          <h2 className="mb-1 text-sm font-medium">Prepaid Credits</h2>
           <p className="mb-4 text-xs text-[var(--muted)]">
-            Events beyond your plan quota are charged at $0.30 per 1,000 events.
-            Set a monthly spending cap to control costs.
+            Events beyond your plan quota use prepaid credits at $0.30 per 1,000 events.
+            Purchase credits in advance to handle overages.
           </p>
 
-          {paygStatus && paygStatus.enabled && (
-            <div className="mb-4">
-              <UsageBar
-                current={Math.round(paygStatus.spent_dollars * 100)}
-                limit={Math.round(paygStatus.budget_dollars * 100)}
-                label={`PAYG Spend: $${paygStatus.spent_dollars.toFixed(2)} / $${paygStatus.budget_dollars.toFixed(2)}`}
-              />
-              <div className="mt-1 text-xs text-[var(--muted)]">
-                {paygStatus.overage_events.toLocaleString()} overage events
-              </div>
+          <div className="mb-4 flex items-baseline gap-2">
+            <span className="text-3xl font-bold">
+              ${((creditsInfo?.balance_cents ?? status?.credits?.balance_cents ?? 0) / 100).toFixed(2)}
+            </span>
+            <span className="text-sm text-[var(--muted)]">credit balance</span>
+          </div>
+
+          {status && status.credits.overage_events > 0 && (
+            <div className="mb-4 text-xs text-[var(--muted)]">
+              {status.credits.overage_events.toLocaleString()} overage events this period
+              (${(status.credits.overage_cost_cents / 100).toFixed(2)} used)
             </div>
           )}
 
-          <div className="flex items-end gap-3">
+          <div className="mb-3 flex items-end gap-3">
             <div>
-              <label className="mb-1 block text-xs text-[var(--muted)]">Monthly budget ($)</label>
-              <input
-                type="number"
-                min="0"
-                step="1"
-                placeholder="e.g. 10"
-                value={paygBudget}
-                onChange={(e) => setPaygBudget(e.target.value)}
-                className="w-32 rounded border border-[var(--border)] bg-[var(--background)] px-3 py-1.5 text-sm"
-              />
+              <label className="mb-1 block text-xs text-[var(--muted)]">Amount ($)</label>
+              <div className="flex gap-2">
+                {CREDIT_PRESETS.map((amount) => (
+                  <button
+                    key={amount}
+                    onClick={() => setBuyAmount(amount)}
+                    className={`rounded border px-3 py-1.5 text-sm ${
+                      buyAmount === amount
+                        ? "border-argus-500 bg-argus-600/20 text-argus-400"
+                        : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--foreground)]"
+                    }`}
+                  >
+                    ${amount}
+                  </button>
+                ))}
+              </div>
             </div>
             <button
-              onClick={handleSavePayg}
-              disabled={paygSaving}
+              onClick={handleBuyCredits}
+              disabled={buyLoading}
               className="rounded bg-argus-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-argus-500 disabled:opacity-50"
             >
-              {paygSaving ? "Saving..." : paygBudget && parseFloat(paygBudget) > 0 ? "Enable PAYG" : "Disable PAYG"}
+              {buyLoading ? "Redirecting..." : `Buy $${buyAmount} Credits`}
             </button>
           </div>
+
+          {/* Recent transactions */}
+          {creditsInfo && creditsInfo.recent_transactions.length > 0 && (
+            <div className="mt-4 border-t border-[var(--border)] pt-3">
+              <h3 className="mb-2 text-xs font-medium text-[var(--muted)]">Recent Transactions</h3>
+              <div className="space-y-1">
+                {creditsInfo.recent_transactions.slice(0, 5).map((tx) => (
+                  <div key={tx.id} className="flex items-center justify-between text-xs">
+                    <span className="text-[var(--muted)]">
+                      {tx.description}
+                      {tx.created_at && (
+                        <span className="ml-2">{new Date(tx.created_at).toLocaleDateString()}</span>
+                      )}
+                    </span>
+                    <span className={tx.amount_cents >= 0 ? "text-emerald-400" : "text-red-400"}>
+                      {tx.amount_cents >= 0 ? "+" : ""}${(tx.amount_cents / 100).toFixed(2)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -464,7 +508,7 @@ function BillingContent() {
               <CompareRow3 label="API keys" free="1" teams="10" business="30" />
               <CompareRow3 label="AI messages" free="10/day (BYOK)" teams="Unlimited (BYOK)" business="Unlimited (BYOK)" />
               <CompareRow3 label="Conversation history" free="3 days" teams="90 days" business="270 days" />
-              <CompareRow3 label="PAYG overages" free="-" teams="$0.30/1K events" business="$0.30/1K events" />
+              <CompareRow3 label="Overage pricing" free="-" teams="$0.30/1K (prepaid)" business="$0.30/1K (prepaid)" />
               <BoolCompareRow3 label="Webhook (full mode)" free={false} teams={true} business={true} />
               <BoolCompareRow3 label="Custom dashboards" free={false} teams={true} business={true} />
               <BoolCompareRow3 label="Slack/Discord/Email alerts" free={false} teams={true} business={true} />

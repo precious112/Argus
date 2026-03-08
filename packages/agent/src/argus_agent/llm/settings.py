@@ -47,7 +47,9 @@ class LLMSettingsService:
                 row = result.scalar_one_or_none()
 
                 if row is None:
-                    row = AppConfig(key=db_key, value=str(value))
+                    from argus_agent.tenancy.context import get_tenant_id
+
+                    row = AppConfig(key=db_key, value=str(value), tenant_id=get_tenant_id())
                     session.add(row)
                 else:
                     row.value = str(value)

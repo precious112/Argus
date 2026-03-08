@@ -71,8 +71,11 @@ class NotificationSettingsService:
             row = result.scalar_one_or_none()
 
             if row is None:
+                from argus_agent.tenancy.context import get_tenant_id
+
                 row = NotificationChannelConfig(
                     id=str(uuid.uuid4()),
+                    tenant_id=get_tenant_id(),
                     channel_type=channel_type,
                     enabled=enabled,
                     config=config,

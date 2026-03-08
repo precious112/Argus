@@ -142,6 +142,15 @@ async def list_alerts(
     include_resolved = resolved is None or resolved
     alerts = engine.get_active_alerts(include_resolved=include_resolved)
 
+    # In SaaS mode, filter in-memory alerts by tenant
+    from argus_agent.config import get_settings as _gs
+
+    if _gs().deployment.mode == "saas":
+        from argus_agent.tenancy.context import get_tenant_id
+
+        current_tenant = get_tenant_id()
+        alerts = [a for a in alerts if (a.event.data or {}).get("tenant_id") == current_tenant]
+
     all_items = []
     for a in alerts:
         if severity and str(a.severity) != severity:

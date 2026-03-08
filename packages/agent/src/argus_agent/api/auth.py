@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, EmailStr
@@ -20,6 +22,18 @@ logger = logging.getLogger("argus.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _get_raw_session():
+    """Return a raw AsyncSession (no RLS) for cross-tenant queries in SaaS mode."""
+    from argus_agent.storage.postgres_operational import _engine
+
+    if not _engine:
+        return None
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    return AsyncSession(_engine, expire_on_commit=False)
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -28,13 +42,26 @@ class LoginRequest(BaseModel):
 @router.post("/login")
 async def login(body: LoginRequest, response: Response):
     """Verify credentials and set httpOnly JWT cookie."""
-    async with get_session() as session:
-        result = await session.execute(
-            select(User).where(User.username == body.username, User.is_active.is_(True))
-        )
-        user = result.scalar_one_or_none()
+    settings = get_settings()
 
-    if not user or not verify_password(body.password, user.password_hash):
+    # In SaaS mode, use raw engine session (no RLS) so global User lookup works
+    if settings.deployment.mode == "saas":
+        raw = _get_raw_session()
+        if not raw:
+            raise HTTPException(500, "Database not initialized")
+        async with raw as session:
+            result = await session.execute(
+                select(User).where(User.username == body.username, User.is_active.is_(True))
+            )
+            user = result.scalar_one_or_none()
+    else:
+        async with get_session() as session:
+            result = await session.execute(
+                select(User).where(User.username == body.username, User.is_active.is_(True))
+            )
+            user = result.scalar_one_or_none()
+
+    if not user or not user.password_hash or not verify_password(body.password, user.password_hash):
         return Response(
             content='{"detail":"Invalid username or password"}',
             status_code=401,
@@ -44,18 +71,19 @@ async def login(body: LoginRequest, response: Response):
     # In SaaS mode, look up tenant membership for JWT claims
     tenant_id = "default"
     role = "member"
-    settings = get_settings()
     if settings.deployment.mode == "saas":
-        async with get_session() as session:
-            from argus_agent.storage.saas_models import TeamMember
+        raw = _get_raw_session()
+        if raw:
+            async with raw as session:
+                from argus_agent.storage.saas_models import TeamMember
 
-            tm = await session.execute(
-                select(TeamMember).where(TeamMember.user_id == user.id)
-            )
-            member = tm.scalar_one_or_none()
-            if member:
-                tenant_id = member.tenant_id
-                role = member.role
+                tm = await session.execute(
+                    select(TeamMember).where(TeamMember.user_id == user.id)
+                )
+                member = tm.scalars().first()
+                if member:
+                    tenant_id = member.tenant_id
+                    role = member.role
 
     token = create_access_token(user.id, user.username, tenant_id, role)
     max_age = settings.security.session_expiry_hours * 3600
@@ -97,34 +125,71 @@ async def me(user: dict = Depends(get_current_user)):
     }
 
 
+class CreateOrgRequest(BaseModel):
+    org_name: str
+
+
+@router.post("/create-org")
+async def create_org(
+    body: CreateOrgRequest,
+    response: Response,
+    user: dict = Depends(get_current_user),
+):
+    """Create a new organization for the current user (SaaS only)."""
+    settings = get_settings()
+    if settings.deployment.mode != "saas":
+        raise HTTPException(400, "Not available in self-hosted mode")
+
+    from argus_agent.storage.saas_models import TeamMember, Tenant
+
+    raw = _get_raw_session()
+    if not raw:
+        raise HTTPException(500, "Database not initialized")
+
+    user_id = user.get("sub")
+    tenant_id = str(uuid.uuid4())
+    slug = re.sub(r"[^a-z0-9]+", "-", body.org_name.lower()).strip("-")[:50]
+    slug = f"{slug or 'org'}-{uuid.uuid4().hex[:8]}"
+
+    async with raw as session:
+        tenant = Tenant(id=tenant_id, name=body.org_name, slug=slug)
+        session.add(tenant)
+
+        member = TeamMember(
+            id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
+            user_id=user_id,
+            role="owner",
+        )
+        session.add(member)
+
+        await session.commit()
+
+    logger.info("User %s created org %s (%s)", user_id, body.org_name, tenant_id)
+    return {"tenant_id": tenant_id, "tenant_name": body.org_name}
+
+
 @router.get("/organizations")
 async def list_organizations(user: dict = Depends(get_current_user)):
-    """List all organizations the current user belongs to (by email)."""
+    """List all organizations the current user belongs to."""
     settings = get_settings()
     if settings.deployment.mode != "saas":
         return []
 
     current_tenant = user.get("tenant_id", "default")
+    user_id = user.get("sub")
 
-    # Look up current user's email
-    async with get_session() as session:
-        result = await session.execute(
-            select(User).where(User.id == user["sub"])
-        )
-        current_user = result.scalar_one_or_none()
-
-    if not current_user or not current_user.email:
-        return []
-
-    # Find all active User records with the same email
     from argus_agent.storage.saas_models import TeamMember, Tenant
 
-    async with get_session() as session:
+    raw = _get_raw_session()
+    if not raw:
+        return []
+
+    async with raw as session:
         result = await session.execute(
-            select(User, TeamMember, Tenant)
-            .join(TeamMember, TeamMember.user_id == User.id)
+            select(TeamMember, Tenant)
             .join(Tenant, Tenant.id == TeamMember.tenant_id)
-            .where(User.email == current_user.email, User.is_active.is_(True))
+            .where(TeamMember.user_id == user_id)
         )
         rows = result.all()
 
@@ -135,7 +200,7 @@ async def list_organizations(user: dict = Depends(get_current_user)):
             "role": tm.role,
             "is_current": tenant.id == current_tenant,
         }
-        for _user, tm, tenant in rows
+        for tm, tenant in rows
     ]
 
 
@@ -154,36 +219,28 @@ async def switch_org(
     if settings.deployment.mode != "saas":
         raise HTTPException(400, "Not available in self-hosted mode")
 
-    # Look up current user's email
-    async with get_session() as session:
-        result = await session.execute(
-            select(User).where(User.id == user["sub"])
-        )
-        current_user = result.scalar_one_or_none()
-
-    if not current_user or not current_user.email:
-        raise HTTPException(400, "Cannot switch org without email")
-
-    # Find the User record + TeamMember in the target tenant
     from argus_agent.storage.saas_models import TeamMember
 
-    async with get_session() as session:
+    user_id = user.get("sub")
+    raw = _get_raw_session()
+    if not raw:
+        raise HTTPException(500, "Database not initialized")
+
+    async with raw as session:
+        # Verify the user is a member of the target org
         result = await session.execute(
-            select(User, TeamMember)
-            .join(TeamMember, TeamMember.user_id == User.id)
-            .where(
-                User.email == current_user.email,
-                User.is_active.is_(True),
+            select(TeamMember).where(
+                TeamMember.user_id == user_id,
                 TeamMember.tenant_id == body.tenant_id,
             )
         )
-        row = result.first()
+        tm = result.scalar_one_or_none()
 
-    if not row:
+    if not tm:
         raise HTTPException(403, "You are not a member of that organization")
 
-    target_user, tm = row
-    token = create_access_token(target_user.id, target_user.username, tm.tenant_id, tm.role)
+    # Same user_id, same username — just reissue JWT with the target tenant
+    token = create_access_token(user_id, user.get("username", ""), tm.tenant_id, tm.role)
     max_age = settings.security.session_expiry_hours * 3600
 
     response = Response(

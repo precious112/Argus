@@ -14,7 +14,7 @@ from argus_agent.auth.jwt import create_access_token
 from argus_agent.auth.password import hash_password
 from argus_agent.config import get_settings
 from argus_agent.storage.models import User
-from argus_agent.storage.repositories import get_session
+from argus_agent.storage.postgres_operational import get_raw_session
 from argus_agent.storage.saas_models import TeamMember, Tenant
 
 logger = logging.getLogger("argus.auth.registration")
@@ -46,7 +46,10 @@ async def register(body: RegisterRequest, response: Response):
     user_id = str(uuid.uuid4())
     slug = f"{_slugify(body.org_name)}-{uuid.uuid4().hex[:8]}"
 
-    async with get_session() as session:
+    raw = get_raw_session()
+    if not raw:
+        raise HTTPException(500, "Database not initialized")
+    async with raw as session:
         # Check for existing username
         existing = await session.execute(
             select(User).where(User.username == body.username)

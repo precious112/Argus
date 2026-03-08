@@ -16,6 +16,16 @@ from argus_agent.storage.saas_models import Subscription, Tenant
 logger = logging.getLogger("argus.billing.polar")
 
 
+def _get_raw_session():
+    """Get a raw session without RLS for webhook (system-level) operations."""
+    from argus_agent.storage.postgres_operational import get_raw_session
+
+    session = get_raw_session()
+    if session is None:
+        raise RuntimeError("PostgreSQL engine not initialized")
+    return session
+
+
 def _get_polar_client():  # type: ignore[no-untyped-def]
     from polar_sdk import Polar
 
@@ -65,6 +75,64 @@ def _product_id_to_interval(product_id: str) -> str:
         settings.deployment.polar_business_annual_product_id,
     }
     return "year" if product_id in annual_ids else "month"
+
+
+async def upgrade_subscription(
+    tenant_id: str,
+    new_plan_id: str,
+    billing_interval: str = "month",
+) -> dict[str, Any]:
+    """Upgrade an existing subscription to a different plan via the Polar API.
+
+    Instead of creating a new checkout, this updates the existing subscription's
+    product, so Polar handles proration server-side.
+    """
+    new_product_id = _get_product_id(new_plan_id, billing_interval)
+    polar = _get_polar_client()
+
+    async with get_session() as session:
+        # Find active subscription for this tenant
+        result = await session.execute(
+            select(Subscription)
+            .where(Subscription.tenant_id == tenant_id, Subscription.status == "active")
+            .order_by(Subscription.created_at.desc())
+            .limit(1)
+        )
+        sub = result.scalar_one_or_none()
+        if not sub:
+            raise ValueError("No active subscription found for tenant")
+
+        # Call Polar to switch the product on the existing subscription
+        try:
+            polar.subscriptions.update(
+                id=sub.polar_subscription_id,
+                subscription_update={"product_id": new_product_id},
+            )
+        except Exception:
+            logger.exception(
+                "Polar subscription upgrade failed (sub=%s, product=%s)",
+                sub.polar_subscription_id, new_product_id,
+            )
+            raise
+
+        # Update local records
+        sub.polar_product_id = new_product_id
+        sub.plan_id = new_plan_id
+        sub.billing_interval = billing_interval
+        sub.updated_at = datetime.now(UTC).replace(tzinfo=None)
+
+        tenant = await session.get(Tenant, tenant_id)
+        if tenant:
+            tenant.plan = new_plan_id
+            tenant.updated_at = datetime.now(UTC).replace(tzinfo=None)
+
+        await session.commit()
+
+    logger.info(
+        "Subscription upgraded for tenant %s (plan=%s, interval=%s)",
+        tenant_id, new_plan_id, billing_interval,
+    )
+    return {"upgraded": True, "plan_id": new_plan_id}
 
 
 async def create_checkout_session(
@@ -162,8 +230,50 @@ async def handle_webhook_event(payload: bytes, headers: dict[str, str]) -> dict[
         await _handle_subscription_updated(event.data)
         return {"status": "processed", "event": event_type}
 
+    # Handle credit purchase completions
+    try:
+        from polar_sdk.models import WebhookCheckoutUpdatedPayload
+
+        if isinstance(event, WebhookCheckoutUpdatedPayload):
+            checkout_data = event.data
+            status = getattr(checkout_data, "status", "")
+            if status == "succeeded":
+                metadata = getattr(checkout_data, "metadata", None) or {}
+                if metadata.get("purchase_type") == "payg_credits":
+                    await _handle_credit_purchase(metadata, checkout_data)
+                    return {"status": "processed", "event": event_type}
+    except ImportError:
+        pass
+
     logger.debug("Unhandled Polar event type: %s", event_type)
     return {"status": "ignored", "event": event_type}
+
+
+async def _handle_credit_purchase(metadata: dict[str, str], checkout_data: Any) -> None:
+    """Process a completed credit purchase checkout."""
+    tenant_id = metadata.get("tenant_id", "")
+    amount_str = metadata.get("amount_cents", "0")
+    try:
+        amount_cents = int(amount_str)
+    except (ValueError, TypeError):
+        logger.warning("Invalid amount_cents in credit purchase metadata: %s", amount_str)
+        return
+
+    if not tenant_id or amount_cents <= 0:
+        logger.warning("Invalid credit purchase: tenant=%s, amount=%d", tenant_id, amount_cents)
+        return
+
+    order_id = getattr(checkout_data, "id", "") or ""
+
+    from argus_agent.billing.payg import add_credits
+
+    await add_credits(
+        tenant_id,
+        amount_cents,
+        polar_order_id=order_id,
+        description=f"Polar checkout (${amount_cents / 100:.2f})",
+    )
+    logger.info("Credit purchase processed: tenant=%s, amount=%dc", tenant_id, amount_cents)
 
 
 async def _handle_subscription_active(data: Any) -> None:
@@ -182,7 +292,8 @@ async def _handle_subscription_active(data: Any) -> None:
     plan_id = metadata.get("plan_id") or _product_id_to_plan(product_id)
     billing_interval = metadata.get("billing_interval") or _product_id_to_interval(product_id)
 
-    async with get_session() as session:
+    # Use raw session (no RLS) — webhook has no user context
+    async with _get_raw_session() as session:
         # Upsert subscription
         result = await session.execute(
             select(Subscription).where(Subscription.polar_subscription_id == sub_id)
@@ -232,7 +343,8 @@ async def _handle_subscription_canceled(data: Any) -> None:
     """Mark subscription as canceled but keep plan until period end."""
     sub_id = data.id
 
-    async with get_session() as session:
+    # Use raw session (no RLS) — webhook has no user context
+    async with _get_raw_session() as session:
         result = await session.execute(
             select(Subscription).where(Subscription.polar_subscription_id == sub_id)
         )
@@ -250,7 +362,8 @@ async def _handle_subscription_revoked(data: Any) -> None:
     """Immediately downgrade tenant to free."""
     sub_id = data.id
 
-    async with get_session() as session:
+    # Use raw session (no RLS) — webhook has no user context
+    async with _get_raw_session() as session:
         result = await session.execute(
             select(Subscription).where(Subscription.polar_subscription_id == sub_id)
         )
@@ -272,7 +385,8 @@ async def _handle_subscription_updated(data: Any) -> None:
     """Update period dates on subscription renewal."""
     sub_id = data.id
 
-    async with get_session() as session:
+    # Use raw session (no RLS) — webhook has no user context
+    async with _get_raw_session() as session:
         result = await session.execute(
             select(Subscription).where(Subscription.polar_subscription_id == sub_id)
         )
@@ -284,6 +398,52 @@ async def _handle_subscription_updated(data: Any) -> None:
             await session.commit()
 
     logger.info("Subscription updated: %s", sub_id)
+
+
+async def create_credit_checkout_session(
+    tenant_id: str,
+    amount_cents: int,
+    success_url: str,
+) -> dict[str, str]:
+    """Create a Polar checkout for prepaid credit purchase."""
+    settings = get_settings()
+    product_id = settings.deployment.polar_payg_credits_product_id
+    if not product_id:
+        raise ValueError("Credit purchases not configured (no polar_payg_credits_product_id)")
+
+    polar = _get_polar_client()
+
+    # Look up Polar customer ID
+    async with get_session() as session:
+        tenant = await session.get(Tenant, tenant_id)
+
+    metadata = {
+        "tenant_id": tenant_id,
+        "purchase_type": "payg_credits",
+        "amount_cents": str(amount_cents),
+    }
+    checkout_kwargs: dict[str, Any] = {
+        "products": [product_id],
+        "success_url": success_url,
+        "metadata": metadata,
+        "amount": amount_cents,
+    }
+    if tenant and tenant.polar_customer_id:
+        checkout_kwargs["customer_id"] = tenant.polar_customer_id
+
+    try:
+        result = polar.checkouts.create(request=checkout_kwargs)
+    except Exception:
+        logger.exception(
+            "Polar credit checkout failed (product=%s, amount=%d)",
+            product_id, amount_cents,
+        )
+        raise
+
+    return {
+        "checkout_url": result.url,
+        "checkout_id": result.id,
+    }
 
 
 async def create_customer_portal_session(tenant_id: str) -> dict[str, str]:

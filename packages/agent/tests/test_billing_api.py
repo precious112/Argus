@@ -71,14 +71,15 @@ async def test_list_plans_has_pricing(_mock_app):
 
 
 @pytest.mark.asyncio
-async def test_list_plans_has_payg_info(_mock_app):
-    """GET /billing/plans includes PAYG rate info."""
+async def test_list_plans_has_credits_info(_mock_app):
+    """GET /billing/plans includes prepaid credits info."""
     transport = ASGITransport(app=_mock_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         res = await client.get("/api/v1/billing/plans")
     data = res.json()
     payg = data["payg"]
     assert payg["rate_per_1k_dollars"] == 0.30
+    assert payg["model"] == "prepaid_credits"
     assert "teams" in payg["available_on"]
     assert "business" in payg["available_on"]
 
@@ -103,21 +104,21 @@ async def test_checkout_requires_auth(_mock_app):
 
 
 @pytest.mark.asyncio
-async def test_payg_get_requires_auth(_mock_app):
-    """GET /billing/payg requires authentication."""
+async def test_credits_get_requires_auth(_mock_app):
+    """GET /billing/credits requires authentication."""
     transport = ASGITransport(app=_mock_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        res = await client.get("/api/v1/billing/payg")
+        res = await client.get("/api/v1/billing/credits")
     assert res.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_payg_put_requires_auth(_mock_app):
-    """PUT /billing/payg requires authentication."""
+async def test_credits_checkout_requires_auth(_mock_app):
+    """POST /billing/credits/checkout requires authentication."""
     transport = ASGITransport(app=_mock_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        res = await client.put(
-            "/api/v1/billing/payg",
-            json={"budget_dollars": 10},
+        res = await client.post(
+            "/api/v1/billing/credits/checkout",
+            json={"amount_dollars": 10},
         )
     assert res.status_code == 401

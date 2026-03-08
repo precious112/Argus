@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -416,6 +417,10 @@ class AlertEngine:
         now = datetime.now(UTC).replace(tzinfo=None)
         cached = self._quota_cache.get(tenant_id)
         if cached and now < cached[1]:
+            logger.info(
+                "QUOTA_CHECK tenant=%s over=%s source=%s (cached)",
+                tenant_id, cached[0], event.source,
+            )
             return cached[0]
 
         try:
@@ -423,12 +428,18 @@ class AlertEngine:
 
             await check_event_ingest_limit(tenant_id)
             self._quota_cache[tenant_id] = (False, now + timedelta(seconds=60))
+            logger.info("QUOTA_CHECK tenant=%s over=False source=%s", tenant_id, event.source)
             return False
         except HTTPException:
             self._quota_cache[tenant_id] = (True, now + timedelta(seconds=60))
+            logger.info("QUOTA_CHECK tenant=%s over=True source=%s", tenant_id, event.source)
             return True
         except Exception:
             self._quota_cache[tenant_id] = (False, now + timedelta(seconds=60))
+            logger.info(
+                "QUOTA_CHECK tenant=%s over=False source=%s (error-fallback)",
+                tenant_id, event.source,
+            )
             return False
 
     async def _increment_quota(self, event: Event) -> None:
@@ -462,12 +473,27 @@ class AlertEngine:
 
     async def _handle_event(self, event: Event) -> None:
         """Evaluate all rules against an incoming event."""
+        # Restore tenant context from event data (events may arrive via Redis
+        # or background tasks where the contextvar is not set)
+        from argus_agent.tenancy.context import set_tenant_id
+
+        tenant_id = (event.data or {}).get("tenant_id", "default")
+        set_tenant_id(tenant_id)
+
+        logger.info(
+            "EVENT_RECEIVED source=%s type=%s severity=%s tenant=%s msg=%.100s",
+            event.source, event.type, event.severity, tenant_id, event.message or "",
+        )
+
         # In SaaS mode, suppress all alerts when over event quota
         if await self._is_over_quota(event):
+            logger.warning(
+                "EVENT_BLOCKED_QUOTA tenant=%s source=%s type=%s",
+                tenant_id, event.source, event.type,
+            )
             return
 
-        # Count this internal event toward unified quota
-        await self._increment_quota(event)
+        fired = False  # Track whether any rule actually fires an alert
 
         for rule in self._rules.values():
             if not self._matches(rule, event):
@@ -488,6 +514,10 @@ class AlertEngine:
             # Dedup / cooldown
             last = self._last_fired.get(dedup_key)
             if last and (now - last).total_seconds() < rule.cooldown_seconds:
+                logger.info(
+                    "COOLDOWN_ACTIVE dedup_key=%s rule=%s elapsed=%.0fs cooldown=%ds",
+                    dedup_key, rule.id, (now - last).total_seconds(), rule.cooldown_seconds,
+                )
                 continue
 
             self._last_fired[dedup_key] = now
@@ -502,7 +532,12 @@ class AlertEngine:
                 dedup_key=dedup_key,
             )
             self._active_alerts.append(alert)
+            fired = True
             logger.info("Alert fired: %s [%s] %s", rule.name, event.severity, event.message)
+            logger.info(
+                "ALERT_FIRED rule=%s dedup_key=%s severity=%s tenant=%s",
+                rule.id, dedup_key, event.severity, tenant_id,
+            )
 
             # Persist to database
             try:
@@ -535,6 +570,14 @@ class AlertEngine:
                 except Exception:
                     logger.exception("Formatter submit error")
 
+            # Escalation contacts (SaaS, fire-and-forget)
+            try:
+                from argus_agent.alerting.escalation import notify_escalation_contacts
+
+                asyncio.create_task(notify_escalation_contacts(alert, event))
+            except Exception:
+                logger.debug("Escalation notification skipped", exc_info=True)
+
             # Auto-investigate urgent events (with separate investigation cooldown)
             # Also gated behind suppression check
             if (
@@ -548,9 +591,10 @@ class AlertEngine:
                     invest_last
                     and (now - invest_last).total_seconds() < rule.investigate_cooldown_seconds
                 ):
+                    elapsed = (now - invest_last).total_seconds()
                     logger.info(
-                        "Investigation cooldown active for %s, skipping re-investigation",
-                        dedup_key,
+                        "INVESTIGATION_COOLDOWN dedup_key=%s elapsed=%.0fs cooldown=%ds",
+                        dedup_key, elapsed, rule.investigate_cooldown_seconds,
                     )
                 else:
                     try:
@@ -558,11 +602,20 @@ class AlertEngine:
                             event=event,
                             alert_id=alert.id,
                             channel_metadata=channel_metadata,
+                            tenant_id=(event.data or {}).get("tenant_id", "default"),
                         )
                         self._on_investigate(request)
                         self._last_investigated[dedup_key] = now
+                        logger.info(
+                            "INVESTIGATION_TRIGGERED dedup_key=%s rule=%s tenant=%s",
+                            dedup_key, rule.id, tenant_id,
+                        )
                     except Exception:
                         logger.exception("Auto-investigation error for alert %s", alert.id)
+
+        # Only count toward billing quota if at least one alert actually fired
+        if fired:
+            await self._increment_quota(event)
 
     @staticmethod
     def _matches(rule: AlertRule, event: Event) -> bool:

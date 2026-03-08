@@ -94,7 +94,8 @@ class DeploymentConfig(BaseModel):
     polar_teams_annual_product_id: str = ""
     polar_business_product_id: str = ""
     polar_business_annual_product_id: str = ""
-    polar_payg_meter_id: str = ""
+    polar_payg_meter_id: str = ""  # deprecated — replaced by prepaid credits
+    polar_payg_credits_product_id: str = ""
     payg_rate_cents_per_1k: int = 30  # $0.30 per 1K events
     stripe_secret_key: str = ""
     billing_provider: str = "polar"  # "polar" | "stripe"

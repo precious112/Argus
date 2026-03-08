@@ -190,6 +190,7 @@ class SystemMetricsCollector:
         from argus_agent.collectors.remote import execute_remote_tool, get_webhook_tenants
 
         tenants = await get_webhook_tenants()
+        logger.info("REMOTE_METRICS webhook_tenants=%d", len(tenants))
         if not tenants:
             logger.debug("No webhook tenants for remote metrics collection")
             return {}
@@ -199,6 +200,7 @@ class SystemMetricsCollector:
 
         for t in tenants:
             result = await execute_remote_tool(t["tenant_id"], "system_metrics", {})
+            logger.info("REMOTE_METRICS_RESULT tenant=%s got_data=%s", t["tenant_id"], bool(result))
             if not result:
                 continue
 
@@ -241,6 +243,10 @@ class SystemMetricsCollector:
                 data={**metrics, "tenant_id": t["tenant_id"]},
             )
             event = self._classifier.classify(event)
+            logger.info(
+                "REMOTE_METRICS_EVENT tenant=%s type=%s severity=%s",
+                t["tenant_id"], event.type, event.severity,
+            )
             await bus.publish(event)
 
             # Run anomaly detection

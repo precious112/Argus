@@ -24,8 +24,7 @@ class Tenant(Base):
     slug: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     plan: Mapped[str] = mapped_column(String(50), default="free")
     polar_customer_id: Mapped[str] = mapped_column(String(100), default="")
-    payg_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    payg_monthly_budget_cents: Mapped[int] = mapped_column(Integer, default=0)
+    payg_credit_balance_cents: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
@@ -215,6 +214,24 @@ class UsageNotification(Base):
     billing_period_start: Mapped[datetime] = mapped_column(DateTime)
     threshold: Mapped[str] = mapped_column(String(50))  # quota_80, quota_100, payg_80, payg_100
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class CreditTransaction(Base):
+    """Audit log for prepaid credit purchases and deductions."""
+
+    __tablename__ = "credit_transactions"
+    __table_args__ = (
+        Index("ix_credit_tx_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    amount_cents: Mapped[int] = mapped_column(Integer)  # +purchase / -deduction
+    balance_after_cents: Mapped[int] = mapped_column(Integer)
+    tx_type: Mapped[str] = mapped_column(String(30))  # purchase | overage_deduction
+    description: Mapped[str] = mapped_column(Text, default="")
+    polar_order_id: Mapped[str] = mapped_column(String(100), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class SlackInstallation(Base):

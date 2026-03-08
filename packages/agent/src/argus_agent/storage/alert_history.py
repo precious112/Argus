@@ -23,8 +23,11 @@ class AlertHistoryService:
 
         Returns the row ID.
         """
+        from argus_agent.tenancy.context import get_tenant_id
+
         async with get_session() as session:
             entry = AlertHistory(
+                tenant_id=get_tenant_id(),
                 alert_id=alert.id,
                 rule_id=alert.rule_id,
                 rule_name=alert.rule_name,

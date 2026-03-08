@@ -40,8 +40,8 @@ class UpdateRoleRequest(BaseModel):
 
 class AcceptInviteRequest(BaseModel):
     token: str
-    username: str
-    password: str
+    username: str = ""
+    password: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -179,15 +179,6 @@ async def remove_member(user_id: str, user: dict = Depends(require_role("owner",
             raise HTTPException(400, "Cannot remove the owner")
 
         await session.delete(member)
-
-        # Deactivate the user
-        user_result = await session.execute(
-            select(User).where(User.id == user_id)
-        )
-        target_user = user_result.scalar_one_or_none()
-        if target_user:
-            target_user.is_active = False
-
         await session.commit()
 
     return {"status": "ok"}
@@ -292,39 +283,89 @@ async def validate_invite(token: str):
     """Validate an invitation token and return its details."""
     token_hash = hashlib.sha256(token.encode()).hexdigest()
 
-    async with get_session() as session:
-        result = await session.execute(
-            select(TeamInvitation).where(
-                TeamInvitation.token_hash == token_hash,
-                TeamInvitation.accepted_at.is_(None),
-            )
-        )
-        invitation = result.scalar_one_or_none()
-        if not invitation:
-            raise HTTPException(404, "Invalid or expired invitation")
+    settings = get_settings()
+    use_raw = False
+    if settings.deployment.mode == "saas":
+        from argus_agent.storage.postgres_operational import _engine
 
-        if invitation.expires_at and invitation.expires_at < datetime.now(UTC).replace(tzinfo=None):
-            raise HTTPException(410, "Invitation has expired")
+        if _engine:
+            use_raw = True
+
+    # Use raw session (no RLS) so unauthenticated users can look up invitations
+    if use_raw:
+        from sqlalchemy.ext.asyncio import AsyncSession as RawSession
+
+        async with RawSession(_engine, expire_on_commit=False) as session:
+            result = await session.execute(
+                select(TeamInvitation).where(
+                    TeamInvitation.token_hash == token_hash,
+                    TeamInvitation.accepted_at.is_(None),
+                )
+            )
+            invitation = result.scalar_one_or_none()
+            if not invitation:
+                raise HTTPException(404, "Invalid or expired invitation")
+
+            now = datetime.now(UTC).replace(tzinfo=None)
+            if invitation.expires_at and invitation.expires_at < now:
+                raise HTTPException(410, "Invitation has expired")
+
+            # Check if a user with this email already exists
+            result = await session.execute(
+                select(User.id).where(User.email == invitation.email, User.is_active.is_(True))
+            )
+            has_account = result.scalar_one_or_none() is not None
+    else:
+        # Self-hosted: no RLS, get_session() works fine
+        async with get_session() as session:
+            result = await session.execute(
+                select(TeamInvitation).where(
+                    TeamInvitation.token_hash == token_hash,
+                    TeamInvitation.accepted_at.is_(None),
+                )
+            )
+            invitation = result.scalar_one_or_none()
+            if not invitation:
+                raise HTTPException(404, "Invalid or expired invitation")
+
+            now = datetime.now(UTC).replace(tzinfo=None)
+            if invitation.expires_at and invitation.expires_at < now:
+                raise HTTPException(410, "Invitation has expired")
+
+        has_account = False
 
     return {
         "email": invitation.email,
         "role": invitation.role,
         "expires_at": invitation.expires_at.isoformat() if invitation.expires_at else None,
+        "has_account": has_account,
     }
 
 
 @accept_router.post("/accept-invite")
-async def accept_invite(body: AcceptInviteRequest, response: Response):
-    """Accept an invitation token, create user, and join the tenant."""
-    from argus_agent.config import get_settings
+async def accept_invite(body: AcceptInviteRequest, request: Request, response: Response):
+    """Accept an invitation token.
+
+    If the invited email already has a User account, reuse it (create TeamMember only).
+    Otherwise create a new User + TeamMember.
+    """
+    from argus_agent.auth.password import verify_password as _verify
 
     settings = get_settings()
     if settings.deployment.mode != "saas":
         raise HTTPException(400, "Invitations not available in self-hosted mode")
 
+    from argus_agent.storage.postgres_operational import _engine
+
+    if not _engine:
+        raise HTTPException(500, "Database not initialized")
+
+    from sqlalchemy.ext.asyncio import AsyncSession as RawSession
+
     token_hash = hashlib.sha256(body.token.encode()).hexdigest()
 
-    async with get_session() as session:
+    async with RawSession(_engine, expire_on_commit=False) as session:
+        # 1. Validate invitation
         result = await session.execute(
             select(TeamInvitation).where(
                 TeamInvitation.token_hash == token_hash,
@@ -338,28 +379,73 @@ async def accept_invite(body: AcceptInviteRequest, response: Response):
         if invitation.expires_at and invitation.expires_at < datetime.now(UTC).replace(tzinfo=None):
             raise HTTPException(410, "Invitation has expired")
 
-        # Check username availability
-        existing = await session.execute(
-            select(User).where(
-                User.username == body.username,
-                User.tenant_id == invitation.tenant_id,
+        # 2. Check if already a member of this org
+        existing_membership = await session.execute(
+            select(TeamMember)
+            .join(User, User.id == TeamMember.user_id)
+            .where(
+                User.email == invitation.email,
+                TeamMember.tenant_id == invitation.tenant_id,
             )
         )
-        if existing.scalar_one_or_none():
-            raise HTTPException(409, "Username already taken in this organization")
+        if existing_membership.scalar_one_or_none():
+            raise HTTPException(409, "Already a member of this organization")
 
-        # Create user
-        user_id = str(uuid.uuid4())
-        new_user = User(
-            id=user_id,
-            tenant_id=invitation.tenant_id,
-            username=body.username,
-            email=invitation.email,
-            password_hash=hash_password(body.password),
+        # 3. Check if a User with this email already exists
+        result = await session.execute(
+            select(User).where(User.email == invitation.email, User.is_active.is_(True))
         )
-        session.add(new_user)
+        existing_user = result.scalar_one_or_none()
 
-        # Create team member
+        if existing_user:
+            # Existing user — check authentication
+            # Option A: caller is already logged in (JWT cookie)
+            logged_in_user_id = None
+            try:
+                from argus_agent.auth.jwt import decode_access_token
+                cookie_token = request.cookies.get("argus_token", "")
+                if cookie_token:
+                    payload = decode_access_token(cookie_token)
+                    if payload and payload.get("sub"):
+                        logged_in_user_id = payload["sub"]
+            except Exception:
+                pass
+
+            if logged_in_user_id and logged_in_user_id == existing_user.id:
+                # Logged in as the right user — just add TeamMember
+                pass
+            elif body.password and _verify(body.password, existing_user.password_hash):
+                # Not logged in but provided correct password
+                pass
+            else:
+                raise HTTPException(401, "Password required to join with existing account")
+
+            user_id = existing_user.id
+            username = existing_user.username
+        else:
+            # New user — require username + password
+            if not body.username or not body.password:
+                raise HTTPException(400, "Username and password required for new account")
+
+            # Check username availability globally
+            existing_name = await session.execute(
+                select(User.id).where(User.username == body.username)
+            )
+            if existing_name.scalar_one_or_none():
+                raise HTTPException(409, "Username already taken")
+
+            user_id = str(uuid.uuid4())
+            new_user = User(
+                id=user_id,
+                tenant_id=invitation.tenant_id,
+                username=body.username,
+                email=invitation.email,
+                password_hash=hash_password(body.password),
+            )
+            session.add(new_user)
+            username = body.username
+
+        # 4. Create TeamMember
         member = TeamMember(
             id=str(uuid.uuid4()),
             tenant_id=invitation.tenant_id,
@@ -368,14 +454,14 @@ async def accept_invite(body: AcceptInviteRequest, response: Response):
         )
         session.add(member)
 
-        # Mark invitation as accepted
+        # 5. Mark invitation as accepted
         invitation.accepted_at = datetime.now(UTC).replace(tzinfo=None)
 
         await session.commit()
 
-    # Issue JWT
+    # Issue JWT for the accepting org
     token = create_access_token(
-        user_id, body.username, invitation.tenant_id, invitation.role,
+        user_id, username, invitation.tenant_id, invitation.role,
     )
     max_age = settings.security.session_expiry_hours * 3600
 
@@ -392,5 +478,5 @@ async def accept_invite(body: AcceptInviteRequest, response: Response):
         max_age=max_age,
     )
 
-    logger.info("User %s accepted invitation to tenant %s", body.username, invitation.tenant_id)
+    logger.info("User %s accepted invitation to tenant %s", username, invitation.tenant_id)
     return response

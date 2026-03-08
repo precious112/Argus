@@ -6,6 +6,7 @@ import logging
 
 from argus_agent.alerting.channels import (
     EmailChannel,
+    PlatformEmailChannel,
     SlackChannel,
     WebhookChannel,
     WebSocketChannel,
@@ -36,7 +37,7 @@ async def reload_channels() -> None:
     ws_mgr = _get_distributed_manager() or manager
     engine.set_channels([WebSocketChannel(ws_mgr)])
 
-    external: list[SlackChannel | EmailChannel | WebhookChannel] = []
+    external: list[SlackChannel | EmailChannel | WebhookChannel | PlatformEmailChannel] = []
 
     # In SaaS mode, check for OAuth Slack installation (takes priority over manual config)
     oauth_slack_used = False
@@ -58,6 +59,9 @@ async def reload_channels() -> None:
                     logger.debug("Using OAuth Slack install for tenant %s", tenant_id)
         except Exception:
             logger.debug("No OAuth Slack install available, falling back to manual config")
+
+        # Always add platform email channel in SaaS mode
+        external.append(PlatformEmailChannel(tenant_id))
 
     for row in configs:
         if not row["enabled"]:
