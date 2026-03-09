@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 interface PlanInfo {
@@ -117,6 +117,8 @@ function BillingContent() {
   const searchParams = useSearchParams();
   const upgraded = searchParams.get("upgraded") === "true";
   const creditsPurchased = searchParams.get("credits_purchased") === "true";
+  const autoCheckout = searchParams.get("auto_checkout");
+  const autoCheckoutFired = useRef(false);
 
   const [plans, setPlans] = useState<PlanInfo[]>([]);
   const [pricing, setPricing] = useState<PlanPricing>({});
@@ -163,6 +165,20 @@ function BillingContent() {
       setSuccessMsg("Credits purchased successfully!");
     }
   }, [creditsPurchased]);
+
+  useEffect(() => {
+    if (
+      !loading &&
+      status &&
+      (autoCheckout === "teams" || autoCheckout === "business") &&
+      status.plan === "free" &&
+      !autoCheckoutFired.current
+    ) {
+      autoCheckoutFired.current = true;
+      handleCheckout(autoCheckout);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, status, autoCheckout]);
 
   async function handleCheckout(planId: string) {
     setCheckoutLoading(planId);
@@ -237,10 +253,10 @@ function BillingContent() {
     }
   }
 
-  if (loading) {
+  if (loading || (autoCheckout && !autoCheckoutFired.current)) {
     return (
-      <div className="flex h-full items-center justify-center p-8 text-[var(--muted)]">
-        Loading billing...
+      <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-[var(--muted)]">
+        {autoCheckout ? "Redirecting to checkout..." : "Loading billing..."}
       </div>
     );
   }
