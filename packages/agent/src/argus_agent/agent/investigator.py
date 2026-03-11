@@ -154,9 +154,12 @@ class Investigator:
             logger.warning("Budget exceeded at dequeue, skipping investigation for %s", event.type)
             return
 
-        provider = self._get_provider()
+        provider = await self._get_provider(tenant_id=request.tenant_id)
         if provider is None:
-            logger.warning("No LLM provider available for investigation")
+            logger.warning(
+                "No LLM provider available for investigation (tenant=%s)",
+                request.tenant_id,
+            )
             return
 
         # Broadcast investigation start
@@ -217,7 +220,7 @@ class Investigator:
             logger.info("Budget insufficient for periodic review, skipping")
             return
 
-        provider = self._get_provider()
+        provider = await self._get_provider()
         if provider is None:
             return
 
@@ -246,7 +249,7 @@ class Investigator:
             logger.info("Budget insufficient for daily digest, skipping")
             return
 
-        provider = self._get_provider()
+        provider = await self._get_provider()
         if provider is None:
             return
 
@@ -273,11 +276,19 @@ class Investigator:
         except Exception:
             logger.exception("Daily digest failed")
 
-    def _get_provider(self) -> Any | None:
+    async def _get_provider(self, tenant_id: str | None = None) -> Any | None:
         if self._provider is not None:
             return self._provider
         try:
-            from argus_agent.llm.registry import get_provider
+            from argus_agent.llm.registry import get_provider, get_provider_for_tenant
+
+            tid = tenant_id
+            if tid is None:
+                from argus_agent.tenancy.context import get_tenant_id
+                tid = get_tenant_id()
+
+            if tid and tid != "default":
+                return await get_provider_for_tenant(tid)
             return get_provider()
         except Exception:
             return None
