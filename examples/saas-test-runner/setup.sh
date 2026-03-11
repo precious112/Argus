@@ -23,10 +23,7 @@ echo "Activating venv..."
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
-echo "Installing Argus SDK (editable)..."
-pip install -e "$REPO_ROOT/packages/sdk-python"
-
-echo "Installing test runner requirements..."
+echo "Installing test runner requirements (SDK from PyPI)..."
 pip install -r "$REPO_ROOT/examples/saas-test-runner/requirements.txt"
 
 echo ""
