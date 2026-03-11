@@ -1,0 +1,16 @@
+{
+  "name": "argus-saas-test-runner-node",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Node.js SaaS test runner — Express app with Argus SDK + webhook handler",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "test-runner": "node test_runner.js"
+  },
+  "dependencies": {
+    "@argus-ai/node": "file:../../packages/sdk-node",
+    "dotenv": "^16.3.0",
+    "express": "^4.18.0"
+  }
+}

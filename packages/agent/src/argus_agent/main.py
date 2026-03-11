@@ -147,6 +147,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         await init_key_cache(settings.deployment.redis_url)
 
+        # Shared Redis connection pool for WebSocket handlers
+        from argus_agent.api.ws import init_ws_redis_pool
+
+        init_ws_redis_pool(settings.deployment.redis_url)
+
         # Redis EventBus for cross-process event distribution
         import redis.asyncio as aioredis
 
@@ -388,8 +393,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if _redis_event_bus:
             _redis_event_bus.stop()
 
+        from argus_agent.api.ws import close_ws_redis_pool
         from argus_agent.auth.key_cache import close_key_cache
 
+        await close_ws_redis_pool()
         await close_key_cache()
 
     await operational_repo.close()

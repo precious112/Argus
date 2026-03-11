@@ -24,6 +24,29 @@ logger = logging.getLogger("argus.ws")
 
 router = APIRouter(tags=["websocket"])
 
+# Shared Redis connection pool for SaaS WebSocket handlers.
+# Initialised once via ``init_ws_redis_pool()`` during app lifespan.
+_ws_redis_pool: aioredis.Redis | None = None
+
+
+def init_ws_redis_pool(redis_url: str) -> aioredis.Redis:
+    """Create a shared Redis connection pool for all WebSocket handlers."""
+    global _ws_redis_pool
+    _ws_redis_pool = aioredis.from_url(
+        redis_url,
+        decode_responses=True,
+        max_connections=200,
+    )
+    return _ws_redis_pool
+
+
+async def close_ws_redis_pool() -> None:
+    """Shut down the shared Redis pool."""
+    global _ws_redis_pool
+    if _ws_redis_pool is not None:
+        await _ws_redis_pool.aclose()
+        _ws_redis_pool = None
+
 
 class ConnectionManager:
     """Manage active WebSocket connections, keyed by tenant_id."""
@@ -376,7 +399,8 @@ async def _handle_ws_saas(
     )
 
     settings = get_settings()
-    redis = aioredis.from_url(settings.deployment.redis_url, decode_responses=True)
+    assert _ws_redis_pool is not None, "WebSocket Redis pool not initialised"
+    redis = _ws_redis_pool
     queue = TaskQueue(redis)
 
     # Send initial handshake messages
@@ -481,7 +505,6 @@ async def _handle_ws_saas(
             except asyncio.CancelledError:
                 pass
         manager.disconnect(websocket, tenant_id)
-        await redis.aclose()
 
 
 async def _relay_stream(

@@ -1,10 +1,13 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { FormEvent, Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
-export default function RegisterPage() {
+function RegisterForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const plan = searchParams.get("plan");
+
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -52,7 +55,11 @@ export default function RegisterPage() {
         return;
       }
 
-      router.push("/");
+      if (plan === "teams" || plan === "business") {
+        router.push(`/billing?auto_checkout=${plan}`);
+      } else {
+        router.push("/");
+      }
     } catch {
       setError("Unable to connect to server");
     } finally {
@@ -86,6 +93,11 @@ export default function RegisterPage() {
         <div className="mb-6 flex flex-col items-center gap-2">
           <img src="/argus-logo.png" alt="Argus" className="h-10 w-auto" />
           <h1 className="text-xl font-semibold">Create your account</h1>
+          {plan && (
+            <p className="text-sm text-[var(--muted)]">
+              You&apos;ll be redirected to checkout after registration
+            </p>
+          )}
         </div>
 
         {hasOAuth && (
@@ -231,5 +243,19 @@ export default function RegisterPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-[var(--background)]">
+          <div className="text-[var(--muted)]">Loading...</div>
+        </div>
+      }
+    >
+      <RegisterForm />
+    </Suspense>
   );
 }

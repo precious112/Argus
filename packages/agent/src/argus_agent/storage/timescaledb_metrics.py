@@ -175,7 +175,7 @@ class TimescaleDBMetricsRepository:
                     "postgresql+asyncpg://", "postgresql://",
                 )
             self._pool = await asyncpg.create_pool(
-                url, min_size=2, max_size=15,
+                url, min_size=5, max_size=30,
             )
             if not self._schema_applied:
                 await self._apply_schema_on(self._pool)
