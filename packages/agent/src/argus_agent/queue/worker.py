@@ -59,19 +59,28 @@ class AgentWorker:
 
     Intended for SaaS deployments where the API process handles only the
     WebSocket connection and this worker runs the heavy LLM + tool loop.
+
+    Supports concurrent task processing via asyncio — since agent tasks are
+    mostly I/O-bound (waiting on LLM API responses), a single worker process
+    can handle multiple tasks simultaneously. Control concurrency with the
+    ``max_concurrent`` parameter (default 10).
     """
 
-    def __init__(self, redis_url: str) -> None:
+    def __init__(self, redis_url: str, max_concurrent: int = 1000) -> None:
         self._redis_url = redis_url
+        self._max_concurrent = max_concurrent
         self._redis: aioredis.Redis | None = None
         self._queue: TaskQueue | None = None
         self._running = False
+        self._semaphore: asyncio.Semaphore | None = None
+        self._active_tasks: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         """Initialise Redis, repos, and tools, then enter the dequeue loop."""
         self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
         self._queue = TaskQueue(self._redis)
         self._running = True
+        self._semaphore = asyncio.Semaphore(self._max_concurrent)
 
         # Initialise DB repositories (same as SaaS lifespan in main.py)
         await self._init_repos()
@@ -81,14 +90,36 @@ class AgentWorker:
 
         _register_all_tools(is_sdk_only=self._settings.mode == "sdk_only")
 
-        logger.info("AgentWorker started — waiting for tasks")
+        logger.info(
+            "AgentWorker started — waiting for tasks (max_concurrent=%d)",
+            self._max_concurrent,
+        )
         while self._running:
+            # Wait until a concurrency slot is available before dequeuing
+            await self._semaphore.acquire()
             payload = await self._queue.dequeue(timeout=5)
             if payload is not None:
-                try:
-                    await self._process_task(payload)
-                except Exception:
-                    logger.exception("Unhandled error processing task %s", payload.task_id)
+                task = asyncio.create_task(self._run_task(payload))
+                self._active_tasks.add(task)
+                task.add_done_callback(self._active_tasks.discard)
+            else:
+                # No task available — release the semaphore slot
+                self._semaphore.release()
+
+        # Drain active tasks on shutdown
+        if self._active_tasks:
+            logger.info("Waiting for %d active tasks to finish...", len(self._active_tasks))
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)
+
+    async def _run_task(self, payload: TaskPayload) -> None:
+        """Wrapper that processes a task and releases the semaphore slot."""
+        assert self._semaphore is not None
+        try:
+            await self._process_task(payload)
+        except Exception:
+            logger.exception("Unhandled error processing task %s", payload.task_id)
+        finally:
+            self._semaphore.release()
 
     async def stop(self) -> None:
         self._running = False
@@ -295,7 +326,13 @@ async def _main() -> None:
         logger.error("AgentWorker requires SaaS mode (ARGUS_DEPLOYMENT__MODE=saas)")
         sys.exit(1)
 
-    worker = AgentWorker(redis_url=settings.deployment.redis_url)
+    import os
+
+    max_concurrent = int(os.environ.get("ARGUS_WORKER_MAX_CONCURRENT", "1000"))
+    worker = AgentWorker(
+        redis_url=settings.deployment.redis_url,
+        max_concurrent=max_concurrent,
+    )
     try:
         await worker.start()
     except KeyboardInterrupt:
