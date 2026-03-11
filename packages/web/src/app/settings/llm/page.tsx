@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
+import { useDeployment } from "@/hooks/useDeployment";
 
 const API =
   process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:7600/api/v1";
@@ -15,6 +16,7 @@ interface LLMConfig {
 }
 
 export default function LLMSettingsPage() {
+  const { isSaaS } = useDeployment();
   const [config, setConfig] = useState<LLMConfig | null>(null);
   const [provider, setProvider] = useState("openai");
   const [model, setModel] = useState("");
@@ -119,6 +121,25 @@ export default function LLMSettingsPage() {
         Bring your own LLM API key. If not configured, the platform default will
         be used.
       </p>
+
+      {isSaaS && (
+        <div className="mb-6 rounded-lg border border-argus-500/30 bg-argus-500/10 px-4 py-3 text-sm">
+          <p className="text-[var(--foreground)]">
+            Use <code className="rounded bg-[var(--background)] px-1.5 py-0.5 text-xs font-mono">api.tryargus.cloud</code> as your server URL when configuring SDKs.
+          </p>
+          <p className="mt-1 text-[var(--muted)]">
+            Want to learn more?{" "}
+            <a
+              href="https://tryargus.cloud/docs"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-argus-400 underline hover:text-argus-300"
+            >
+              Visit our documentation
+            </a>
+          </p>
+        </div>
+      )}
 
       <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-6">
         {config?.configured && (

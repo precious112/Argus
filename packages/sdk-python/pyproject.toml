@@ -1,6 +1,6 @@
 [project]
 name = "argus-ai-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Argus Python SDK - Instrumentation for AI-native observability"
 readme = "README.md"
 requires-python = ">=3.9"
