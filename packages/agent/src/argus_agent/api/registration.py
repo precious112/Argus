@@ -109,14 +109,9 @@ async def register(body: RegisterRequest, response: Response):
         content='{"status":"ok","message":"Registration successful"}',
         media_type="application/json",
     )
-    response.set_cookie(
-        key="argus_token",
-        value=token,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=max_age,
-    )
+    from argus_agent.api.auth import _cookie_kwargs
+
+    response.set_cookie(value=token, **_cookie_kwargs(settings))
 
     logger.info("Registered user %s with tenant %s", body.username, tenant_id)
     return response

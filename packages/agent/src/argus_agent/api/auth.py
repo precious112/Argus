@@ -19,6 +19,37 @@ from argus_agent.storage.repositories import get_session
 
 logger = logging.getLogger("argus.auth")
 
+
+def _cookie_kwargs(settings) -> dict:
+    """Return cookie kwargs appropriate for the deployment mode.
+
+    In SaaS mode the frontend and API live on different subdomains
+    (e.g. app.tryargus.cloud / api.tryargus.cloud), so the cookie must
+    be scoped to the shared parent domain and marked Secure.
+    """
+    from urllib.parse import urlparse
+
+    base: dict = dict(
+        key="argus_token",
+        httponly=True,
+        samesite="lax",
+        path="/",
+        max_age=settings.security.session_expiry_hours * 3600,
+    )
+
+    frontend_url = getattr(settings.deployment, "frontend_url", None)
+    if settings.deployment.mode == "saas" and isinstance(frontend_url, str) and frontend_url:
+        parsed = urlparse(frontend_url)
+        hostname = parsed.hostname or ""
+        # Extract parent domain: app.tryargus.cloud → .tryargus.cloud
+        parts = hostname.split(".")
+        if len(parts) >= 2:
+            base["domain"] = "." + ".".join(parts[-2:])
+        base["secure"] = True
+        base["samesite"] = "none"
+
+    return base
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
@@ -92,14 +123,7 @@ async def login(body: LoginRequest, response: Response):
         content='{"status":"ok"}',
         media_type="application/json",
     )
-    response.set_cookie(
-        key="argus_token",
-        value=token,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=max_age,
-    )
+    response.set_cookie(value=token, **_cookie_kwargs(settings))
     return response
 
 
@@ -110,7 +134,14 @@ async def logout(response: Response):
         content='{"status":"ok"}',
         media_type="application/json",
     )
-    response.delete_cookie(key="argus_token", path="/")
+    ck = _cookie_kwargs(get_settings())
+    response.delete_cookie(
+        key="argus_token",
+        path="/",
+        domain=ck.get("domain"),
+        samesite=ck.get("samesite", "lax"),
+        secure=ck.get("secure", False),
+    )
     return response
 
 
@@ -247,14 +278,7 @@ async def switch_org(
         content='{"status":"ok"}',
         media_type="application/json",
     )
-    response.set_cookie(
-        key="argus_token",
-        value=token,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=max_age,
-    )
+    response.set_cookie(value=token, **_cookie_kwargs(settings))
     return response
 
 
