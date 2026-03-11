@@ -261,14 +261,9 @@ async def _oauth_login_or_register(
                 content='{"status":"ok","action":"login"}',
                 media_type="application/json",
             )
-            resp.set_cookie(
-                key="argus_token",
-                value=token,
-                httponly=True,
-                samesite="lax",
-                path="/",
-                max_age=settings.security.session_expiry_hours * 3600,
-            )
+            from argus_agent.api.auth import _cookie_kwargs
+
+            resp.set_cookie(value=token, **_cookie_kwargs(settings))
             return resp
 
         # 2. Check if email is already registered (link accounts)
@@ -296,14 +291,9 @@ async def _oauth_login_or_register(
                 content='{"status":"ok","action":"linked"}',
                 media_type="application/json",
             )
-            resp.set_cookie(
-                key="argus_token",
-                value=token,
-                httponly=True,
-                samesite="lax",
-                path="/",
-                max_age=settings.security.session_expiry_hours * 3600,
-            )
+            from argus_agent.api.auth import _cookie_kwargs
+
+            resp.set_cookie(value=token, **_cookie_kwargs(settings))
             return resp
 
         # 3. New user — create tenant + user + team member
@@ -341,13 +331,8 @@ async def _oauth_login_or_register(
         content='{"status":"ok","action":"registered"}',
         media_type="application/json",
     )
-    resp.set_cookie(
-        key="argus_token",
-        value=token,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=settings.security.session_expiry_hours * 3600,
-    )
+    from argus_agent.api.auth import _cookie_kwargs
+
+    resp.set_cookie(value=token, **_cookie_kwargs(settings))
     logger.info("OAuth %s user %s registered as tenant %s", provider, display_name, tenant_id)
     return resp

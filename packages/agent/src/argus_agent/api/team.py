@@ -469,14 +469,9 @@ async def accept_invite(body: AcceptInviteRequest, request: Request, response: R
         content='{"status":"ok","message":"Invitation accepted"}',
         media_type="application/json",
     )
-    response.set_cookie(
-        key="argus_token",
-        value=token,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=max_age,
-    )
+    from argus_agent.api.auth import _cookie_kwargs
+
+    response.set_cookie(value=token, **_cookie_kwargs(settings))
 
     logger.info("User %s accepted invitation to tenant %s", username, invitation.tenant_id)
     return response
