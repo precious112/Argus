@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""SaaS test runner — generates traffic, error bursts, and a fake xmrig process.
+"""SaaS test runner — generates background traffic and error bursts.
 
 Run separately from the app. Uses plain HTTP requests (no SDK import).
+Chaos scenarios (down/slow/vuln) are triggered via the app's /chaos/* endpoints.
 
 Usage:
     python test_runner.py
@@ -14,8 +15,6 @@ import asyncio
 import logging
 import os
 import random
-import shutil
-import subprocess
 import sys
 
 from dotenv import load_dotenv
@@ -101,53 +100,6 @@ async def error_burst_loop() -> None:
         await asyncio.sleep(delay)
 
 
-def create_xmrig_process() -> None:
-    """Create a fake xmrig process for security testing.
-
-    Copies the system `sleep` binary to /tmp/xmrig so that psutil
-    reports the process name as "xmrig" — making it trivially detectable
-    by both the security scanner and the agent's process_list tool.
-
-    NOTE: Does NOT auto-clean. User removes via Argus chat:
-        "kill the xmrig process"
-    """
-    xmrig_path = "/tmp/xmrig"
-
-    # Check if already running
-    try:
-        result = subprocess.run(
-            ["pgrep", "-x", "xmrig"], capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            pids = result.stdout.strip()
-            logger.info("xmrig already running (PID %s)", pids)
-            return
-    except Exception:
-        pass
-
-    # Create the fake binary by copying sleep
-    sleep_bin = shutil.which("sleep")
-    if not sleep_bin:
-        logger.error("Could not find 'sleep' binary — cannot create fake xmrig")
-        return
-
-    if not os.path.exists(xmrig_path):
-        logger.info("Creating fake xmrig at %s (copy of %s)", xmrig_path, sleep_bin)
-        shutil.copy2(sleep_bin, xmrig_path)
-        os.chmod(xmrig_path, 0o755)
-
-    # Launch it — sleep infinity keeps it alive
-    logger.info("Starting xmrig process...")
-    proc = subprocess.Popen(
-        [xmrig_path, "infinity"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    logger.info("xmrig running with PID %d", proc.pid)
-    logger.info("To remove: ask Argus chat 'kill the xmrig process'")
-
-
 async def main() -> None:
     logger.info("=" * 60)
     logger.info("Argus SaaS Test Runner")
@@ -163,9 +115,6 @@ async def main() -> None:
         logger.error("Cannot reach app at %s: %s", APP_URL, e)
         logger.error("Start the app first: python -m uvicorn app:app --host 0.0.0.0 --port 8000")
         sys.exit(1)
-
-    # Create fake xmrig
-    create_xmrig_process()
 
     # Run traffic and error burst loops concurrently
     logger.info("Starting traffic generation...")

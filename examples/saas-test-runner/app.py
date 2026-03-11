@@ -4,12 +4,15 @@ Runs on the tenant's VM. Provides:
 - SDK telemetry (traces, errors, metrics) sent to Argus SaaS
 - Webhook handler for remote tool execution from Argus SaaS
 - Test endpoints that generate various types of telemetry
+- Chaos endpoints to simulate failure scenarios for demos
 """
 
 import asyncio
 import logging
 import os
 import random
+import shutil
+import subprocess
 
 from dotenv import load_dotenv
 
@@ -53,11 +56,99 @@ logger = logging.getLogger("saas-demo")
 
 PORT = int(os.getenv("PORT", "8000"))
 
+# ---------------------------------------------------------------------------
+# Chaos state — supports multiple active modes simultaneously
+# ---------------------------------------------------------------------------
+_chaos_modes: set[str] = set()
+
+
+# ---------------------------------------------------------------------------
+# Chaos control endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/chaos/down")
+async def chaos_down():
+    """Activate database-down chaos mode. DB-dependent endpoints return 503."""
+    _chaos_modes.add("down")
+    logger.warning("CHAOS: database-down mode ACTIVATED")
+    return {"chaos": "down", "active_modes": sorted(_chaos_modes)}
+
+
+@app.post("/chaos/slow")
+async def chaos_slow():
+    """Activate slow-dependency chaos mode. Endpoints get 3-8s extra latency."""
+    _chaos_modes.add("slow")
+    logger.warning("CHAOS: slow-dependency mode ACTIVATED")
+    return {"chaos": "slow", "active_modes": sorted(_chaos_modes)}
+
+
+@app.post("/chaos/vuln")
+async def chaos_vuln():
+    """Spawn a fake xmrig process for security demo."""
+    xmrig_path = "/tmp/xmrig"
+
+    # Check if already running
+    try:
+        result = subprocess.run(
+            ["pgrep", "-x", "xmrig"], capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            pids = result.stdout.strip()
+            return {"chaos": "vuln", "status": "already_running", "pids": pids}
+    except Exception:
+        pass
+
+    sleep_bin = shutil.which("sleep")
+    if not sleep_bin:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Cannot find 'sleep' binary to create fake xmrig"},
+        )
+
+    if not os.path.exists(xmrig_path):
+        shutil.copy2(sleep_bin, xmrig_path)
+        os.chmod(xmrig_path, 0o755)
+
+    proc = subprocess.Popen(
+        [xmrig_path, "infinity"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    _chaos_modes.add("vuln")
+    logger.warning("CHAOS: xmrig process spawned (PID %d)", proc.pid)
+    return {"chaos": "vuln", "pid": proc.pid, "active_modes": sorted(_chaos_modes)}
+
+
+@app.post("/chaos/clear")
+async def chaos_clear():
+    """Deactivate all chaos modes."""
+    prev = sorted(_chaos_modes)
+    _chaos_modes.clear()
+    logger.info("CHAOS: all modes cleared (were: %s)", prev)
+    return {"chaos": "cleared", "previous_modes": prev}
+
+
+@app.get("/chaos/status")
+async def chaos_status():
+    """Return currently active chaos modes."""
+    return {"active_modes": sorted(_chaos_modes)}
+
+
+# ---------------------------------------------------------------------------
+# Application endpoints
+# ---------------------------------------------------------------------------
+
 
 @app.get("/")
 async def root():
-    """Health check endpoint."""
-    return {"status": "ok", "service": os.getenv("SERVICE_NAME", "saas-demo-app")}
+    """Health check endpoint — always works, even during chaos."""
+    return {
+        "status": "ok",
+        "service": os.getenv("SERVICE_NAME", "saas-demo-app"),
+        "chaos_modes": sorted(_chaos_modes),
+    }
 
 
 @app.get("/users/{user_id}")
@@ -65,6 +156,30 @@ async def root():
 async def get_user(user_id: int):
     """Return a mock user."""
     logger.info("Fetching user %d", user_id)
+
+    # Chaos: slow dependency
+    if "slow" in _chaos_modes:
+        delay = random.uniform(3.0, 8.0)
+        logger.warning("CHAOS slow: injecting %.1fs delay on get_user", delay)
+        argus.add_breadcrumb("chaos", f"Slow dependency injection: {delay:.1f}s")
+        await asyncio.sleep(delay)
+
+    # Chaos: database down
+    if "down" in _chaos_modes:
+        err = ConnectionRefusedError("Cannot connect to database at postgres:5432")
+        logger.error("CHAOS down: database connection refused for get_user")
+        argus.capture_exception(err)
+        argus.event("dependency_error", {
+            "dependency": "postgres:5432",
+            "type": "db",
+            "error": "Connection refused",
+            "duration_ms": 50,
+        })
+        return JSONResponse(
+            status_code=503,
+            content={"error": "DatabaseConnectionError: Cannot connect to database at postgres:5432"},
+        )
+
     await asyncio.sleep(random.uniform(0.01, 0.1))
     argus.event("user_fetched", {"user_id": user_id})
     return {"id": user_id, "name": f"User-{user_id}", "email": f"user{user_id}@example.com"}
@@ -96,8 +211,31 @@ async def slow_endpoint():
 async def chain():
     """Outgoing HTTP call + nested trace spans."""
     logger.info("Chain request: upstream + lookup")
-    base = f"http://localhost:{PORT}"
 
+    # Chaos: slow dependency
+    if "slow" in _chaos_modes:
+        delay = random.uniform(3.0, 8.0)
+        logger.warning("CHAOS slow: injecting %.1fs delay on chain", delay)
+        argus.add_breadcrumb("chaos", f"Slow dependency injection: {delay:.1f}s")
+        await asyncio.sleep(delay)
+
+    # Chaos: database down
+    if "down" in _chaos_modes:
+        err = ConnectionRefusedError("Cannot connect to database at postgres:5432")
+        logger.error("CHAOS down: database connection refused for chain")
+        argus.capture_exception(err)
+        argus.event("dependency_error", {
+            "dependency": "postgres:5432",
+            "type": "db",
+            "error": "Connection refused",
+            "duration_ms": 50,
+        })
+        return JSONResponse(
+            status_code=503,
+            content={"error": "DatabaseConnectionError: Cannot connect to database at postgres:5432"},
+        )
+
+    base = f"http://localhost:{PORT}"
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"{base}/users/1")
         upstream = resp.json()
@@ -110,6 +248,22 @@ async def chain():
 @trace("checkout_handler")
 async def checkout():
     """Error correlation with trace context + breadcrumbs."""
+    # Chaos: database down
+    if "down" in _chaos_modes:
+        err = ConnectionRefusedError("Cannot connect to database at postgres:5432")
+        logger.error("CHAOS down: database connection refused for checkout")
+        argus.capture_exception(err)
+        argus.event("dependency_error", {
+            "dependency": "postgres:5432",
+            "type": "db",
+            "error": "Connection refused",
+            "duration_ms": 50,
+        })
+        return JSONResponse(
+            status_code=503,
+            content={"error": "DatabaseConnectionError: Cannot connect to database at postgres:5432"},
+        )
+
     argus.add_breadcrumb("checkout", "Validating cart contents", {"items": 3})
     await asyncio.sleep(0.01)
 
@@ -131,6 +285,14 @@ async def checkout():
 async def external():
     """External dependency tracking."""
     logger.info("Calling external API")
+
+    # Chaos: slow dependency
+    if "slow" in _chaos_modes:
+        delay = random.uniform(3.0, 8.0)
+        logger.warning("CHAOS slow: injecting %.1fs delay on external call", delay)
+        argus.add_breadcrumb("chaos", f"Slow dependency injection: {delay:.1f}s")
+        await asyncio.sleep(delay)
+
     async with httpx.AsyncClient() as client:
         resp = await client.get("https://jsonplaceholder.typicode.com/todos/1")
         data = resp.json()
