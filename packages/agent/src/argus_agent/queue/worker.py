@@ -176,10 +176,10 @@ class AgentWorker:
             msg = json.dumps({"event_type": event_type, "data": data})
             await redis_pub.publish(f"{STREAM_KEY_PREFIX}{task_id}", msg)
 
-        # 4. Get LLM provider
-        from argus_agent.llm.registry import get_provider
+        # 4. Get LLM provider (tenant BYOK keys take priority)
+        from argus_agent.llm.registry import get_provider_for_tenant
 
-        provider = get_provider()
+        provider = await get_provider_for_tenant(payload.tenant_id)
 
         # 5. Build AgentLoop
         from argus_agent.agent.loop import AgentLoop
