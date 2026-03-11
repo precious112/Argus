@@ -240,6 +240,7 @@ class AgentWorker:
                             role=msg.role,
                             content=msg.content,
                             tool_calls=msg.tool_calls if msg.tool_calls else None,
+                            tool_call_id=msg.tool_call_id or "",
                             token_count=0,
                         )
                 except Exception:
