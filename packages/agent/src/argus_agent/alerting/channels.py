@@ -328,16 +328,23 @@ class SlackChannel(NotificationChannel):
 
             client = AsyncWebClient(token=self._bot_token, ssl=self._ssl_context)
 
-            blocks = [
-                {
-                    "type": "header",
-                    "text": {"type": "plain_text", "text": "\U0001f916 AI Investigation Report"},
-                },
-                {
+            # Slack section blocks have a 3000 char limit for text.
+            # Split long summaries into multiple blocks.
+            max_text = 2900  # leave room for title/formatting
+            header_block = {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "\U0001f916 AI Investigation Report"},
+            }
+            blocks = [header_block]
+
+            full_text = f"*{title}*\n\n{summary}"
+            while full_text:
+                chunk = full_text[:max_text]
+                full_text = full_text[max_text:]
+                blocks.append({
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"*{title}*\n\n{summary}"},
-                },
-            ]
+                    "text": {"type": "mrkdwn", "text": chunk},
+                })
 
             # Thread under original alert if we have thread_ts
             thread_ts = None
