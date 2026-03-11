@@ -48,6 +48,7 @@ class ConversationMemory:
         role: str,
         content: str = "",
         tool_calls: list[dict] | None = None,
+        tool_call_id: str = "",
         tool_result: dict | None = None,
         token_count: int = 0,
     ) -> str:
@@ -60,6 +61,7 @@ class ConversationMemory:
                 role=role,
                 content=content,
                 tool_calls=tool_calls,
+                tool_call_id=tool_call_id,
                 tool_result=tool_result,
                 token_count=token_count,
                 tenant_id=get_tenant_id(),
@@ -96,7 +98,7 @@ class ConversationMemory:
                     self.messages.append(LLMMessage(
                         role="tool",
                         content=row.content,
-                        tool_call_id=row.id,
+                        tool_call_id=row.tool_call_id or row.id,
                         name="",
                     ))
 
