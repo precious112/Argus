@@ -196,6 +196,23 @@ export default function WebhooksPage() {
         </button>
       </div>
 
+      <div className="rounded-lg border border-argus-500/30 bg-argus-500/10 px-4 py-3 text-sm">
+        <p className="text-[var(--foreground)]">
+          Use <code className="rounded bg-[var(--background)] px-1.5 py-0.5 text-xs font-mono">api.tryargus.cloud</code> as your server URL when configuring SDKs and webhooks.
+        </p>
+        <p className="mt-1 text-[var(--muted)]">
+          Want to learn more?{" "}
+          <a
+            href="https://tryargus.cloud/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-argus-400 underline hover:text-argus-300"
+          >
+            Visit our documentation
+          </a>
+        </p>
+      </div>
+
       {error && (
         <div className="rounded border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-400">
           {error}
