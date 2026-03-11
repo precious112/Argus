@@ -189,12 +189,26 @@ class ConversationMemory:
             dropped = result.pop(0)
             total_tokens -= _estimate_tokens(dropped)
 
-        # Drop orphaned tool results whose assistant message was truncated above.
-        # Gemini requires function_response to immediately follow a function_call.
-        while result and result[0].role == "tool":
-            result.pop(0)
+        # Remove orphaned tool results whose assistant message was
+        # truncated above.  A tool result is valid only if its
+        # tool_call_id appears in a preceding assistant message's
+        # tool_calls list.
+        valid_call_ids: set[str] = set()
+        cleaned: list[LLMMessage] = []
+        for msg in result:
+            if msg.role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tc_id = tc.get("id", "")
+                    if tc_id:
+                        valid_call_ids.add(tc_id)
+                cleaned.append(msg)
+            elif msg.role == "tool":
+                if msg.tool_call_id in valid_call_ids:
+                    cleaned.append(msg)
+            else:
+                cleaned.append(msg)
 
-        return result
+        return cleaned
 
 
 def _estimate_tokens(msg: LLMMessage) -> int:
