@@ -51,7 +51,11 @@ Rules engine with Slack, email, and webhook delivery. AI-enhanced alert summarie
 ### Token Budget Management
 Daily and hourly token limits, priority reserves for critical investigations, and a cost analytics dashboard. Stay in control of LLM spending.
 
-## Quick Start
+## Cloud Version
+
+Want to skip the setup? **[Argus Cloud](https://tryargus.cloud)** is the fully managed version — no Docker, no infrastructure, no configuration. Sign up, install the SDK in your app, and start monitoring in minutes.
+
+## Quick Start (Self-Hosted)
 
 ### Single Image (Recommended)
 

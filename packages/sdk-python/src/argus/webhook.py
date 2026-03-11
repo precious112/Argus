@@ -84,24 +84,82 @@ def _tool_system_metrics(**_kwargs: Any) -> dict[str, Any]:
 
 
 def _tool_process_list(**kwargs: Any) -> dict[str, Any]:
-    """List running processes."""
+    """List running processes.
+
+    Uses `ps` for a complete listing (no AccessDenied gaps),
+    falls back to psutil if `ps` is unavailable.
+    """
+    limit = int(kwargs.get("limit", 20))
+    sort_by = kwargs.get("sort_by", "cpu")
+    key = "cpu_percent" if sort_by == "cpu" else "memory_percent"
+
+    # Try ps first — shows all processes regardless of permissions
+    procs = _ps_process_list()
+    if procs is None:
+        procs = _psutil_process_list()
+
+    procs.sort(key=lambda x: x.get(key) or 0, reverse=True)
+    return {"processes": procs[:limit], "total": len(procs)}
+
+
+def _ps_process_list() -> list[dict[str, Any]] | None:
+    """List processes via `ps -eo`. Returns None if ps fails."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,user,%cpu,%mem,stat,comm,args"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+    lines = result.stdout.strip().splitlines()
+    if len(lines) < 2:
+        return None
+
+    procs: list[dict[str, Any]] = []
+    for line in lines[1:]:
+        parts = line.split(None, 6)
+        if len(parts) < 6:
+            continue
+        try:
+            pid = int(parts[0])
+            cpu = float(parts[2])
+            mem = float(parts[3])
+        except (ValueError, IndexError):
+            continue
+        procs.append({
+            "pid": pid,
+            "name": parts[5],
+            "status": parts[4],
+            "cpu_percent": cpu,
+            "memory_percent": round(mem, 2),
+            "username": parts[1],
+            "cmdline": parts[6][:200] if len(parts) > 6 else "",
+        })
+    return procs
+
+
+def _psutil_process_list() -> list[dict[str, Any]]:
+    """Fallback: list processes via psutil (may miss AccessDenied processes)."""
     try:
         import psutil
     except ImportError:
-        return {"error": "psutil not installed"}
-    limit = int(kwargs.get("limit", 20))
-    sort_by = kwargs.get("sort_by", "cpu")
-    procs = []
-    for p in psutil.process_iter(["pid", "name", "cmdline", "cpu_percent", "memory_percent", "status"]):
+        return []
+    procs: list[dict[str, Any]] = []
+    for p in psutil.process_iter(
+        ["pid", "name", "cmdline", "cpu_percent", "memory_percent", "status"]
+    ):
         try:
             info = p.info
             info["cmdline"] = " ".join(info.get("cmdline") or [])
             procs.append(info)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    key = "cpu_percent" if sort_by == "cpu" else "memory_percent"
-    procs.sort(key=lambda x: x.get(key) or 0, reverse=True)
-    return {"processes": procs[:limit], "total": len(procs)}
+    return procs
 
 
 def _tool_network_connections(**kwargs: Any) -> dict[str, Any]:
