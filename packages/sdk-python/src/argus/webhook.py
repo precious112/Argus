@@ -84,22 +84,21 @@ def _tool_system_metrics(**_kwargs: Any) -> dict[str, Any]:
 
 
 def _tool_process_list(**kwargs: Any) -> dict[str, Any]:
-    """List running processes.
+    """List ALL running processes.
 
     Uses `ps` for a complete listing (no AccessDenied gaps),
     falls back to psutil if `ps` is unavailable.
+    Returns every process — no filtering, no limits.
     """
-    limit = int(kwargs.get("limit", 20))
     sort_by = kwargs.get("sort_by", "cpu")
     key = "cpu_percent" if sort_by == "cpu" else "memory_percent"
 
-    # Try ps first — shows all processes regardless of permissions
     procs = _ps_process_list()
     if procs is None:
         procs = _psutil_process_list()
 
     procs.sort(key=lambda x: x.get(key) or 0, reverse=True)
-    return {"processes": procs[:limit], "total": len(procs)}
+    return {"processes": procs, "total": len(procs)}
 
 
 def _ps_process_list() -> list[dict[str, Any]] | None:

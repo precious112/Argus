@@ -107,7 +107,7 @@ class TestSystemSnapshot:
 
 class TestProcessMonitor:
     def test_get_process_list(self):
-        processes = get_process_list(limit=10)
+        processes = get_process_list()
         assert len(processes) > 0
         assert "pid" in processes[0]
         assert "name" in processes[0]
@@ -115,12 +115,12 @@ class TestProcessMonitor:
         assert "memory_percent" in processes[0]
 
     def test_sort_by_memory(self):
-        processes = get_process_list(sort_by="memory_percent", limit=5)
+        processes = get_process_list(sort_by="memory_percent")
         if len(processes) >= 2:
             assert processes[0]["memory_percent"] >= processes[1]["memory_percent"]
 
     def test_sort_by_pid(self):
-        processes = get_process_list(sort_by="pid", limit=5)
+        processes = get_process_list(sort_by="pid")
         if len(processes) >= 2:
             assert processes[0]["pid"] <= processes[1]["pid"]
 
