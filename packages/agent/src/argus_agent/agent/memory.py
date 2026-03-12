@@ -48,6 +48,7 @@ class ConversationMemory:
         role: str,
         content: str = "",
         tool_calls: list[dict] | None = None,
+        tool_call_id: str = "",
         tool_result: dict | None = None,
         token_count: int = 0,
     ) -> str:
@@ -60,6 +61,7 @@ class ConversationMemory:
                 role=role,
                 content=content,
                 tool_calls=tool_calls,
+                tool_call_id=tool_call_id,
                 tool_result=tool_result,
                 token_count=token_count,
                 tenant_id=get_tenant_id(),
@@ -96,7 +98,7 @@ class ConversationMemory:
                     self.messages.append(LLMMessage(
                         role="tool",
                         content=row.content,
-                        tool_call_id=row.id,
+                        tool_call_id=row.tool_call_id or row.id,
                         name="",
                     ))
 
@@ -189,12 +191,26 @@ class ConversationMemory:
             dropped = result.pop(0)
             total_tokens -= _estimate_tokens(dropped)
 
-        # Drop orphaned tool results whose assistant message was truncated above.
-        # Gemini requires function_response to immediately follow a function_call.
-        while result and result[0].role == "tool":
-            result.pop(0)
+        # Remove orphaned tool results whose assistant message was
+        # truncated above.  A tool result is valid only if its
+        # tool_call_id appears in a preceding assistant message's
+        # tool_calls list.
+        valid_call_ids: set[str] = set()
+        cleaned: list[LLMMessage] = []
+        for msg in result:
+            if msg.role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tc_id = tc.get("id", "")
+                    if tc_id:
+                        valid_call_ids.add(tc_id)
+                cleaned.append(msg)
+            elif msg.role == "tool":
+                if msg.tool_call_id in valid_call_ids:
+                    cleaned.append(msg)
+            else:
+                cleaned.append(msg)
 
-        return result
+        return cleaned
 
 
 def _estimate_tokens(msg: LLMMessage) -> int:

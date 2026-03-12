@@ -40,6 +40,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(20))  # user, assistant, system, tool
     content: Mapped[str] = mapped_column(Text, default="")
     tool_calls: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    tool_call_id: Mapped[str] = mapped_column(String(64), default="")
     tool_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

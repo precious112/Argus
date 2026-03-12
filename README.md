@@ -19,8 +19,9 @@
 
 ---
 
-<!-- REPLACE WITH DEMO VIDEO WHEN READY -->
-![Argus Dashboard](https://raw.githubusercontent.com/precious112/Pstore_backend/refs/heads/master/media/media/Screenshot%202026-02-23%20at%207.27.19%20AM.png)
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/266b04f3-ac13-40a6-87be-2f7a0c5d5bcd" autoplay loop muted playsinline></video>
+</div>
 
 ## Why Argus
 
@@ -51,7 +52,11 @@ Rules engine with Slack, email, and webhook delivery. AI-enhanced alert summarie
 ### Token Budget Management
 Daily and hourly token limits, priority reserves for critical investigations, and a cost analytics dashboard. Stay in control of LLM spending.
 
-## Quick Start
+## Cloud Version
+
+Want to skip the setup? **[Argus Cloud](https://tryargus.cloud)** is the fully managed version — no Docker, no infrastructure, no configuration. Sign up, install the SDK in your app, and start monitoring in minutes.
+
+## Quick Start (Self-Hosted)
 
 ### Single Image (Recommended)
 
