@@ -1,4 +1,4 @@
-argus-ai-sdk>=0.2.0
+argus-ai-sdk>=0.2.1
 fastapi>=0.100.0
 uvicorn>=0.25.0
 httpx>=0.25.0
