@@ -242,12 +242,12 @@ class ProcessMonitor:
 
 def get_process_list(
     sort_by: str = "cpu_percent",
-    limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Get current process list snapshot (synchronous, for tools).
 
     Uses `ps` for a complete listing (no AccessDenied gaps),
     falls back to psutil if `ps` is unavailable.
+    Returns ALL processes — no limit.
     """
     processes = _get_process_list_ps()
     if processes is None:
@@ -259,7 +259,7 @@ def get_process_list(
     else:
         processes.sort(key=lambda p: p.get("cpu_percent", 0), reverse=True)
 
-    return processes[:limit]
+    return processes
 
 
 def _get_process_list_ps() -> list[dict[str, Any]] | None:

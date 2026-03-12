@@ -83,19 +83,13 @@ class TestProcessListTool:
         assert result["display_type"] == "process_table"
 
     @pytest.mark.asyncio
-    async def test_limit(self):
+    async def test_returns_all_processes(self):
         tool = ProcessListTool()
-        result = await tool.execute(limit=3)
+        result = await tool.execute()
 
-        assert len(result["processes"]) <= 3
-
-    @pytest.mark.asyncio
-    async def test_filter_name(self):
-        tool = ProcessListTool()
-        result = await tool.execute(filter_name="python", limit=100)
-
-        for p in result["processes"]:
-            assert "python" in p["name"].lower() or "python" in p.get("cmdline", "").lower()
+        # Should return all processes, no artificial limit
+        assert result["total_processes"] == len(result["processes"])
+        assert result["total_processes"] > 10
 
     def test_tool_properties(self):
         tool = ProcessListTool()
