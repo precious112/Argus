@@ -21,8 +21,8 @@ class ProcessListTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "List running processes with CPU and memory usage. "
-            "Sort by cpu_percent, memory_percent, or pid."
+            "List ALL running processes with CPU and memory usage. "
+            "Returns every process — no filtering, no limits."
         )
 
     @property
@@ -39,42 +39,13 @@ class ProcessListTool(Tool):
                     "description": "Sort: cpu_percent, memory_percent, pid",
                     "default": "cpu_percent",
                 },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max processes to return (default: 25)",
-                    "default": 25,
-                },
-                "filter_name": {
-                    "type": "string",
-                    "description": "Filter by process name (substring match)",
-                },
-                "filter_user": {
-                    "type": "string",
-                    "description": "Filter by username",
-                },
             },
         }
 
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         sort_by = kwargs.get("sort_by", "cpu_percent")
-        limit = min(kwargs.get("limit", 25), 100)
-        filter_name = kwargs.get("filter_name", "")
-        filter_user = kwargs.get("filter_user", "")
 
-        processes = get_process_list(sort_by=sort_by, limit=200)
-
-        # Apply filters
-        if filter_name:
-            fn = filter_name.lower()
-            processes = [
-                p
-                for p in processes
-                if fn in p.get("name", "").lower() or fn in p.get("cmdline", "").lower()
-            ]
-        if filter_user:
-            processes = [p for p in processes if p.get("username") == filter_user]
-
-        processes = processes[:limit]
+        processes = get_process_list(sort_by=sort_by)
 
         return {
             "total_processes": len(processes),
