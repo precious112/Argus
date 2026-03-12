@@ -12,7 +12,6 @@ interface PlanInfo {
   max_services: number;
   data_retention_days: number;
   conversation_retention_days: number;
-  daily_ai_messages: number;
   webhook_enabled: boolean;
   custom_dashboards: boolean;
   external_alert_channels: boolean;
@@ -522,7 +521,6 @@ function BillingContent() {
               <CompareRow3 label="Services" free="1" teams="10" business="30" />
               <CompareRow3 label="Team members" free="1" teams="10" business="30" />
               <CompareRow3 label="API keys" free="1" teams="10" business="30" />
-              <CompareRow3 label="AI messages" free="10/day (BYOK)" teams="Unlimited (BYOK)" business="Unlimited (BYOK)" />
               <CompareRow3 label="Conversation history" free="3 days" teams="90 days" business="270 days" />
               <CompareRow3 label="Overage pricing" free="-" teams="$0.30/1K (prepaid)" business="$0.30/1K (prepaid)" />
               <BoolCompareRow3 label="Webhook (full mode)" free={false} teams={true} business={true} />
