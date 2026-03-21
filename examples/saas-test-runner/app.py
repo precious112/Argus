@@ -1,4 +1,4 @@
-"""Payments API — FastAPI app with Argus SDK + webhook handler.
+"""Payments API — FastAPI app instrumented with Argus SDK.
 
 A fintech payments service instrumented with Argus for observability.
 Provides payment processing, account management, compliance screening,
@@ -29,8 +29,7 @@ from fastapi.responses import JSONResponse
 
 # Initialize Argus SDK
 argus.init(
-    server_url=os.getenv("ARGUS_URL", "http://localhost:80"),
-    api_key=os.getenv("ARGUS_API_KEY", ""),
+    server_url=os.getenv("ARGUS_URL", "http://localhost:7600"),
     service_name=os.getenv("SERVICE_NAME", "payments-api"),
     runtime_metrics=True,
     auto_instrument=True,
