@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 _MAX_BREADCRUMBS = 50
@@ -26,7 +26,7 @@ def add_breadcrumb(
     """Add a breadcrumb to the current thread's trail."""
     crumbs = _get_crumbs()
     crumbs.append({
-        "timestamp": datetime.now(UTC).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "category": category,
         "message": message,
         "data": data or {},
