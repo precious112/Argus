@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * SaaS test runner — generates traffic, error bursts, and a fake xmrig process.
+ * Ledger Service test runner — generates traffic and error bursts.
  *
  * Run separately from the app. Uses plain HTTP requests (no SDK import).
+ * Chaos scenarios are triggered via the app's /_ops/simulate/* endpoints.
  *
  * Usage:
  *   node test_runner.js
@@ -13,23 +14,23 @@
 
 require("dotenv").config();
 
-const { execSync, spawn } = require("node:child_process");
-const fs = require("node:fs");
-const path = require("node:path");
-
 const APP_URL = (process.env.APP_URL || "http://localhost:8001").replace(/\/+$/, "");
+
+const CURRENCIES = ["USD", "EUR", "GBP"];
+const MERCHANT_IDS = ["mch_8291", "mch_4517", "mch_7203", "mch_1089", "mch_6345"];
+const ACCOUNTS = ["acct_1001", "acct_1002", "acct_1003", "acct_1004", "acct_1005"];
 
 // Weighted endpoint list for traffic generation
 const ENDPOINTS = [
-  { method: "GET", path: "/", weight: 10 },
-  { method: "GET", path: "/users/1", weight: 6 },
-  { method: "GET", path: "/users/2", weight: 4 },
-  { method: "GET", path: "/chain", weight: 3 },
-  { method: "GET", path: "/external", weight: 2 },
-  { method: "GET", path: "/slow", weight: 2 },
-  { method: "POST", path: "/checkout", weight: 2 },
-  { method: "POST", path: "/multi-error", weight: 2 },
-  { method: "POST", path: "/error", weight: 1 },
+  { method: "GET",  path: "/health",               weight: 8 },
+  { method: "GET",  path: "/v1/accounts/acct_1001", weight: 6 },
+  { method: "GET",  path: "/v1/accounts/acct_1002", weight: 4 },
+  { method: "POST", path: "/v1/payments/charge",    weight: 5 },
+  { method: "POST", path: "/v1/payments/authorize", weight: 4 },
+  { method: "POST", path: "/v1/transfers/initiate", weight: 3 },
+  { method: "GET",  path: "/v1/rates/convert",      weight: 3 },
+  { method: "GET",  path: "/v1/compliance/screen",  weight: 2 },
+  { method: "POST", path: "/v1/payments/refund",    weight: 2 },
 ];
 
 function buildWeightedList() {
@@ -48,6 +49,47 @@ function log(level, msg, ...args) {
   console.log(`${ts} [${level}] test_runner: ${formatted}`);
 }
 
+function randomChoice(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function makeBody(path) {
+  if (path === "/v1/payments/charge") {
+    return {
+      amount: parseFloat((Math.random() * 485 + 15).toFixed(2)),
+      currency: randomChoice(CURRENCIES),
+      source: `tok_visa_${Math.floor(Math.random() * 9000 + 1000)}`,
+      merchant_id: randomChoice(MERCHANT_IDS),
+      idempotency_key: `idem_${Math.random().toString(36).slice(2, 10)}`,
+    };
+  }
+  if (path === "/v1/payments/authorize") {
+    return {
+      amount: parseFloat((Math.random() * 495 + 5).toFixed(2)),
+      currency: randomChoice(CURRENCIES),
+      card_last4: String(Math.floor(Math.random() * 9000 + 1000)),
+      merchant_id: randomChoice(MERCHANT_IDS),
+    };
+  }
+  if (path === "/v1/transfers/initiate") {
+    const accts = [...ACCOUNTS].sort(() => Math.random() - 0.5).slice(0, 2);
+    return {
+      from_account: accts[0],
+      to_account: accts[1],
+      amount: parseFloat((Math.random() * 4950 + 50).toFixed(2)),
+      currency: randomChoice(CURRENCIES),
+    };
+  }
+  if (path === "/v1/payments/refund") {
+    return {
+      transaction_id: `txn_${Math.random().toString(36).slice(2, 8)}`,
+      amount: parseFloat((Math.random() * 240 + 10).toFixed(2)),
+      reason: randomChoice(["customer_request", "duplicate", "fraudulent"]),
+    };
+  }
+  return null;
+}
+
 // -----------------------------------------------------------------------
 // Traffic loop — weighted random requests every ~15s
 // -----------------------------------------------------------------------
@@ -60,7 +102,15 @@ async function trafficLoop() {
     const url = `${APP_URL}${p}`;
 
     try {
-      const resp = await fetch(url, { method, signal: AbortSignal.timeout(15000) });
+      const opts = { method, signal: AbortSignal.timeout(30000) };
+      if (method === "POST") {
+        const body = makeBody(p);
+        if (body) {
+          opts.headers = { "Content-Type": "application/json" };
+          opts.body = JSON.stringify(body);
+        }
+      }
+      const resp = await fetch(url, opts);
       log("INFO", `${method} ${p} -> ${resp.status}`);
     } catch (err) {
       log("WARN", `${method} ${p} -> error: ${err.message}`);
@@ -72,7 +122,7 @@ async function trafficLoop() {
 }
 
 // -----------------------------------------------------------------------
-// Error burst loop — 20 rapid error requests every ~5 minutes
+// Error burst loop — rapid failed authorizations/refunds every ~5 minutes
 // -----------------------------------------------------------------------
 
 async function errorBurstLoop() {
@@ -84,11 +134,16 @@ async function errorBurstLoop() {
     log("INFO", "=== Starting error burst (20 requests) ===");
 
     for (let i = 0; i < 20; i++) {
-      const endpoint = i % 3 === 0 ? "/multi-error" : "/error";
+      const isRefund = i % 3 === 0;
+      const endpoint = isRefund ? "/v1/payments/refund" : "/v1/payments/authorize";
+      const body = makeBody(endpoint);
+
       try {
         await fetch(`${APP_URL}${endpoint}`, {
           method: "POST",
-          signal: AbortSignal.timeout(15000),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(30000),
         });
       } catch {
         // ignore
@@ -105,63 +160,18 @@ async function errorBurstLoop() {
 }
 
 // -----------------------------------------------------------------------
-// Fake xmrig process for security testing
-// -----------------------------------------------------------------------
-
-function createXmrigProcess() {
-  const xmrigPath = "/tmp/xmrig";
-
-  // Check if already running
-  try {
-    const result = execSync("pgrep -x xmrig", { encoding: "utf-8", timeout: 3000 });
-    if (result.trim()) {
-      log("INFO", `xmrig already running (PID ${result.trim()})`);
-      return;
-    }
-  } catch {
-    // pgrep returns exit 1 when no match — that's expected
-  }
-
-  // Find the sleep binary
-  let sleepBin;
-  try {
-    sleepBin = execSync("which sleep", { encoding: "utf-8", timeout: 3000 }).trim();
-  } catch {
-    log("ERROR", "Could not find 'sleep' binary — cannot create fake xmrig");
-    return;
-  }
-
-  // Copy sleep binary as xmrig
-  if (!fs.existsSync(xmrigPath)) {
-    log("INFO", `Creating fake xmrig at ${xmrigPath} (copy of ${sleepBin})`);
-    fs.copyFileSync(sleepBin, xmrigPath);
-    fs.chmodSync(xmrigPath, 0o755);
-  }
-
-  // Launch it — sleep infinity keeps it alive
-  log("INFO", "Starting xmrig process...");
-  const proc = spawn(xmrigPath, ["infinity"], {
-    detached: true,
-    stdio: "ignore",
-  });
-  proc.unref();
-  log("INFO", `xmrig running with PID ${proc.pid}`);
-  log("INFO", "To remove: ask Argus chat 'kill the xmrig process'");
-}
-
-// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 
 async function main() {
   log("INFO", "============================================================");
-  log("INFO", "Argus SaaS Test Runner (Node)");
+  log("INFO", "Ledger Service — Test Runner");
   log("INFO", `Target app: ${APP_URL}`);
   log("INFO", "============================================================");
 
   // Verify app is reachable
   try {
-    const resp = await fetch(`${APP_URL}/`, { signal: AbortSignal.timeout(5000) });
+    const resp = await fetch(`${APP_URL}/health`, { signal: AbortSignal.timeout(5000) });
     const data = await resp.json();
     log("INFO", `App health check: ${resp.status} ${JSON.stringify(data)}`);
   } catch (err) {
@@ -169,9 +179,6 @@ async function main() {
     log("ERROR", "Start the app first: node app.js");
     process.exit(1);
   }
-
-  // Create fake xmrig
-  createXmrigProcess();
 
   // Run traffic and error burst loops concurrently
   log("INFO", "Starting traffic generation...");
