@@ -24,9 +24,21 @@ def patch_httpx() -> None:
     _original_sync_send = httpx.Client.send
     _original_async_send = httpx.AsyncClient.send
 
+    def _is_argus_url(request: Any) -> bool:
+        """Return True if the request targets the Argus ingest endpoint."""
+        import argus
+
+        if argus._client is None:
+            return False
+        server = argus._client._server_url
+        return str(request.url).startswith(server)
+
     def _patched_sync_send(self: Any, request: Any, **kwargs: Any) -> Any:
         import argus
         from argus.context import get_current_context
+
+        if _is_argus_url(request):
+            return _original_sync_send(self, request, **kwargs)
 
         start = time.monotonic()
         status_code = 0
@@ -46,7 +58,6 @@ def patch_httpx() -> None:
                 if error_msg:
                     dep_status = "error"
 
-                # Inject traceparent if context available
                 target = f"{request.url.host}:{request.url.port or 443}"
                 argus._client.send_event("dependency", {
                     "trace_id": ctx.trace_id if ctx else None,
@@ -64,6 +75,9 @@ def patch_httpx() -> None:
     async def _patched_async_send(self: Any, request: Any, **kwargs: Any) -> Any:
         import argus
         from argus.context import get_current_context
+
+        if _is_argus_url(request):
+            return await _original_async_send(self, request, **kwargs)
 
         start = time.monotonic()
         status_code = 0
