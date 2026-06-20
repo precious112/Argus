@@ -112,6 +112,7 @@ class HeartbeatMonitor:
                 severity=EventSeverity.NOTABLE,
                 message=f"Service '{svc}' has resumed sending telemetry",
                 data={"service": svc},
+                labels={"source": "sdk_telemetry", "type": EventType.SDK_SERVICE_RECOVERED, "service": svc},
             ))
             logger.info("Service '%s' recovered", svc)
 
@@ -130,6 +131,7 @@ class HeartbeatMonitor:
                     severity=EventSeverity.NOTABLE,
                     message=f"Service '{svc}' has stopped sending telemetry",
                     data={"service": svc},
+                    labels={"source": "sdk_telemetry", "type": EventType.SDK_SERVICE_SILENT, "service": svc},
                 ))
                 logger.info("Service '%s' went silent", svc)
 

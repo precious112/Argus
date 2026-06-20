@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from argus_agent.alerting.delivery import channel_name, deliver
 from argus_agent.events.types import Event, EventSeverity, EventType
 
 logger = logging.getLogger("argus.alerting.formatter")
@@ -378,16 +379,22 @@ class AlertFormatter:
         Returns merged channel metadata from all channels.
         """
         metadata: dict[str, str] = {}
+        severity = str(getattr(alert, "severity", ""))
+        alert_id = str(getattr(alert, "id", ""))
         for channel in self._channels:
-            try:
-                if hasattr(channel, "send_urgent"):
-                    result = await channel.send_urgent(alert, event, friendly)
-                    if isinstance(result, dict):
-                        metadata.update(result)
-                else:
-                    await channel.send(alert, event)
-            except Exception:
-                logger.exception("Urgent send failed on channel %s", type(channel).__name__)
+            cname = channel_name(channel)
+            if hasattr(channel, "send_urgent"):
+                result = await deliver(
+                    lambda c=channel: c.send_urgent(alert, event, friendly),
+                    channel=cname, kind="urgent", alert_id=alert_id, severity=severity,
+                )
+                if isinstance(result, dict):
+                    metadata.update(result)
+            else:
+                await deliver(
+                    lambda c=channel: c.send(alert, event),
+                    channel=cname, kind="urgent", alert_id=alert_id, severity=severity,
+                )
         return metadata
 
     async def send_investigation_report(
@@ -399,19 +406,20 @@ class AlertFormatter:
     ) -> None:
         """Post an AI investigation report to all external channels."""
         title = format_event(event)
+        severity = str(getattr(event, "severity", ""))
         for channel in self._channels:
-            try:
-                if hasattr(channel, "send_investigation_report"):
-                    await channel.send_investigation_report(
+            if hasattr(channel, "send_investigation_report"):
+                await deliver(
+                    lambda c=channel: c.send_investigation_report(
                         title, summary, channel_metadata=channel_metadata,
-                    )
-                else:
-                    logger.debug(
-                        "Channel %s has no send_investigation_report",
-                        type(channel).__name__,
-                    )
-            except Exception:
-                logger.exception("Investigation report send failed on %s", type(channel).__name__)
+                    ),
+                    channel=channel_name(channel), kind="investigation", severity=severity,
+                )
+            else:
+                logger.debug(
+                    "Channel %s has no send_investigation_report",
+                    type(channel).__name__,
+                )
 
     @staticmethod
     async def _is_tenant_over_quota(items: list[DigestItem]) -> bool:
@@ -484,14 +492,19 @@ class AlertFormatter:
         )
 
         for channel in self._channels:
-            try:
-                if hasattr(channel, "send_digest"):
-                    await channel.send_digest(digest)
-                else:
-                    for item in items:
-                        await channel.send(item.alert, item.event)
-            except Exception:
-                logger.exception("Digest send failed on %s", type(channel).__name__)
+            cname = channel_name(channel)
+            if hasattr(channel, "send_digest"):
+                await deliver(
+                    lambda c=channel: c.send_digest(digest),
+                    channel=cname, kind="digest", severity="NOTABLE",
+                )
+            else:
+                for item in items:
+                    await deliver(
+                        lambda c=channel, a=item.alert, e=item.event: c.send(a, e),
+                        channel=cname, kind="digest",
+                        alert_id=str(getattr(item.alert, "id", "")), severity="NOTABLE",
+                    )
 
     @staticmethod
     def _group_items(items: list[DigestItem]) -> list[DigestGroup]:

@@ -7,7 +7,7 @@ import logging
 import re
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
@@ -21,6 +21,15 @@ from argus_agent.events.types import Event, EventSeverity, EventType
 logger = logging.getLogger("argus.alerting.engine")
 
 InvestigateCallback = Callable[[InvestigationRequest], InvestigationStatus]
+
+# How long a dedup_key must go without a matching event before its alert is
+# considered recovered and auto-resolved. The effective threshold per alert is
+# max(rule.cooldown_seconds, this floor).
+_AUTO_RESOLVE_FLOOR_SECONDS = 300
+
+# How long a resolved alert is kept in the in-memory list before being pruned.
+# History lives in the database, so memory only needs recent context.
+_RESOLVED_RETENTION_SECONDS = 3600
 
 
 class AlertState(StrEnum):
@@ -41,6 +50,8 @@ class AlertRule:
     cooldown_seconds: int = 300  # 5 min default
     auto_investigate: bool = False
     investigate_cooldown_seconds: int = 10800  # 3h default, independent of alert cooldown
+    for_seconds: int = 0  # breach must persist this long before firing (0 = fire immediately)
+    renotify_seconds: int = 0  # re-notify an unacked, still-firing alert this often (0 = never)
 
 
 @dataclass
@@ -59,6 +70,33 @@ class ActiveAlert:
     status: AlertState = AlertState.ACTIVE
     acknowledged_at: datetime | None = None
     acknowledged_by: str = ""
+
+
+def fingerprint_labels(labels: dict[str, str]) -> str:
+    """Compute a stable fingerprint from sorted label key-value pairs.
+
+    Follows Alertmanager's approach: identity = hash of all labels.
+    """
+    if not labels:
+        return "nolabels"
+    parts = sorted(labels.items())
+    return ":".join(f"{k}={v}" for k, v in parts)
+
+
+@dataclass
+class Silence:
+    """A time-bounded suppression rule matching alerts by label matchers.
+
+    Modeled after Prometheus Alertmanager silences: a set of label matchers
+    with an expiry. Not tied to a specific alert ID.
+    """
+
+    id: str
+    matchers: dict[str, str]
+    expires_at: datetime
+    created_by: str = "user"
+    reason: str = ""
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC).replace(tzinfo=None))
 
 
 def build_dedup_key(event: Event, rule_id: str) -> str:
@@ -194,6 +232,8 @@ DEFAULT_RULES: list[AlertRule] = [
         min_severity=EventSeverity.URGENT,
         cooldown_seconds=1800,
         auto_investigate=True,
+        for_seconds=120,  # only page if CPU stays critical for 2 min, not on a transient spike
+        renotify_seconds=3600,  # remind hourly while it stays unacknowledged and firing
     ),
     AlertRule(
         id="memory_critical",
@@ -202,6 +242,8 @@ DEFAULT_RULES: list[AlertRule] = [
         min_severity=EventSeverity.URGENT,
         cooldown_seconds=1800,
         auto_investigate=True,
+        for_seconds=120,  # ignore momentary memory spikes; require a 2 min sustained breach
+        renotify_seconds=3600,
     ),
     AlertRule(
         id="disk_critical",
@@ -210,6 +252,8 @@ DEFAULT_RULES: list[AlertRule] = [
         min_severity=EventSeverity.URGENT,
         cooldown_seconds=3600,
         auto_investigate=True,
+        for_seconds=180,  # disk fills gradually; require a 3 min sustained breach
+        renotify_seconds=7200,  # disk pressure is slower-moving; remind every 2h
     ),
     AlertRule(
         id="process_crash",
@@ -218,6 +262,7 @@ DEFAULT_RULES: list[AlertRule] = [
         min_severity=EventSeverity.URGENT,
         auto_investigate=True,
         investigate_cooldown_seconds=3600,  # 1h — crashes are discrete events
+        renotify_seconds=3600,
     ),
     AlertRule(
         id="error_burst",
@@ -240,6 +285,7 @@ DEFAULT_RULES: list[AlertRule] = [
         cooldown_seconds=600,
         auto_investigate=True,
         investigate_cooldown_seconds=7200,  # 2h — security warrants more frequent checks
+        renotify_seconds=3600,
     ),
     AlertRule(
         id="resource_warning",
@@ -252,6 +298,7 @@ DEFAULT_RULES: list[AlertRule] = [
         max_severity=EventSeverity.NOTABLE,
         cooldown_seconds=1800,
         auto_investigate=False,
+        for_seconds=120,  # don't alert on a single elevated sample; require it to persist
     ),
     AlertRule(
         id="anomaly",
@@ -268,6 +315,7 @@ DEFAULT_RULES: list[AlertRule] = [
         min_severity=EventSeverity.URGENT,
         cooldown_seconds=900,
         auto_investigate=True,
+        renotify_seconds=3600,
     ),
     AlertRule(
         id="sdk_latency",
@@ -328,8 +376,13 @@ class AlertEngine:
         self._last_investigated: dict[str, datetime] = {}  # dedup_key -> last investigation time
         self._last_event_seen: dict[str, datetime] = {}  # dedup_key -> last matching event time
         # Suppression state
-        self._acknowledged_keys: dict[str, datetime] = {}  # dedup_key -> expires_at
+        self._acknowledged_keys: dict[str, datetime] = {}  # dedup_key -> expires_at (legacy)
         self._muted_rules: dict[str, datetime] = {}  # rule_id -> expires_at
+        self._silences: dict[str, Silence] = {}  # silence_id -> Silence
+        # Duration gate: dedup_key -> first time the breach was seen (for_seconds rules)
+        self._pending: dict[str, datetime] = {}
+        # Re-notification: alert_id -> last time we notified channels about it
+        self._last_notified: dict[str, datetime] = {}
         # Billing quota cache: tenant_id → (exceeded, expires_at)
         self._quota_cache: dict[str, tuple[bool, datetime]] = {}
 
@@ -398,6 +451,36 @@ class AlertEngine:
                 del self._acknowledged_keys[dedup_key]
                 return False
             return True
+
+        return False
+
+    def _is_silenced(
+        self, labels: dict[str, str], rule_id: str, now: datetime | None = None,
+    ) -> bool:
+        """Check if a label set is silenced by any active silence.
+
+        Modeled after Alertmanager: all matchers in a silence must match
+        (AND logic). No gap detection — silences are purely time-bounded.
+        """
+        now = now or datetime.now(UTC).replace(tzinfo=None)
+
+        # Check rule-level mute first
+        if rule_id in self._muted_rules:
+            expires = self._muted_rules[rule_id]
+            if now < expires:
+                return True
+            del self._muted_rules[rule_id]
+
+        # Check silences
+        expired_ids = []
+        for sid, silence in self._silences.items():
+            if now >= silence.expires_at:
+                expired_ids.append(sid)
+                continue
+            if all(labels.get(k) == v for k, v in silence.matchers.items()):
+                return True
+        for sid in expired_ids:
+            del self._silences[sid]
 
         return False
 
@@ -500,16 +583,56 @@ class AlertEngine:
                 continue
 
             now = datetime.now(UTC).replace(tzinfo=None)
-            dedup_key = build_dedup_key(event, rule.id)
+
+            # Label-based fingerprint when labels are populated;
+            # fall back to legacy build_dedup_key for events without labels.
+            if event.labels:
+                dedup_key = fingerprint_labels(event.labels)
+            else:
+                dedup_key = build_dedup_key(event, rule.id)
 
             # Track when we last saw a matching event (even if suppressed)
             previous_seen = self._last_event_seen.get(dedup_key)
             self._last_event_seen[dedup_key] = now
 
-            # Suppression check — before cooldown to short-circuit early
-            if self._is_suppressed(dedup_key, rule.id, previous_seen=previous_seen, now=now):
+            # Suppression check — silences for labeled events, legacy ack for unlabeled
+            if event.labels:
+                if self._is_silenced(event.labels, rule.id, now=now):
+                    logger.debug("Alert silenced for %s", dedup_key)
+                    continue
+            elif self._is_suppressed(dedup_key, rule.id, previous_seen=previous_seen, now=now):
                 logger.debug("Alert suppressed for %s (acknowledged/muted)", dedup_key)
                 continue
+
+            # Duration gate: require the breach to persist for `for_seconds` before the
+            # first fire. Metrics are level-triggered, so a sustained breach keeps emitting
+            # events that advance this pending timer; if the breach stops, events stop and
+            # the auto-resolve sweep clears the stale pending entry. Cooldown (below) takes
+            # over the anti-spam job once an alert has fired.
+            if rule.for_seconds > 0:
+                last_fired = self._last_fired.get(dedup_key)
+                in_cooldown = (
+                    last_fired is not None
+                    and (now - last_fired).total_seconds() < rule.cooldown_seconds
+                )
+                if not in_cooldown:
+                    first_breach = self._pending.get(dedup_key)
+                    if first_breach is None:
+                        self._pending[dedup_key] = now
+                        logger.info(
+                            "PENDING_ARMED dedup_key=%s rule=%s for=%ds",
+                            dedup_key, rule.id, rule.for_seconds,
+                        )
+                        continue
+                    if (now - first_breach).total_seconds() < rule.for_seconds:
+                        logger.debug(
+                            "PENDING dedup_key=%s elapsed=%.0fs need=%ds",
+                            dedup_key, (now - first_breach).total_seconds(), rule.for_seconds,
+                        )
+                        continue
+                    # Breach sustained long enough — clear pending so the gate re-arms
+                    # for the next incident, then fall through to fire.
+                    self._pending.pop(dedup_key, None)
 
             # Dedup / cooldown
             last = self._last_fired.get(dedup_key)
@@ -570,6 +693,9 @@ class AlertEngine:
                 except Exception:
                     logger.exception("Formatter submit error")
 
+            # Record initial notification time for re-notification scheduling.
+            self._last_notified[alert.id] = now
+
             # Escalation contacts (SaaS, fire-and-forget)
             try:
                 from argus_agent.alerting.escalation import notify_escalation_contacts
@@ -580,11 +706,15 @@ class AlertEngine:
 
             # Auto-investigate urgent events (with separate investigation cooldown)
             # Also gated behind suppression check
+            suppressed_for_investigation = (
+                self._is_silenced(event.labels, rule.id, now=now) if event.labels
+                else self._is_suppressed(dedup_key, rule.id, now=now)
+            )
             if (
                 rule.auto_investigate
                 and event.severity == EventSeverity.URGENT
                 and self._on_investigate
-                and not self._is_suppressed(dedup_key, rule.id, now=now)
+                and not suppressed_for_investigation
             ):
                 invest_last = self._last_investigated.get(dedup_key)
                 if (
@@ -642,14 +772,178 @@ class AlertEngine:
     def resolve_alert(self, alert_id: str) -> bool:
         for alert in self._active_alerts:
             if alert.id == alert_id and not alert.resolved:
+                now = datetime.now(UTC).replace(tzinfo=None)
                 alert.resolved = True
-                alert.resolved_at = datetime.now(UTC).replace(tzinfo=None)
+                alert.resolved_at = now
                 alert.status = AlertState.RESOLVED
-                # Clear acknowledgment for this alert's dedup_key
+
                 dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
                 self._acknowledged_keys.pop(dedup_key, None)
+                self._pending.pop(dedup_key, None)
+                self._last_notified.pop(alert.id, None)
+
+                # Grace-period silence: prevent immediate re-firing while condition clears
+                if alert.event.labels:
+                    rule = self._rules.get(alert.rule_id)
+                    grace_seconds = (rule.cooldown_seconds * 2) if rule else 600
+                    silence = Silence(
+                        id=str(uuid.uuid4()),
+                        matchers=dict(alert.event.labels),
+                        expires_at=now + timedelta(seconds=grace_seconds),
+                        created_by="system",
+                        reason=f"Grace period after resolving {alert.rule_name}",
+                    )
+                    self._silences[silence.id] = silence
+
                 return True
         return False
+
+    async def auto_resolve_stale(self, now: datetime | None = None) -> int:
+        """Auto-resolve alerts whose underlying condition has stopped firing.
+
+        An alert's condition counts as "still active" as long as matching events
+        keep arriving — they refresh ``_last_event_seen`` even while deduped within
+        cooldown. When that stream goes quiet for longer than the rule's cooldown
+        (floored at ``_AUTO_RESOLVE_FLOOR_SECONDS``), the condition has cleared, so
+        the alert is resolved. Without this, alerts only ever resolve on a manual
+        click and pile up as permanent "active" entries nobody clears. Runs
+        periodically via the scheduler; also callable directly in tests.
+
+        Unlike :meth:`resolve_alert`, this creates no grace-period silence — the
+        condition has already been quiet, so there is nothing to debounce, and a
+        genuine new breach should be free to fire immediately.
+
+        Returns the number of alerts resolved.
+        """
+        now = now or datetime.now(UTC).replace(tzinfo=None)
+        resolved = 0
+        for alert in self._active_alerts:
+            if alert.resolved:
+                continue
+            rule = self._rules.get(alert.rule_id)
+            threshold = max(
+                rule.cooldown_seconds if rule else 300,
+                _AUTO_RESOLVE_FLOOR_SECONDS,
+            )
+            dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
+            last_seen = self._last_event_seen.get(dedup_key, alert.timestamp)
+            if (now - last_seen).total_seconds() <= threshold:
+                continue
+
+            alert.resolved = True
+            alert.resolved_at = now
+            alert.status = AlertState.RESOLVED
+            self._acknowledged_keys.pop(dedup_key, None)
+            self._pending.pop(dedup_key, None)
+            self._last_notified.pop(alert.id, None)
+            resolved += 1
+            logger.info(
+                "ALERT_AUTO_RESOLVED alert=%s rule=%s dedup_key=%s quiet_for=%.0fs",
+                alert.id, alert.rule_id, dedup_key, (now - last_seen).total_seconds(),
+            )
+
+            # Persist resolution so it survives restarts and reflects in history.
+            try:
+                from argus_agent.storage.alert_history import AlertHistoryService
+
+                await AlertHistoryService().update_status(
+                    alert.id, status="resolved", resolved=True, resolved_at=now,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to persist auto-resolution for %s", alert.id, exc_info=True,
+                )
+
+        # Drop stale pending breaches whose event stream has gone quiet, so the
+        # duration gate re-arms cleanly on the next incident (and memory stays bounded).
+        for key, first_breach in list(self._pending.items()):
+            last_seen = self._last_event_seen.get(key, first_breach)
+            if (now - last_seen).total_seconds() > _AUTO_RESOLVE_FLOOR_SECONDS:
+                del self._pending[key]
+
+        # Bound the in-memory list: drop alerts that have been resolved longer than
+        # the retention window. History lives in the database (AlertHistory), so the
+        # in-memory list only needs recent + active alerts. Without this, _active_alerts
+        # grows without bound over the lifetime of the process.
+        if self._active_alerts:
+            kept: list[ActiveAlert] = []
+            for alert in self._active_alerts:
+                if (
+                    alert.resolved
+                    and alert.resolved_at is not None
+                    and (now - alert.resolved_at).total_seconds() > _RESOLVED_RETENTION_SECONDS
+                ):
+                    self._last_notified.pop(alert.id, None)
+                    continue
+                kept.append(alert)
+            self._active_alerts = kept
+
+        return resolved
+
+    async def renotify_unacked(self, now: datetime | None = None) -> int:
+        """Re-send notifications for alerts that are still firing and unacknowledged.
+
+        Self-hosted has no escalation tiers, so an URGENT alert that nobody
+        acknowledges would otherwise fire exactly once and be forgotten. This
+        re-notifies on the rule's ``renotify_seconds`` cadence, but only while the
+        condition is still active (matching events still arriving) — an alert whose
+        condition has gone quiet is left for the auto-resolve sweep instead.
+
+        Runs periodically via the scheduler. Returns the number re-notified.
+        """
+        now = now or datetime.now(UTC).replace(tzinfo=None)
+        count = 0
+        for alert in self._active_alerts:
+            if alert.resolved or alert.status != AlertState.ACTIVE:
+                continue
+            rule = self._rules.get(alert.rule_id)
+            if rule is None or rule.renotify_seconds <= 0:
+                continue
+
+            dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
+            # Skip conditions that have gone quiet — the resolve sweep handles those.
+            resolve_threshold = max(rule.cooldown_seconds, _AUTO_RESOLVE_FLOOR_SECONDS)
+            last_seen = self._last_event_seen.get(dedup_key, alert.timestamp)
+            if (now - last_seen).total_seconds() > resolve_threshold:
+                continue
+
+            last_notified = self._last_notified.get(alert.id, alert.timestamp)
+            if (now - last_notified).total_seconds() < rule.renotify_seconds:
+                continue
+
+            await self._redispatch(alert)
+            self._last_notified[alert.id] = now
+            count += 1
+            logger.info(
+                "ALERT_RENOTIFIED alert=%s rule=%s dedup_key=%s",
+                alert.id, alert.rule_id, dedup_key,
+            )
+        return count
+
+    async def _redispatch(self, alert: ActiveAlert) -> None:
+        """Re-send an existing alert to the notification channels (re-notification).
+
+        Reuses the same channels + formatter as the initial fire, so re-notifications
+        inherit reliable delivery. Does not re-persist, re-escalate, or re-investigate.
+        """
+        try:
+            from argus_agent.alerting.reload import reload_channels
+
+            await reload_channels()
+        except Exception:
+            logger.debug("Channel reload failed during renotify", exc_info=True)
+
+        for channel in self._channels:
+            try:
+                await channel.send(alert, alert.event)
+            except Exception:
+                logger.exception("Renotify channel error")
+
+        if self._formatter is not None:
+            try:
+                await self._formatter.submit(alert, alert.event)
+            except Exception:
+                logger.exception("Renotify formatter submit error")
 
     def acknowledge_alert(
         self,
@@ -658,37 +952,58 @@ class AlertEngine:
         acknowledged_by: str = "user",
         expires_at: datetime | None = None,
     ) -> bool:
-        """Acknowledge an alert and suppress its dedup_key.
+        """Acknowledge an alert by creating a silence from its labels.
 
-        *expires_at* defaults to 24h from now as a safety cap.  Gap detection
-        in ``_is_suppressed`` handles the normal "condition resolved" case;
-        the 24h cap covers edge cases where events never resume.
+        For labeled events, creates a Silence (time-bounded, no gap detection).
+        Falls back to legacy dedup_key ack for unlabeled events.
         """
-        from datetime import timedelta
-
         for alert in self._active_alerts:
             if alert.id == alert_id:
                 now = datetime.now(UTC).replace(tzinfo=None)
                 alert.status = AlertState.ACKNOWLEDGED
                 alert.acknowledged_at = now
                 alert.acknowledged_by = acknowledged_by
-                dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
-                # Always enforce a maximum expiry (24h safety cap)
+
                 if expires_at is None:
                     expires_at = now + timedelta(hours=24)
-                self._acknowledged_keys[dedup_key] = expires_at
+
+                if alert.event.labels:
+                    silence = Silence(
+                        id=str(uuid.uuid4()),
+                        matchers=dict(alert.event.labels),
+                        expires_at=expires_at,
+                        created_by=acknowledged_by,
+                        reason=f"Acknowledged alert {alert.rule_name}",
+                    )
+                    self._silences[silence.id] = silence
+                else:
+                    dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
+                    self._acknowledged_keys[dedup_key] = expires_at
                 return True
         return False
 
     def unacknowledge_alert(self, alert_id: str) -> bool:
-        """Remove acknowledgment from an alert."""
+        """Remove acknowledgment from an alert.
+
+        For labeled events, removes any silence whose matchers exactly match
+        the alert's labels. Falls back to legacy dedup_key removal.
+        """
         for alert in self._active_alerts:
             if alert.id == alert_id and alert.status == AlertState.ACKNOWLEDGED:
                 alert.status = AlertState.ACTIVE
                 alert.acknowledged_at = None
                 alert.acknowledged_by = ""
-                dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
-                self._acknowledged_keys.pop(dedup_key, None)
+
+                if alert.event.labels:
+                    to_remove = [
+                        sid for sid, s in self._silences.items()
+                        if s.matchers == alert.event.labels and s.created_by != "system"
+                    ]
+                    for sid in to_remove:
+                        del self._silences[sid]
+                else:
+                    dedup_key = alert.dedup_key or build_dedup_key(alert.event, alert.rule_id)
+                    self._acknowledged_keys.pop(dedup_key, None)
                 return True
         return False
 
@@ -723,3 +1038,35 @@ class AlertEngine:
         for k in expired:
             del self._acknowledged_keys[k]
         return dict(self._acknowledged_keys)
+
+    def get_silences(self) -> list[dict[str, Any]]:
+        """Return active silences, auto-expiring stale ones."""
+        now = datetime.now(UTC).replace(tzinfo=None)
+        expired = [sid for sid, s in self._silences.items() if now >= s.expires_at]
+        for sid in expired:
+            del self._silences[sid]
+        return [
+            {
+                "id": s.id,
+                "matchers": s.matchers,
+                "expires_at": s.expires_at.isoformat(),
+                "created_by": s.created_by,
+                "reason": s.reason,
+                "created_at": s.created_at.isoformat(),
+            }
+            for s in self._silences.values()
+        ]
+
+    def add_silence(self, silence: Silence) -> None:
+        """Add a silence (used by suppression service on startup load)."""
+        self._silences[silence.id] = silence
+
+    def remove_silence_by_matchers(self, matchers: dict[str, str]) -> bool:
+        """Remove silences matching the given matchers exactly."""
+        to_remove = [
+            sid for sid, s in self._silences.items()
+            if s.matchers == matchers and s.created_by != "system"
+        ]
+        for sid in to_remove:
+            del self._silences[sid]
+        return len(to_remove) > 0

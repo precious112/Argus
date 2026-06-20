@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from argus_agent.alerting.channels import (
     EmailChannel,
@@ -15,13 +16,24 @@ from argus_agent.alerting.settings import NotificationSettingsService
 
 logger = logging.getLogger("argus.alerting.reload")
 
+_last_reload_time: float = 0.0
+_RELOAD_CACHE_SECONDS = 60.0
 
-async def reload_channels() -> None:
+
+async def reload_channels(*, force: bool = False) -> None:
     """Read enabled channel configs from DB and update the running AlertEngine.
 
     WebSocketChannel goes to the engine (immediate, unfiltered).
     External channels (Slack, Email, Webhook) go to the formatter (severity-routed).
+    Cached for 60s to avoid repeated DB reads on every alert; pass force=True to bypass.
     """
+    global _last_reload_time
+
+    now = time.monotonic()
+    if not force and (now - _last_reload_time) < _RELOAD_CACHE_SECONDS:
+        return
+    _last_reload_time = now
+
     from argus_agent.api.ws import manager
     from argus_agent.main import _get_alert_engine, _get_alert_formatter, _get_distributed_manager
 

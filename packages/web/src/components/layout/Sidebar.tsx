@@ -218,10 +218,34 @@ export function Sidebar() {
   const [showNewOrgForm, setShowNewOrgForm] = useState(false);
   const [newOrgName, setNewOrgName] = useState("");
   const [creatingOrg, setCreatingOrg] = useState(false);
+  const [activeAlertCount, setActiveAlertCount] = useState(0);
 
   useEffect(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored === "true") setCollapsed(true);
+  }, []);
+
+  // Poll for active alert count
+  useEffect(() => {
+    const apiBase =
+      process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:7600/api/v1";
+    async function fetchAlertCount() {
+      try {
+        const res = await fetch(
+          `${apiBase}/alerts?status=active&page_size=1`,
+          { credentials: "include" }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          setActiveAlertCount(data.total ?? 0);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    fetchAlertCount();
+    const timer = setInterval(fetchAlertCount, 15000);
+    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -316,18 +340,26 @@ export function Sidebar() {
               )}
               {visibleItems.map((item) => {
                 const active = isActive(pathname, item.path);
+                const showBadge = item.path === "/alerts" && activeAlertCount > 0;
                 return (
                   <a
                     key={item.path}
                     href={item.path}
                     title={collapsed ? item.label : undefined}
-                    className={`flex items-center gap-3 rounded-md px-2 py-2 text-sm transition-colors ${
+                    className={`relative flex items-center gap-3 rounded-md px-2 py-2 text-sm transition-colors ${
                       active
                         ? "bg-[var(--card)] text-[var(--foreground)]"
                         : "text-[var(--muted)] hover:bg-[var(--card)] hover:text-[var(--foreground)]"
                     } ${collapsed ? "justify-center" : ""}`}
                   >
-                    <span className="flex-shrink-0">{item.icon}</span>
+                    <span className="relative flex-shrink-0">
+                      {item.icon}
+                      {showBadge && (
+                        <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-white">
+                          {activeAlertCount > 99 ? "99+" : activeAlertCount}
+                        </span>
+                      )}
+                    </span>
                     {!collapsed && <span>{item.label}</span>}
                   </a>
                 );

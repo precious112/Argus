@@ -6,6 +6,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -212,7 +213,50 @@ class Investigator:
             except Exception:
                 logger.exception("Failed to send investigation report to external channels")
 
+        # Persist the investigation so it appears in the investigations list and
+        # survives restarts (previously nothing wrote the Investigation table).
+        await self._persist_investigation(request, investigation_id, summary, result)
+
         logger.info("Investigation %s completed for %s", investigation_id, event.type)
+
+    async def _persist_investigation(
+        self,
+        request: InvestigationRequest,
+        investigation_id: str,
+        summary: str,
+        result: Any,
+    ) -> None:
+        """Best-effort persistence of a completed investigation. Never raises."""
+        try:
+            from argus_agent.storage.models import Investigation
+            from argus_agent.storage.repositories import get_session
+
+            event = request.event
+            data = event.data or {}
+            service_name = (
+                data.get("service_name") or data.get("service") or str(event.source) or ""
+            )
+            tokens = (result.prompt_tokens + result.completion_tokens) if result else 0
+            now = datetime.now(UTC).replace(tzinfo=None)
+
+            async with get_session() as session:
+                session.add(
+                    Investigation(
+                        id=investigation_id,
+                        tenant_id=request.tenant_id,
+                        trigger=event.message or str(event.type),
+                        summary=summary,
+                        tokens_used=tokens,
+                        service_name=str(service_name)[:255],
+                        created_at=now,
+                        completed_at=now,
+                    )
+                )
+                await session.commit()
+        except Exception:
+            logger.debug(
+                "Failed to persist investigation %s", investigation_id, exc_info=True,
+            )
 
     async def periodic_review(self) -> None:
         """Tier 3: periodic review of recent events/metrics/alerts (every 6h)."""

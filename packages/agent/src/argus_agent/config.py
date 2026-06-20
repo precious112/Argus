@@ -30,6 +30,12 @@ class LLMConfig(BaseModel):
     base_url: str | None = None
     temperature: float = 0.1
     max_tokens: int = 4096
+    # Vertex AI (Gemini on GCP) — used when provider == "vertex".
+    # Auth is via Application Default Credentials (gcloud auth / service account),
+    # not api_key. Empty values fall back to the GOOGLE_CLOUD_PROJECT /
+    # GOOGLE_CLOUD_LOCATION environment variables that the Vertex SDK reads.
+    vertex_project: str = ""
+    vertex_location: str = "us-central1"
 
 
 class AIBudgetConfig(BaseModel):

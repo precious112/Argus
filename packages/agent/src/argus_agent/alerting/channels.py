@@ -58,7 +58,10 @@ class WebSocketChannel(NotificationChannel):
 
     async def send(self, alert: Any, event: Any) -> bool:
         try:
+            from argus_agent.alerting.formatter import format_event
             from argus_agent.tenancy.context import get_tenant_id
+
+            summary = format_event(event)
 
             msg = ServerMessage(
                 type=ServerMessageType.ALERT,
@@ -66,7 +69,7 @@ class WebSocketChannel(NotificationChannel):
                     id=alert.id,
                     severity=str(alert.severity),
                     title=alert.rule_name,
-                    summary=event.message or "",
+                    summary=summary,
                     source=str(event.source),
                     timestamp=alert.timestamp,
                 ).model_dump(mode="json"),

@@ -66,7 +66,7 @@ async def test_reload_creates_channels_from_db():
         patch("argus_agent.main._get_alert_formatter", return_value=mock_formatter),
         patch("argus_agent.api.ws.manager", mock_manager),
     ):
-        await reload_channels()
+        await reload_channels(force=True)
 
     # Engine gets only WebSocket
     assert len(engine_channels) == 1
@@ -107,7 +107,7 @@ async def test_reload_skips_disabled_channels():
         patch("argus_agent.main._get_alert_formatter", return_value=mock_formatter),
         patch("argus_agent.api.ws.manager", mock_manager),
     ):
-        await reload_channels()
+        await reload_channels(force=True)
 
     # Engine: WebSocket only
     assert len(engine_channels) == 1
@@ -138,7 +138,7 @@ async def test_reload_always_includes_websocket():
         patch("argus_agent.main._get_alert_formatter", return_value=mock_formatter),
         patch("argus_agent.api.ws.manager", mock_manager),
     ):
-        await reload_channels()
+        await reload_channels(force=True)
 
     # Even with no DB configs, WebSocket is always present on engine
     assert len(engine_channels) == 1
@@ -152,4 +152,4 @@ async def test_reload_always_includes_websocket():
 async def test_reload_no_engine_is_noop():
     """reload_channels should not crash if AlertEngine isn't initialised."""
     with patch("argus_agent.main._get_alert_engine", return_value=None):
-        await reload_channels()  # Should not raise
+        await reload_channels(force=True)  # Should not raise

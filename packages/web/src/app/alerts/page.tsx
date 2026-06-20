@@ -45,6 +45,8 @@ export default function AlertsPage() {
   const [totalPages, setTotalPages] = useState(1);
   const [muteModal, setMuteModal] = useState<{ ruleId: string; ruleName: string } | null>(null);
   const [muteDuration, setMuteDuration] = useState(24);
+  const [ackModal, setAckModal] = useState<{ alertId: string; ruleName: string } | null>(null);
+  const [ackDuration, setAckDuration] = useState(24);
   const PAGE_SIZE = 50;
 
   const fetchAlerts = useCallback(async () => {
@@ -87,11 +89,19 @@ export default function AlertsPage() {
     return () => clearInterval(timer);
   }, [fetchAlerts, fetchRules]);
 
-  const acknowledgeAlert = async (alertId: string) => {
+  const acknowledgeAlert = async (alertId: string, hours: number) => {
     await apiFetch(`${API_BASE}/alerts/${alertId}/acknowledge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ expires_hours: hours }),
+    });
+    setAckModal(null);
+    fetchAlerts();
+  };
+
+  const unacknowledgeAlert = async (alertId: string) => {
+    await apiFetch(`${API_BASE}/alerts/${alertId}/unacknowledge`, {
+      method: "POST",
     });
     fetchAlerts();
   };
@@ -224,10 +234,18 @@ export default function AlertsPage() {
                       <div className="flex items-center justify-end gap-2">
                         {alert.status === "active" && (
                           <button
-                            onClick={() => acknowledgeAlert(alert.id)}
+                            onClick={() => setAckModal({ alertId: alert.id, ruleName: alert.rule_name })}
                             className="rounded bg-purple-600/20 px-2 py-1 text-xs text-purple-400 hover:bg-purple-600/30"
                           >
                             Ack
+                          </button>
+                        )}
+                        {alert.status === "acknowledged" && (
+                          <button
+                            onClick={() => unacknowledgeAlert(alert.id)}
+                            className="rounded bg-blue-600/20 px-2 py-1 text-xs text-blue-400 hover:bg-blue-600/30"
+                          >
+                            Unack
                           </button>
                         )}
                         {alert.status !== "resolved" && (
@@ -408,6 +426,49 @@ export default function AlertsPage() {
                 className="rounded bg-orange-600 px-3 py-1.5 text-sm text-white hover:bg-orange-500"
               >
                 Mute
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Acknowledge Duration Modal */}
+      {ackModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--background)] p-6 shadow-xl">
+            <h3 className="mb-4 text-lg font-semibold">
+              Acknowledge &quot;{ackModal.ruleName}&quot;
+            </h3>
+            <p className="mb-4 text-sm text-[var(--muted)]">
+              Silence this alert for the selected duration. New occurrences with the same identity will be suppressed.
+            </p>
+            <div className="mb-4">
+              <label className="mb-1 block text-sm text-[var(--muted)]">
+                Silence duration
+              </label>
+              <select
+                value={ackDuration}
+                onChange={(e) => setAckDuration(Number(e.target.value))}
+                className="w-full rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
+              >
+                <option value={1}>1 hour</option>
+                <option value={4}>4 hours</option>
+                <option value={8}>8 hours</option>
+                <option value={24}>24 hours</option>
+              </select>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setAckModal(null)}
+                className="rounded px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => acknowledgeAlert(ackModal.alertId, ackDuration)}
+                className="rounded bg-purple-600 px-3 py-1.5 text-sm text-white hover:bg-purple-500"
+              >
+                Acknowledge
               </button>
             </div>
           </div>

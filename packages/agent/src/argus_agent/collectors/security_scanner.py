@@ -19,6 +19,28 @@ from argus_agent.events.types import Event, EventSeverity, EventSource, EventTyp
 
 logger = logging.getLogger("argus.collectors.security")
 
+
+def _build_security_labels(finding: dict) -> dict[str, str]:
+    """Build identity labels for a security finding."""
+    ftype = finding.get("type", "unknown")
+    data = finding.get("data", {})
+    labels: dict[str, str] = {"source": "security_scanner", "type": ftype}
+    if ftype == EventType.BRUTE_FORCE:
+        labels["ip"] = str(data.get("ip", "unknown"))
+    elif ftype == EventType.SUSPICIOUS_PROCESS:
+        labels["process_name"] = str(data.get("name", "unknown"))
+    elif ftype == EventType.SUSPICIOUS_OUTBOUND:
+        labels["ip"] = str(data.get("ip", "unknown"))
+        labels["port"] = str(data.get("port", "unknown"))
+    elif ftype == EventType.NEW_EXECUTABLE:
+        labels["path"] = str(data.get("path", "unknown"))
+    elif ftype == EventType.NEW_OPEN_PORT:
+        labels["port"] = str(data.get("port", "unknown"))
+    elif ftype == EventType.PERMISSION_RISK:
+        labels["path"] = str(data.get("path", "unknown"))
+    return labels
+
+
 KNOWN_BAD_NAMES = {"xmrig", "cryptominer", "kworkerds", "kdevtmpfsi"}
 SENSITIVE_PATHS = ["/etc/shadow", "/etc/passwd", "/etc/sudoers"]
 TEMP_DIRS = ["/tmp", "/dev/shm"]
@@ -116,6 +138,7 @@ class SecurityScanner:
                         severity=EventSeverity(finding["severity"]),
                         message=finding["message"],
                         data=finding.get("data", {}),
+                        labels=_build_security_labels(finding),
                     ))
             except Exception:
                 logger.exception("Security check '%s' failed", name)
@@ -171,6 +194,7 @@ class SecurityScanner:
                         severity=EventSeverity(finding["severity"]),
                         message=finding["message"],
                         data=finding.get("data", {}),
+                        labels=_build_security_labels(finding),
                     ))
             except Exception:
                 logger.exception("Remote security check '%s' failed", name)

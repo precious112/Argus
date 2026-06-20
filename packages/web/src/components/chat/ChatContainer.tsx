@@ -2,7 +2,6 @@
 
 import { useRef, useEffect, useState } from "react";
 import { MessageBubble } from "./MessageBubble";
-import { AlertBanner } from "@/components/system/AlertBanner";
 import { StatusBar } from "@/components/system/StatusBar";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useChat } from "@/hooks/useChat";
@@ -20,10 +19,7 @@ export function ChatContainer() {
     isThinking,
     systemStatus,
     agentMode,
-    alerts,
     budgetStatus,
-    dismissAlert,
-    acknowledgeAlert,
     handleServerMessage,
     addUserMessage,
   } = useChat();
@@ -57,9 +53,6 @@ export function ChatContainer() {
         budgetStatus={budgetStatus}
         mode={agentMode}
       />
-
-      {/* Alert banner */}
-      <AlertBanner alerts={alerts} onDismiss={dismissAlert} onAcknowledge={acknowledgeAlert} />
 
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto px-4 py-6">

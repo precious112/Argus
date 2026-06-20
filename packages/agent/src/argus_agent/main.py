@@ -342,6 +342,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _investigator.daily_digest,
             interval_seconds=86400,  # 24h
         )
+    # Auto-resolve alerts whose underlying condition has cleared (both modes).
+    # Without this, alerts only ever resolve on a manual click and the alerts
+    # page accumulates stale "active" entries.
+    _scheduler.register(
+        "alert_auto_resolve",
+        _alert_engine.auto_resolve_stale,
+        interval_seconds=60,
+    )
+    # Re-notify alerts that are still firing but remain unacknowledged (both modes).
+    _scheduler.register(
+        "alert_renotify",
+        _alert_engine.renotify_unacked,
+        interval_seconds=60,
+    )
+
     await _scheduler.start()
 
     # Soak test runner (opt-in via ARGUS_SOAK_ENABLED=true)

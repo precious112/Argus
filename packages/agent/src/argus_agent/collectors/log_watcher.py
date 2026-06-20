@@ -220,6 +220,11 @@ class LogWatcher:
                                     "count": len(self._error_timestamps),
                                     "last_error": line[:200],
                                 },
+                                labels={
+                                    "source": "log_watcher",
+                                    "type": EventType.ERROR_BURST,
+                                    "file": file_path,
+                                },
                             )
                         )
                         self._error_timestamps.clear()
@@ -239,6 +244,12 @@ class LogWatcher:
                                     "pattern": pattern,
                                     "line": line[:200],
                                 },
+                                labels={
+                                "source": "log_watcher",
+                                "type": EventType.NEW_ERROR_PATTERN,
+                                "file": file_path,
+                                "pattern": pattern,
+                            },
                             )
                         )
 
@@ -289,6 +300,7 @@ class LogWatcher:
                                     "count": len(self._error_timestamps),
                                     "last_error": line[:200],
                                 },
+                                labels={"source": "log_watcher", "type": EventType.ERROR_BURST},
                             )
                         )
                         self._error_timestamps.clear()

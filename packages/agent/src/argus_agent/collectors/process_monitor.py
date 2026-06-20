@@ -134,6 +134,11 @@ class ProcessMonitor:
                             f"{len(self._process_names[name])} times in "
                             f"{self._restart_window}s",
                             data={"name": name, "restarts": len(self._process_names[name])},
+                            labels={
+                                "source": "process_monitor",
+                                "type": EventType.PROCESS_RESTART_LOOP,
+                                "process_name": name,
+                            },
                         )
                     )
 
@@ -213,6 +218,11 @@ class ProcessMonitor:
                                     "name": name,
                                     "restarts": len(self._process_names[name]),
                                     "tenant_id": t["tenant_id"],
+                                },
+                                labels={
+                                    "source": "process_monitor",
+                                    "type": EventType.PROCESS_RESTART_LOOP,
+                                    "process_name": name,
                                 },
                             )
                         )

@@ -24,7 +24,9 @@ def engine(bus):
 
 
 @pytest.mark.asyncio
-async def test_alert_fires_on_matching_event(bus: EventBus, engine: AlertEngine):
+async def test_alert_fires_after_sustained_breach(bus: EventBus, engine: AlertEngine):
+    """The default CPU rule has a duration gate: a single sample arms the timer,
+    and the alert only fires once the breach persists past `for_seconds`."""
     await engine.start()
 
     event = Event(
@@ -33,7 +35,19 @@ async def test_alert_fires_on_matching_event(bus: EventBus, engine: AlertEngine)
         severity=EventSeverity.URGENT,
         message="CPU at 99%",
     )
-    await bus.publish(event)
+
+    t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+    t2 = t1 + timedelta(seconds=121)  # past cpu_critical for_seconds (120s)
+
+    with patch("argus_agent.alerting.engine.datetime") as mock_dt:
+        mock_dt.now.return_value = t1
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        await bus.publish(event)
+        # First sample only arms the pending timer — no alert yet.
+        assert len(engine.get_active_alerts()) == 0
+
+        mock_dt.now.return_value = t2
+        await bus.publish(event)
 
     alerts = engine.get_active_alerts()
     assert len(alerts) == 1
@@ -183,7 +197,15 @@ async def test_dedup_expires_after_cooldown(bus: EventBus):
 
 
 @pytest.mark.asyncio
-async def test_resolve_alert(bus: EventBus, engine: AlertEngine):
+async def test_resolve_alert(bus: EventBus):
+    # Immediate-fire rule (for_seconds defaults to 0) keeps this focused on resolve.
+    rule = AlertRule(
+        id="cpu_critical",
+        name="CPU Critical",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
     await engine.start()
 
     event = Event(
@@ -209,7 +231,14 @@ async def test_resolve_nonexistent_alert(engine: AlertEngine):
 
 
 @pytest.mark.asyncio
-async def test_notification_channels_called(bus: EventBus, engine: AlertEngine):
+async def test_notification_channels_called(bus: EventBus):
+    rule = AlertRule(
+        id="cpu_critical",
+        name="CPU Critical",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
     mock_channel = AsyncMock()
     mock_channel.send = AsyncMock(return_value=True)
     engine.set_channels([mock_channel])
@@ -229,7 +258,14 @@ async def test_notification_channels_called(bus: EventBus, engine: AlertEngine):
 @pytest.mark.asyncio
 async def test_auto_investigate_on_urgent(bus: EventBus):
     investigate_mock = MagicMock()
-    engine = AlertEngine(bus=bus, on_investigate=investigate_mock)
+    rule = AlertRule(
+        id="cpu_critical",
+        name="CPU Critical",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+        auto_investigate=True,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule], on_investigate=investigate_mock)
     await engine.start()
 
     event = Event(
@@ -420,3 +456,292 @@ async def test_investigation_cooldown_independent_of_alert_cooldown(bus: EventBu
 
     assert len(engine.get_active_alerts()) == 3  # all three alerts fired
     investigate_mock.assert_called_once()  # investigation only on the first
+
+
+# --- Duration gate (for_seconds) ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_duration_gate_suppresses_single_sample(bus: EventBus):
+    """A breach that does not persist for `for_seconds` never fires."""
+    rule = AlertRule(
+        id="test_rule",
+        name="Test",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+        cooldown_seconds=300,
+        for_seconds=120,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
+    await engine.start()
+
+    event = Event(
+        source=EventSource.SYSTEM_METRICS,
+        type=EventType.CPU_HIGH,
+        severity=EventSeverity.URGENT,
+        message="CPU high",
+    )
+
+    t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+    t2 = t1 + timedelta(seconds=121)
+
+    with patch("argus_agent.alerting.engine.datetime") as mock_dt:
+        mock_dt.now.return_value = t1
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        await bus.publish(event)
+        # Only armed the pending timer — nothing fires yet.
+        assert len(engine.get_active_alerts()) == 0
+        assert engine._pending  # pending timer is set
+
+        mock_dt.now.return_value = t2
+        await bus.publish(event)
+
+    assert len(engine.get_active_alerts()) == 1
+    assert engine._pending == {}  # cleared on fire
+
+
+@pytest.mark.asyncio
+async def test_duration_gate_resets_when_breach_stops(bus: EventBus):
+    """If the breach stops before `for_seconds`, the stale pending timer is cleared
+    by the auto-resolve sweep and no alert fires."""
+    rule = AlertRule(
+        id="test_rule",
+        name="Test",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+        cooldown_seconds=300,
+        for_seconds=120,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
+    await engine.start()
+
+    event = Event(
+        source=EventSource.SYSTEM_METRICS,
+        type=EventType.CPU_HIGH,
+        severity=EventSeverity.URGENT,
+        message="CPU high",
+    )
+
+    t1 = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    with patch("argus_agent.alerting.engine.datetime") as mock_dt:
+        mock_dt.now.return_value = t1
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        await bus.publish(event)  # arms pending
+        assert engine._pending
+
+    # Breach goes quiet; sweep well past the floor clears the pending timer.
+    cleared = t1.replace(tzinfo=None) + timedelta(seconds=400)
+    await engine.auto_resolve_stale(now=cleared)
+    assert engine._pending == {}
+    assert len(engine.get_active_alerts()) == 0
+
+
+# --- Auto-resolution ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auto_resolve_when_condition_clears(bus: EventBus):
+    """An active alert is auto-resolved once its condition stops producing events."""
+    rule = AlertRule(
+        id="cpu_critical",
+        name="CPU Critical",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+        cooldown_seconds=300,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
+    await engine.start()
+
+    event = Event(
+        source=EventSource.SYSTEM_METRICS,
+        type=EventType.CPU_HIGH,
+        severity=EventSeverity.URGENT,
+        message="CPU high",
+    )
+    await bus.publish(event)
+    assert len(engine.get_active_alerts()) == 1
+
+    # No further events; a sweep past the threshold treats the condition as cleared.
+    future = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=400)
+    resolved = await engine.auto_resolve_stale(now=future)
+
+    assert resolved == 1
+    assert len(engine.get_active_alerts()) == 0
+    assert len(engine.get_active_alerts(include_resolved=True)) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_resolve_keeps_alert_while_breaching(bus: EventBus):
+    """An alert stays active while matching events keep arriving (within threshold)."""
+    rule = AlertRule(
+        id="cpu_critical",
+        name="CPU Critical",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+        cooldown_seconds=300,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
+    await engine.start()
+
+    event = Event(
+        source=EventSource.SYSTEM_METRICS,
+        type=EventType.CPU_HIGH,
+        severity=EventSeverity.URGENT,
+        message="CPU high",
+    )
+    await bus.publish(event)
+
+    # Sweep shortly after firing — within the threshold, so the alert stays active.
+    soon = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=100)
+    resolved = await engine.auto_resolve_stale(now=soon)
+
+    assert resolved == 0
+    assert len(engine.get_active_alerts()) == 1
+
+
+@pytest.mark.asyncio
+async def test_resolved_alerts_pruned_from_memory(bus: EventBus):
+    """Resolved alerts older than the retention window are dropped from memory."""
+    rule = AlertRule(
+        id="cpu_critical",
+        name="CPU Critical",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+        cooldown_seconds=300,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
+    await engine.start()
+
+    event = Event(
+        source=EventSource.SYSTEM_METRICS,
+        type=EventType.CPU_HIGH,
+        severity=EventSeverity.URGENT,
+        message="CPU high",
+    )
+    await bus.publish(event)
+    alert_id = engine.get_active_alerts()[0].id
+    engine.resolve_alert(alert_id)
+    assert len(engine.get_active_alerts(include_resolved=True)) == 1
+
+    # Sweep far past the retention window — the resolved alert is pruned.
+    far = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=4000)
+    await engine.auto_resolve_stale(now=far)
+    assert len(engine.get_active_alerts(include_resolved=True)) == 0
+
+
+# --- Re-notification ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_renotify_unacked_while_firing(bus: EventBus):
+    """An unacked, still-firing alert is re-notified once its interval elapses."""
+    rule = AlertRule(
+        id="cpu_critical",
+        name="CPU Critical",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+        cooldown_seconds=300,
+        renotify_seconds=600,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock(return_value=True)
+    engine.set_channels([mock_channel])
+    await engine.start()
+
+    event = Event(
+        source=EventSource.SYSTEM_METRICS,
+        type=EventType.CPU_HIGH,
+        severity=EventSeverity.URGENT,
+        message="CPU high",
+    )
+    await bus.publish(event)
+    assert mock_channel.send.call_count == 1  # initial notification
+
+    from argus_agent.alerting.engine import build_dedup_key
+
+    dedup_key = build_dedup_key(event, "cpu_critical")
+    now0 = datetime.now(UTC).replace(tzinfo=None)
+
+    # Before the interval elapses — no re-notification.
+    await engine.renotify_unacked(now=now0 + timedelta(seconds=120))
+    assert mock_channel.send.call_count == 1
+
+    # Interval elapsed and condition still firing (recent event) — re-notify once.
+    future = now0 + timedelta(seconds=700)
+    engine._last_event_seen[dedup_key] = future
+    n = await engine.renotify_unacked(now=future)
+    assert n == 1
+    assert mock_channel.send.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_no_renotify_when_acknowledged(bus: EventBus):
+    """An acknowledged alert is not re-notified."""
+    rule = AlertRule(
+        id="cpu_critical",
+        name="CPU Critical",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+        cooldown_seconds=300,
+        renotify_seconds=600,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock(return_value=True)
+    engine.set_channels([mock_channel])
+    await engine.start()
+
+    event = Event(
+        source=EventSource.SYSTEM_METRICS,
+        type=EventType.CPU_HIGH,
+        severity=EventSeverity.URGENT,
+        message="CPU high",
+    )
+    await bus.publish(event)
+    alert_id = engine.get_active_alerts()[0].id
+    engine.acknowledge_alert(alert_id, acknowledged_by="user")
+
+    from argus_agent.alerting.engine import build_dedup_key
+
+    dedup_key = build_dedup_key(event, "cpu_critical")
+    future = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=700)
+    engine._last_event_seen[dedup_key] = future
+
+    n = await engine.renotify_unacked(now=future)
+    assert n == 0
+    assert mock_channel.send.call_count == 1  # only the initial send
+
+
+@pytest.mark.asyncio
+async def test_no_renotify_when_condition_quiet(bus: EventBus):
+    """A still-unacked alert whose condition went quiet is not re-notified
+    (it will be auto-resolved instead)."""
+    rule = AlertRule(
+        id="cpu_critical",
+        name="CPU Critical",
+        event_types=[EventType.CPU_HIGH],
+        min_severity=EventSeverity.URGENT,
+        cooldown_seconds=300,
+        renotify_seconds=600,
+    )
+    engine = AlertEngine(bus=bus, rules=[rule])
+    mock_channel = AsyncMock()
+    mock_channel.send = AsyncMock(return_value=True)
+    engine.set_channels([mock_channel])
+    await engine.start()
+
+    event = Event(
+        source=EventSource.SYSTEM_METRICS,
+        type=EventType.CPU_HIGH,
+        severity=EventSeverity.URGENT,
+        message="CPU high",
+    )
+    await bus.publish(event)
+
+    # Interval elapsed but no recent events (condition cleared) — no re-notify.
+    future = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=700)
+    n = await engine.renotify_unacked(now=future)
+    assert n == 0
+    assert mock_channel.send.call_count == 1
