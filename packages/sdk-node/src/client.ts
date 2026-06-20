@@ -28,6 +28,10 @@ export class ArgusClient {
   private closed = false;
   private serverlessContext: ServerlessContext | null = null;
 
+  getServerUrl(): string {
+    return this.serverUrl;
+  }
+
   constructor(config: ArgusClientConfig) {
     this.serverUrl = config.serverUrl.replace(/\/$/, "");
     this.apiKey = config.apiKey || "";

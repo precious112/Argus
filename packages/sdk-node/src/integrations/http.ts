@@ -40,6 +40,11 @@ export function patchHttp(): void {
       init = { ...init, headers };
     }
 
+    // Skip instrumentation for calls to Argus itself
+    if (client && url.startsWith(client.getServerUrl())) {
+      return _originalFetch!(input, init);
+    }
+
     try {
       const response = await _originalFetch!(input, init);
       statusCode = response.status;
