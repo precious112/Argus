@@ -132,6 +132,7 @@ class SDKTelemetryCollector:
                     ),
                     data={"service": svc, "error_rate": error_rate,
                           "previous_error_rate": prev_error_rate},
+                    labels={"source": "sdk_telemetry", "type": EventType.SDK_ERROR_SPIKE, "service": svc},
                 ))
             self._prev_error_rates[svc] = error_rate
 
@@ -147,6 +148,7 @@ class SDKTelemetryCollector:
                         f"p95={p95:.0f}ms (was {prev_p95:.0f}ms)"
                     ),
                     data={"service": svc, "p95_ms": p95, "previous_p95_ms": prev_p95},
+                    labels={"source": "sdk_telemetry", "type": EventType.SDK_LATENCY_DEGRADATION, "service": svc},
                 ))
             self._prev_p95_latency[svc] = p95
 
@@ -163,6 +165,7 @@ class SDKTelemetryCollector:
                     ),
                     data={"service": svc, "cold_start_pct": cold_start_pct,
                           "previous_cold_start_pct": prev_cold},
+                    labels={"source": "sdk_telemetry", "type": EventType.SDK_COLD_START_SPIKE, "service": svc},
                 ))
             self._prev_cold_start_pct[svc] = cold_start_pct
 
@@ -208,6 +211,7 @@ class SDKTelemetryCollector:
                         "value": value,
                         "z_score": anomaly.z_score,
                     },
+                    labels={"source": "sdk_telemetry", "type": EventType.SDK_METRIC_ANOMALY, "service": svc, "metric_name": metric_name},
                 ))
 
     async def _check_traffic_bursts(self, bus: object) -> None:
@@ -254,4 +258,5 @@ class SDKTelemetryCollector:
                         "z_score": anomaly.z_score,
                         "baseline_mean": baseline_mean,
                     },
+                    labels={"source": "sdk_telemetry", "type": EventType.SDK_TRAFFIC_BURST, "service": svc},
                 ))

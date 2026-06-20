@@ -90,3 +90,4 @@ class Event:
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     data: dict[str, Any] = field(default_factory=dict)
     message: str = ""
+    labels: dict[str, str] = field(default_factory=dict)

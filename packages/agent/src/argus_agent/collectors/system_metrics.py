@@ -178,6 +178,11 @@ class SystemMetricsCollector:
                                 "mean": anomaly.baseline_mean,
                                 "z_score": anomaly.z_score,
                             },
+                            labels={
+                                "source": "system_metrics",
+                                "type": EventType.ANOMALY_DETECTED,
+                                "metric": anomaly.metric_name,
+                            },
                         )
                     )
             except Exception:

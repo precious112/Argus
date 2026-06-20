@@ -165,7 +165,7 @@ async def list_alerts(
             "severity": str(a.severity),
             "message": a.event.message,
             "source": str(a.event.source),
-            "event_type": str(a.event.event_type),
+            "event_type": str(a.event.type),
             "timestamp": a.timestamp.isoformat(),
             "resolved": a.resolved,
             "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
@@ -257,7 +257,13 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
         # Found in memory — persist suppression and status to DB
         alert = next((a for a in engine._active_alerts if a.id == alert_id), None)
         if alert:
-            dedup_key = alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
+            from argus_agent.alerting.engine import fingerprint_labels
+
+            matchers = dict(alert.event.labels) if alert.event.labels else None
+            dedup_key = (
+                fingerprint_labels(alert.event.labels) if alert.event.labels
+                else alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
+            )
             svc = SuppressionService()
             await svc.acknowledge(
                 dedup_key=dedup_key,
@@ -266,6 +272,7 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
                 acknowledged_by="user",
                 reason=reason,
                 expires_at=expires_at,
+                matchers=matchers,
             )
     else:
         # Fall back to DB-only acknowledge
@@ -285,7 +292,6 @@ async def acknowledge_alert(alert_id: str, body: dict[str, Any] | None = None) -
             reason=reason,
             expires_at=expires_at,
         )
-        # Also load this ack into the in-memory engine so future events are suppressed
         engine._acknowledged_keys[dedup_key] = expires_at
 
     # Persist alert status to DB
@@ -323,7 +329,12 @@ async def unacknowledge_alert(alert_id: str) -> dict[str, Any]:
     if success:
         # Found in memory — remove suppression from DB
         if alert:
-            dedup_key = alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
+            from argus_agent.alerting.engine import fingerprint_labels
+
+            dedup_key = (
+                fingerprint_labels(alert.event.labels) if alert.event.labels
+                else alert.dedup_key or f"{alert.event.source}:{alert.rule_id}"
+            )
             svc = SuppressionService()
             await svc.unacknowledge(dedup_key)
     else:
@@ -337,7 +348,6 @@ async def unacknowledge_alert(alert_id: str) -> dict[str, Any]:
         dedup_key = db_alert.get("dedup_key") or f"{db_alert['source']}:{db_alert['rule_id']}"
         svc = SuppressionService()
         await svc.unacknowledge(dedup_key)
-        # Also remove from in-memory engine
         engine._acknowledged_keys.pop(dedup_key, None)
 
     # Persist alert status to DB
@@ -438,17 +448,19 @@ async def list_rules() -> dict[str, Any]:
 
 @router.get("/alerts/suppression")
 async def get_suppression_status() -> dict[str, Any]:
-    """Return current acknowledged keys and muted rules."""
+    """Return active silences, legacy acknowledged keys, and muted rules."""
     from argus_agent.main import _get_alert_engine
 
     engine = _get_alert_engine()
     if engine is None:
-        return {"acknowledged_keys": {}, "muted_rules": {}}
+        return {"silences": [], "acknowledged_keys": {}, "muted_rules": {}}
 
+    silences = engine.get_silences()
     ack_keys = engine.get_acknowledged_keys()
     muted = engine.get_muted_rules()
 
     return {
+        "silences": silences,
         "acknowledged_keys": {
             k: v.isoformat() for k, v in ack_keys.items()
         },
@@ -456,6 +468,22 @@ async def get_suppression_status() -> dict[str, Any]:
             k: v.isoformat() for k, v in muted.items()
         },
     }
+
+
+@router.get("/notifications/deliveries")
+async def list_notification_deliveries(
+    status: str | None = "failed",
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List recent notification delivery records (defaults to failures).
+
+    Surfaces channel outages that would otherwise be silently swallowed, so a
+    persistently-down Slack/email/webhook is visible instead of dropping alerts.
+    """
+    from argus_agent.alerting.delivery import list_deliveries
+
+    deliveries = await list_deliveries(status=status, limit=limit)
+    return {"deliveries": deliveries, "count": len(deliveries)}
 
 
 @router.get("/budget")
@@ -471,28 +499,44 @@ async def token_budget_status() -> dict[str, Any]:
 
 
 @router.get("/investigations")
-async def list_investigations() -> dict[str, Any]:
-    """List recent AI investigations."""
-    from argus_agent.main import _get_alert_engine
+async def list_investigations(limit: int = 50) -> dict[str, Any]:
+    """List recent AI investigations from the database (most recent first).
 
-    engine = _get_alert_engine()
-    if engine is None:
-        return {"investigations": []}
+    Reads persisted Investigation records so the list reflects real investigations
+    and survives restarts, rather than ephemeral in-memory alerts.
+    """
+    from sqlalchemy import select
 
-    # For now, return alerts that triggered auto-investigation
-    alerts = engine.get_active_alerts(include_resolved=True)
-    investigations = []
-    for a in alerts:
-        if a.event.severity.value == "URGENT":
-            investigations.append({
-                "alert_id": a.id,
-                "trigger": a.event.message,
-                "severity": str(a.severity),
-                "timestamp": a.timestamp.isoformat(),
-                "resolved": a.resolved,
-            })
+    from argus_agent.storage.models import Investigation
+    from argus_agent.storage.repositories import get_session
+    from argus_agent.tenancy.context import get_tenant_id
 
-    return {"investigations": investigations}
+    limit = max(1, min(limit, 200))
+    try:
+        async with get_session() as session:
+            stmt = (
+                select(Investigation)
+                .where(Investigation.tenant_id == get_tenant_id())
+                .order_by(Investigation.created_at.desc())
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            investigations = [
+                {
+                    "id": r.id,
+                    "trigger": r.trigger,
+                    "summary": r.summary,
+                    "tokens_used": r.tokens_used,
+                    "service_name": r.service_name,
+                    "assigned_to": r.assigned_to,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+                }
+                for r in rows
+            ]
+        return {"investigations": investigations, "count": len(investigations)}
+    except Exception:
+        return {"investigations": [], "count": 0}
 
 
 @router.get("/security")
@@ -788,7 +832,7 @@ async def upsert_notification_setting(
         enabled=body.get("enabled", False),
         config=body.get("config", {}),
     )
-    await reload_channels()
+    await reload_channels(force=True)
     return result
 
 

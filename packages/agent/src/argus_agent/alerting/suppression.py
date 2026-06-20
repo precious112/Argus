@@ -1,8 +1,9 @@
-"""Suppression persistence service — CRUD for acknowledgments and mutes."""
+"""Suppression persistence service — CRUD for acknowledgments/silences and mutes."""
 
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,8 +36,13 @@ class SuppressionService:
         acknowledged_by: str = "user",
         reason: str = "",
         expires_at: datetime | None = None,
+        matchers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Create or update an acknowledgment for a dedup_key."""
+        """Create or update an acknowledgment/silence.
+
+        When *matchers* is provided, persists a label-based silence.
+        Falls back to legacy dedup_key storage otherwise.
+        """
         async with get_session() as session:
             stmt = select(AlertAcknowledgment).where(
                 AlertAcknowledgment.dedup_key == dedup_key,
@@ -53,14 +59,13 @@ class SuppressionService:
                         source=source,
                         acknowledged_by=acknowledged_by,
                         reason=reason,
+                        matchers=matchers,
                         expires_at=expires_at,
                         active=True,
                     )
                     session.add(row)
                     await session.commit()
                 except Exception:
-                    # Row exists but RLS hid it from SELECT —
-                    # fall back to a raw UPDATE that bypasses ORM.
                     await session.rollback()
                     await session.execute(
                         update(AlertAcknowledgment)
@@ -68,6 +73,7 @@ class SuppressionService:
                         .values(
                             acknowledged_by=acknowledged_by,
                             reason=reason,
+                            matchers=matchers,
                             expires_at=expires_at,
                             active=True,
                         )
@@ -76,11 +82,11 @@ class SuppressionService:
             else:
                 row.acknowledged_by = acknowledged_by
                 row.reason = reason
+                row.matchers = matchers
                 row.expires_at = expires_at
                 row.active = True
                 await session.commit()
 
-            # Re-fetch to return current state
             result = await session.execute(
                 select(AlertAcknowledgment).where(
                     AlertAcknowledgment.dedup_key == dedup_key,
@@ -202,18 +208,35 @@ class SuppressionService:
     # --- Startup loader ---
 
     async def load_into_engine(self, engine: Any) -> None:
-        """Load persisted acknowledgments and mutes into the in-memory engine."""
-        from argus_agent.alerting.engine import AlertEngine
+        """Load persisted acknowledgments/silences and mutes into the in-memory engine."""
+        from argus_agent.alerting.engine import AlertEngine, Silence
 
         if not isinstance(engine, AlertEngine):
             return
+
+        silence_count = 0
+        legacy_count = 0
 
         acks = await self.get_active_acknowledgments()
         for ack in acks:
             expires = None
             if ack["expires_at"]:
                 expires = _ensure_naive(datetime.fromisoformat(ack["expires_at"]))
-            engine._acknowledged_keys[ack["dedup_key"]] = expires
+
+            matchers = ack.get("matchers")
+            if matchers and isinstance(matchers, dict) and expires:
+                silence = Silence(
+                    id=str(uuid.uuid4()),
+                    matchers=matchers,
+                    expires_at=expires,
+                    created_by=ack.get("acknowledged_by", "user"),
+                    reason=ack.get("reason", ""),
+                )
+                engine.add_silence(silence)
+                silence_count += 1
+            else:
+                engine._acknowledged_keys[ack["dedup_key"]] = expires
+                legacy_count += 1
 
         mutes = await self.get_active_mutes()
         for mute in mutes:
@@ -221,8 +244,8 @@ class SuppressionService:
             engine._muted_rules[mute["rule_id"]] = expires
 
         logger.info(
-            "Loaded %d acknowledgments and %d mutes from DB",
-            len(acks), len(mutes),
+            "Loaded %d silences, %d legacy acks, and %d mutes from DB",
+            silence_count, legacy_count, len(mutes),
         )
 
     # --- Helpers ---
@@ -236,6 +259,7 @@ class SuppressionService:
             "source": row.source,
             "acknowledged_by": row.acknowledged_by,
             "reason": row.reason,
+            "matchers": row.matchers,
             "expires_at": row.expires_at.isoformat() if row.expires_at else None,
             "active": row.active,
             "created_at": row.created_at.isoformat() if row.created_at else None,

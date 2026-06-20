@@ -113,12 +113,22 @@ class EventClassifier:
                 event.message = rule.message_template.format(value=value)
                 event.type = _metric_to_event_type(metric_name)
                 event.data["value"] = value
+                event.labels = {
+                    "source": str(event.source),
+                    "type": event.type,
+                    "metric": metric_name,
+                }
                 return
             elif value >= rule.notable_threshold:
                 event.severity = EventSeverity.NOTABLE
                 event.message = rule.message_template.format(value=value)
                 event.type = _metric_to_event_type(metric_name)
                 event.data["value"] = value
+                event.labels = {
+                    "source": str(event.source),
+                    "type": event.type,
+                    "metric": metric_name,
+                }
                 return
 
     def add_threshold(self, rule: ThresholdRule) -> None:

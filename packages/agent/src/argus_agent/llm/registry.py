@@ -92,3 +92,10 @@ def _discover_providers() -> None:
         register_provider("gemini", GeminiProvider)
     except ImportError:
         pass
+
+    try:
+        from argus_agent.llm.vertex import VertexProvider
+
+        register_provider("vertex", VertexProvider)
+    except ImportError:
+        pass

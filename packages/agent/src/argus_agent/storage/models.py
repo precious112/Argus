@@ -187,7 +187,7 @@ class TokenUsage(Base):
 
 
 class AlertAcknowledgment(Base):
-    """Tracks acknowledged alert conditions at the dedup_key level."""
+    """Tracks acknowledged alert conditions via label-based silences or legacy dedup_key."""
 
     __tablename__ = "alert_acknowledgments"
 
@@ -198,6 +198,7 @@ class AlertAcknowledgment(Base):
     source: Mapped[str] = mapped_column(String(100), default="")
     acknowledged_by: Mapped[str] = mapped_column(String(100), default="user")
     reason: Mapped[str] = mapped_column(Text, default="")
+    matchers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
@@ -218,3 +219,26 @@ class AlertRuleMute(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class NotificationDelivery(Base):
+    """Record of a notification delivery outcome to an external channel.
+
+    Only failed deliveries are recorded (after retries are exhausted), so that a
+    Slack/email/webhook outage is visible and auditable instead of being silently
+    swallowed. Successful deliveries are not stored to keep writes off the hot path.
+    """
+
+    __tablename__ = "notification_deliveries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), default="default", index=True)
+    alert_id: Mapped[str] = mapped_column(String(36), default="", index=True)
+    channel: Mapped[str] = mapped_column(String(50), default="")  # slack, email, webhook
+    # kind: alert, urgent, digest, investigation
+    kind: Mapped[str] = mapped_column(String(30), default="alert")
+    severity: Mapped[str] = mapped_column(String(20), default="")
+    status: Mapped[str] = mapped_column(String(20), default="failed", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
