@@ -30,7 +30,7 @@
 - **Full-stack observability** — Logs, metrics, traces, errors, and security in one place
 - **Human-in-the-loop** — The agent proposes actions; you approve before anything executes
 - **Cost-controlled AI** — Token budgets with daily/hourly limits prevent runaway LLM spending
-- **LLM-agnostic** — Works with OpenAI, Anthropic, and Gemini — swap providers with one config change
+- **LLM-agnostic** — Works with OpenAI, Anthropic, Gemini, and Google Vertex AI — swap providers with one config change
 
 ## Features
 
@@ -95,11 +95,29 @@ docker compose -f docker/docker-compose.unified.yml up -d
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARGUS_LLM__PROVIDER` | `openai` | LLM provider: `openai`, `anthropic`, `gemini` |
-| `ARGUS_LLM__API_KEY` | — | **Required.** API key for your LLM provider |
+| `ARGUS_LLM__PROVIDER` | `openai` | LLM provider: `openai`, `anthropic`, `gemini`, `vertex` |
+| `ARGUS_LLM__API_KEY` | — | API key for your LLM provider — **required** except for `vertex`, which uses Google ADC |
 | `ARGUS_LLM__MODEL` | `gpt-4o` | Model name |
+| `ARGUS_LLM__VERTEX_PROJECT` | auto | `vertex` only — GCP project ID (auto-detected when running on a GCP VM) |
+| `ARGUS_LLM__VERTEX_LOCATION` | `us-central1` | `vertex` only — Vertex region; use `global` for the newest Gemini models |
+| `ARGUS_AI_BUDGET__HOURLY_TOKEN_LIMIT` | `500000` | Per-hour AI token cap (enforced mid-investigation; chat is never limited) |
 | `ARGUS_PUBLIC_URL` | — | Set for remote access, e.g. `http://192.168.1.50:7600` |
 | `ARGUS_CORS_ORIGINS` | auto | Custom CORS origins (auto-set when `ARGUS_PUBLIC_URL` is used) |
+
+#### Using Google Vertex AI (Gemini)
+
+Vertex authenticates with **Google Application Default Credentials (ADC)**, not an API key. On a GCP VM the container picks up the VM's attached service account automatically (no key file) — the service account needs `roles/aiplatform.user` and the VM the `cloud-platform` access scope. Use the same `docker run` as above, swapping the LLM env:
+
+```bash
+  -e ARGUS_LLM__PROVIDER=vertex \
+  -e ARGUS_LLM__MODEL=gemini-2.5-flash \
+  -e ARGUS_LLM__VERTEX_LOCATION=global \
+  -e ARGUS_LLM__VERTEX_PROJECT=your-gcp-project \
+  # (omit ARGUS_LLM__API_KEY — Vertex uses ADC)
+```
+
+- **Newer Gemini models** (e.g. `gemini-3.5-flash`) are only served from the `global` location — set `ARGUS_LLM__VERTEX_LOCATION=global`.
+- **Running off GCP?** Mount a service-account key: add `-v /path/to/key.json:/sa.json:ro -e GOOGLE_APPLICATION_CREDENTIALS=/sa.json`.
 
 ### User Management
 
@@ -300,8 +318,8 @@ app.get("/users", Argus.trace("get_users")((req, res) => {
 Copy `argus.example.yaml` to `argus.yaml`, or use environment variables with the `ARGUS_` prefix:
 
 ```bash
-export ARGUS_LLM__PROVIDER=openai      # openai, anthropic, gemini
-export ARGUS_LLM__API_KEY=sk-...
+export ARGUS_LLM__PROVIDER=openai      # openai, anthropic, gemini, vertex
+export ARGUS_LLM__API_KEY=sk-...       # not needed for vertex (uses Google ADC)
 export ARGUS_LLM__MODEL=gpt-4o
 export ARGUS_DEBUG=true
 ```

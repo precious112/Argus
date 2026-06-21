@@ -7,11 +7,14 @@ server:
   port: 7600
 
 llm:
-  provider: "openai"          # openai, anthropic, gemini
+  provider: "openai"          # openai, anthropic, gemini, vertex
   model: "gpt-4o"
-  api_key: ""                 # Or set ARGUS_LLM__API_KEY env var
+  api_key: ""                 # Or set ARGUS_LLM__API_KEY env var (not needed for vertex — uses Google ADC)
   temperature: 0.1
   max_tokens: 4096
+  # Vertex AI (provider: vertex) — authenticates via Google ADC, not api_key
+  vertex_project: ""              # GCP project ID (auto-detected when running on a GCP VM)
+  vertex_location: "us-central1"  # Vertex region; use "global" for the newest Gemini models
 
 ai_budget:
   daily_token_limit: 500000
