@@ -87,6 +87,45 @@ class EchoTool(Tool):
 
 
 @pytest.mark.asyncio
+async def test_budget_exhausted_stops_loop():
+    """A budgeted loop (e.g. an investigation) stops early when the token budget
+    is exhausted, instead of running every tool round and blowing past the limit."""
+    register_tool(EchoTool())
+    tool_resp = LLMResponse(
+        content="",
+        tool_calls=[{
+            "id": "1",
+            "type": "function",
+            "function": {"name": "echo", "arguments": json.dumps({"message": "x"})},
+        }],
+        finish_reason="tool_calls",
+        prompt_tokens=10,
+        completion_tokens=5,
+    )
+    # Without a budget this would loop for every available round.
+    provider = MockProvider([tool_resp] * MAX_TOOL_ROUNDS)
+
+    class _ExhaustedBudget:
+        def can_spend(self, estimated_tokens: int, priority: str = "normal") -> bool:
+            return False
+
+        def record_usage(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    agent = AgentLoop(
+        provider=provider,
+        memory=ConversationMemory(),
+        budget=_ExhaustedBudget(),
+        source="investigation",
+    )
+    result = await agent.run("investigate the error burst")
+
+    # Round 0 always runs (so we return *some* result); round 1 is gated → stop.
+    assert result.rounds < MAX_TOOL_ROUNDS
+    assert provider._call_count == 1  # only the first round hit the LLM
+
+
+@pytest.mark.asyncio
 async def test_simple_text_response():
     """Agent returns a plain text response (no tool calls)."""
     provider = MockProvider(

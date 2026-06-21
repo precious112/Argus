@@ -131,6 +131,10 @@ class AgentLoop:
         self._budget = budget  # Optional TokenBudget for background tasks
         self._client_type = client_type
         self._source = source
+        # Investigations may use the full budget (urgent); other background
+        # tasks (periodic review/digest) use the normal cap. Chat passes no
+        # budget (self._budget is None) and is therefore never limited.
+        self._budget_priority = "urgent" if source == "investigation" else "normal"
 
     async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit an event to the callback (e.g., WebSocket handler)."""
@@ -151,8 +155,24 @@ class AgentLoop:
         )
         tool_defs = get_tool_definitions()
 
+        last_round_tokens = 0
         for round_num in range(MAX_TOOL_ROUNDS):
             result.rounds = round_num + 1
+
+            # Budget enforcement: stop before starting another round once the
+            # token budget for this priority is exhausted. The first round always
+            # runs (so we return *some* result); later rounds are gated on whether
+            # another round the size of the last one still fits. Chat passes no
+            # budget, so it is never limited here.
+            if round_num > 0 and self._budget is not None:
+                estimate = last_round_tokens or 8000
+                if not self._budget.can_spend(estimate, priority=self._budget_priority):
+                    logger.info(
+                        "AI budget exhausted (%s, priority=%s) after %d round(s); "
+                        "stopping early",
+                        self._source, self._budget_priority, round_num,
+                    )
+                    break
 
             # Build context
             messages = self.memory.get_context_messages(system_prompt)
@@ -207,6 +227,7 @@ class AgentLoop:
             round_completion = result.completion_tokens - completion_before
 
             # Record token usage in budget (per-round, not cumulative)
+            last_round_tokens = round_prompt + round_completion
             if round_prompt or round_completion:
                 if self._budget:
                     self._budget.record_usage(

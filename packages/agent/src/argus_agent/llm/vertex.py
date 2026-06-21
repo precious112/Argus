@@ -16,6 +16,7 @@ auth, and tool/`Content` object construction that Vertex's typed SDK requires.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -27,12 +28,39 @@ from argus_agent.llm.base import LLMError, LLMMessage, LLMProvider, LLMResponse,
 from argus_agent.llm.gemini import (
     _MODEL_CONTEXT,
     _deep_convert,
-    _is_retryable,
     _messages_to_gemini,
     _strip_unsupported_schema_fields,
 )
 
 logger = logging.getLogger("argus.llm.vertex")
+
+# Per-minute Vertex quota can be tight (a multi-round agent investigation can
+# burst past it). On 429/UNAVAILABLE, wait long enough to cross the next minute
+# boundary before retrying so the call eventually succeeds instead of failing.
+_RETRY_DELAYS = [8.0, 20.0, 40.0]
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    """True for Vertex rate-limit / transient-availability errors (429/503)."""
+    try:
+        from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+
+        if isinstance(exc, (ResourceExhausted, ServiceUnavailable)):
+            return True
+    except ImportError:
+        pass
+    try:
+        import grpc
+
+        if isinstance(exc, grpc.aio.AioRpcError):
+            return exc.code() in (
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                grpc.StatusCode.UNAVAILABLE,
+            )
+    except Exception:
+        pass
+    s = str(exc)
+    return "RESOURCE_EXHAUSTED" in s or "429" in s
 
 
 def _tools_to_vertex(tools: list[ToolDefinition]) -> list[Any]:
@@ -113,6 +141,21 @@ class VertexProvider(LLMProvider):
             model_kwargs["system_instruction"] = system
         return self._GenerativeModel(self._model, **model_kwargs)
 
+    def _contents(self, messages: list[LLMMessage]) -> tuple[str, list[Any]]:
+        """Build (system, contents) as homogeneous Vertex ``Content`` objects.
+
+        Vertex's SDK rejects a contents list that mixes dicts and ``Content``
+        objects (unlike the native Gemini SDK, which is lenient). We reuse the
+        shared dict-based conversion, then promote each dict to a ``Content`` —
+        the stored raw model ``Content`` from a prior tool-call turn passes
+        through unchanged.
+        """
+        from vertexai.generative_models import Content
+
+        system, raw = _messages_to_gemini(messages)
+        contents = [Content.from_dict(c) if isinstance(c, dict) else c for c in raw]
+        return system, contents
+
     def _gen_config(self, kwargs: dict[str, Any]) -> Any:
         from vertexai.generative_models import GenerationConfig
 
@@ -121,6 +164,39 @@ class VertexProvider(LLMProvider):
             max_output_tokens=kwargs.get("max_tokens", self._config.max_tokens),
         )
 
+    async def _generate_with_retry(
+        self,
+        model: Any,
+        *,
+        contents: list[Any],
+        generation_config: Any,
+        tools: list[Any] | None,
+        stream: bool,
+    ) -> Any:
+        """Call generate_content_async, retrying on 429/UNAVAILABLE with backoff."""
+        last_exc: Exception | None = None
+        for attempt in range(len(_RETRY_DELAYS) + 1):
+            try:
+                return await model.generate_content_async(
+                    contents,
+                    generation_config=generation_config,
+                    tools=tools,
+                    stream=stream,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if _is_rate_limit(exc) and attempt < len(_RETRY_DELAYS):
+                    delay = _RETRY_DELAYS[attempt]
+                    logger.warning(
+                        "Vertex rate-limited (429/unavailable); retrying in %.0fs (attempt %d/%d)",
+                        delay, attempt + 1, len(_RETRY_DELAYS),
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
+
     async def complete(
         self,
         messages: list[LLMMessage],
@@ -128,19 +204,21 @@ class VertexProvider(LLMProvider):
         **kwargs: Any,
     ) -> LLMResponse:
         """Run a non-streaming completion."""
-        system, contents = _messages_to_gemini(messages)
+        system, contents = self._contents(messages)
         model = self._build_model(system)
         tools_arg = _tools_to_vertex(tools) if tools else None
 
         try:
-            response = await model.generate_content_async(
-                contents,
+            response = await self._generate_with_retry(
+                model,
+                contents=contents,
                 generation_config=self._gen_config(kwargs),
                 tools=tools_arg,
+                stream=False,
             )
         except Exception as exc:
             logger.error("Vertex AI error: %s", exc)
-            raise LLMError(str(exc), provider="vertex", retryable=_is_retryable(exc)) from exc
+            raise LLMError(str(exc), provider="vertex", retryable=_is_rate_limit(exc)) from exc
 
         text = ""
         tool_calls: list[dict[str, Any]] = []
@@ -190,20 +268,21 @@ class VertexProvider(LLMProvider):
         **kwargs: Any,
     ) -> AsyncIterator[LLMResponse]:
         """Run a streaming completion, yielding deltas."""
-        system, contents = _messages_to_gemini(messages)
+        system, contents = self._contents(messages)
         model = self._build_model(system)
         tools_arg = _tools_to_vertex(tools) if tools else None
 
         try:
-            response = await model.generate_content_async(
-                contents,
+            response = await self._generate_with_retry(
+                model,
+                contents=contents,
                 generation_config=self._gen_config(kwargs),
                 tools=tools_arg,
                 stream=True,
             )
         except Exception as exc:
             logger.error("Vertex AI error (stream): %s", exc)
-            raise LLMError(str(exc), provider="vertex", retryable=_is_retryable(exc)) from exc
+            raise LLMError(str(exc), provider="vertex", retryable=_is_rate_limit(exc)) from exc
 
         tool_calls: list[dict[str, Any]] = []
         raw_parts: list[Any] = []
